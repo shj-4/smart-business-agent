@@ -2,3 +2,13 @@ venv/
 .env
 __pycache__/
 *.pyc
+
+# بيانات وسجلات حساسة
+logs/
+data/
+run.log
+run_err.log
+*.log
+*.db
+*.sqlite
+*.sqlite3

@@ -1,27 +1,27 @@
-import os
 import json
 import logging
-from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
 )
 from app.ai_service import analyze_message, transcribe_audio
+from app.config import TELEGRAM_BOT_TOKEN as TOKEN
 from app.database.db import SessionLocal
-from app.database.crud import create_transaction, create_task, run_query
-
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+from app.database.crud import create_transaction, create_task, run_query, find_pending_task, complete_task
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# حالة المحادثة: بانتظار إكمال بيانات ناقصة
+ASK_MISSING = 1
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -31,13 +31,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أو سؤال (مثل: كم صرفت هذا الشهر؟)"
     )
 
-
 TYPE_NAMES = {
     "expense": "مصروف",
     "income": "إيراد",
     "task": "مهمة",
     "order": "طلبية",
     "note": "ملاحظة",
+    "complete_task": "إنجاز مهمة",
 }
 
 PERIOD_NAMES = {
@@ -54,6 +54,15 @@ METRIC_NAMES = {
     "count_transactions": "عدد العمليات",
     "list_tasks": "قائمة المهام",
     "list_overdue_tasks": "المهام المتأخرة",
+}
+
+# تسمية الحقول بلغة مفهومة عند المطالبة بإكمالها
+FIELD_LABELS = {
+    "amount": "المبلغ",
+    "currency": "العملة",
+    "person": "الشخص",
+    "description": "الوصف",
+    "date": "الموعد",
 }
 
 
@@ -120,69 +129,237 @@ def format_query_result(query_result: dict) -> str:
     line = f"{metric_label} {period_label}"
     if person:
         line += f" (خاص بـ {person})"
-    line += f": {result}"
+    if isinstance(result, dict):
+        if not result:
+            line += ": 0"
+        else:
+            currency_lines = [f"  {cur}: {amount}" for cur, amount in result.items()]
+            line += ":\n" + "\n".join(currency_lines)
+    else:
+        line += f": {result}"
     return line
 
 
-def process_user_text(user_text: str, telegram_user_id: int) -> str:
+def handle_query_intent(result: dict, telegram_user_id: int) -> str:
+    db = SessionLocal()
+    try:
+        query_result = run_query(db, telegram_user_id, result.get("query_details") or {})
+    finally:
+        db.close()
+    return format_query_result(query_result)
+
+
+def can_save_record(result: dict) -> bool:
+    """هل يحتوي السجل على الحد الأدنى من البيانات للحفظ؟"""
+    data_type = result.get("type")
+    if data_type in ("expense", "income"):
+        return result.get("amount") is not None
+    if data_type == "task":
+        return bool(result.get("description") or result.get("person"))
+    if data_type == "complete_task":
+        return bool(result.get("description"))
+    return False
+
+
+def save_record(db, telegram_user_id, result, raw_message) -> str | None:
+    """يحفظ السجل ويُرجع رسالة تأكيد، أو None إذا لم يكن قابلاً للحفظ."""
+    data_type = result.get("type")
+
+    if data_type in ("expense", "income") and result.get("amount") is not None:
+        create_transaction(db, telegram_user_id, result, raw_message)
+        return "تم حفظ العملية."
+
+    if data_type == "task" and (result.get("description") or result.get("person")):
+        create_task(db, telegram_user_id, result, raw_message)
+        return "تم حفظ المهمة."
+
+    if data_type == "complete_task":
+        description_hint = result.get("description")
+        if description_hint:
+            task = find_pending_task(db, telegram_user_id, description_hint)
+            if task:
+                complete_task(db, telegram_user_id, task.id)
+                return f"تم إنجاز المهمة: {task.description}"
+            return "لم أجد مهمة مطابقة ضمن مهامك المعلّقة."
+        return "حدد المهمة التي تريد إنجازها (مثلاً: أنجزت مهمة الاتصال بسامر)"
+
+    return None
+
+
+def missing_fields_for(result: dict) -> list:
+    """يرجع الحقول الإجبارية المتبقية (بالترتيب) اللازمة لإتمام الحفظ."""
+    data_type = result.get("type")
+    missing = []
+
+    if data_type in ("expense", "income"):
+        if result.get("amount") is None:
+            missing.append("amount")
+
+    elif data_type == "task":
+        # مهمة تحتاج وصفًا أو شخصًا على الأقل
+        if not result.get("description") and not result.get("person"):
+            missing.append("description")
+
+    elif data_type == "complete_task":
+        if not result.get("description"):
+            missing.append("description")
+
+    return missing
+
+
+def ask_for_field_prompt(data_type: str, field: str) -> str:
+    label = FIELD_LABELS.get(field, field)
+    type_label = TYPE_NAMES.get(data_type, data_type)
+    if field == "amount":
+        return f"عملية {type_label}: ما هو المبلغ؟ (مثال: 300 أو 300 شيكل)"
+    if field == "currency":
+        return f"ما هي العملة؟ (مثال: شيكل، دولار، دينار)"
+    if field == "person":
+        return f"ما اسم الشخص (المورد/العميل)؟ (مثال: محمد)"
+    if field == "date":
+        return f"ما هو الموعد؟ (مثال: غدًا الساعة 10)"
+    return f"أرسل {label} من فضلك."
+
+
+def handle_record_with_missing(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict):
+    """يبدأ محادثة لإكمال الحقول الناقصة بدلًا من إضاعة السجل."""
+    data_type = result.get("type")
+    missing = missing_fields_for(result)
+
+    context.user_data["pending_record"] = result
+    context.user_data["pending_type"] = data_type
+    context.user_data["pending_raw"] = update.message.text
+    context.user_data["pending_missing"] = missing
+
+    first = missing[0]
+    reply = (
+        f"سجّلت لك {TYPE_NAMES.get(data_type, data_type)} لكن تنقصه بيانات:\n"
+        f"• {FIELD_LABELS.get(first, first)}"
+    )
+    if len(missing) > 1:
+        reply += " (وبعدها أرجو إكمال بقية البنود)"
+    reply += "\n" + ask_for_field_prompt(data_type, first)
+    reply += "\n\n(لإلغاء الأمر أرسل /cancel)"
+    update.message.reply_text(reply)
+
+
+def fill_field_from_reply(partial: dict, reply_result: dict, field: str):
+    """يملأ الحقل الناقص بالقيمة المستخرجة من ردّ المستخدم."""
+    if field == "amount":
+        if reply_result.get("amount") is not None:
+            partial["amount"] = reply_result["amount"]
+        # إن ذكر المستخدم عملة ضمن ردّه نملأها أيضًا
+        if reply_result.get("currency") and not partial.get("currency"):
+            partial["currency"] = reply_result["currency"]
+    elif field == "currency":
+        if reply_result.get("currency"):
+            partial["currency"] = reply_result["currency"]
+    elif field == "person":
+        if reply_result.get("person"):
+            partial["person"] = reply_result["person"]
+    elif field == "description":
+        # للمهام: نقبل الوصف أو الشخص كمُحدِّد كافٍ للحفظ
+        if reply_result.get("description"):
+            partial["description"] = reply_result["description"]
+        elif reply_result.get("person"):
+            partial["person"] = reply_result["person"]
+    elif field == "date":
+        if reply_result.get("date"):
+            partial["date"] = reply_result["date"]
+
+
+async def conversation_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نقطة الدخول: تحلل الرسالة وتقرر بدء محادثة إكمال أو إنهاء فورًا."""
+    user_text = update.message.text
+    telegram_user_id = update.effective_user.id
     result = analyze_message(user_text)
     logger.info(f"نتيجة التحليل: {json.dumps(result, ensure_ascii=False)}")
 
     intent = result.get("intent")
 
     if intent == "record":
-        saved = False
         data_type = result.get("type")
 
-        if data_type in ("expense", "income") and result.get("amount") is not None:
+        if data_type in ("complete_task",):
             db = SessionLocal()
             try:
-                create_transaction(db, telegram_user_id, result, user_text)
-                saved = True
+                reply = save_record(db, telegram_user_id, result, user_text)
             finally:
                 db.close()
+            update.message.reply_text(reply)
+            return ConversationHandler.END
 
-        elif data_type == "task" and (result.get("description") or result.get("person")):
-            db = SessionLocal()
-            try:
-                create_task(db, telegram_user_id, result, user_text)
-                saved = True
-            finally:
-                db.close()
+        missing = missing_fields_for(result)
+        if missing:
+            handle_record_with_missing(update, context, result)
+            return ASK_MISSING
 
-        reply = format_record_result(result, saved)
-
-    elif intent == "query":
         db = SessionLocal()
         try:
-            query_result = run_query(db, telegram_user_id, result.get("query_details") or {})
+            reply = save_record(db, telegram_user_id, result, user_text) or "تم الحفظ."
         finally:
             db.close()
-        reply = format_query_result(query_result)
+        update.message.reply_text(reply)
+        return ConversationHandler.END
 
-    elif intent == "chat":
-        reply = "أهلًا! يمكنك إرسال عملية أو سؤال عن بياناتك."
+    elif intent == "query":
+        reply = handle_query_intent(result, telegram_user_id)
+        update.message.reply_text(reply)
+        return ConversationHandler.END
 
     else:
-        reply = "لم أفهم رسالتك، حاول مرة أخرى."
+        update.message.reply_text("أهلًا! يمكنك إرسال عملية أو سؤال عن بياناتك.")
+        return ConversationHandler.END
 
-    return reply
 
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
+async def collect_missing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستلم ردّ المستخدم لإكمال الحقل الناقص."""
     telegram_user_id = update.effective_user.id
-    logger.info(f"رسالة من المستخدم {telegram_user_id}: {user_text}")
+    partial = context.user_data.get("pending_record")
+    data_type = context.user_data.get("pending_type")
+    raw = context.user_data.get("pending_raw")
 
-    await update.message.chat.send_action(action="typing")
+    if not partial or not data_type:
+        update.message.reply_text("أعتذر، انتهت جلسة الإكمال. أرسل العملية من جديد من فضلك.")
+        context.user_data.clear()
+        return ConversationHandler.END
 
+    # تحليل ردّ المستخدم لاستخراج الحقل الناقص
+    reply_result = analyze_message(update.message.text)
+
+    missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
+    # نملأ الحقل الحالي (والأكثر أهمية أولًا)
+    field = missing[0]
+    fill_field_from_reply(partial, reply_result, field)
+
+    # نعيد حساب المتبقي
+    remaining = missing_fields_for(partial)
+    context.user_data["pending_missing"] = remaining
+
+    if remaining:
+        first = remaining[0]
+        update.message.reply_text(
+            "لا يزال يلزم:\n"
+            f"• {FIELD_LABELS.get(first, first)}\n"
+            + ask_for_field_prompt(data_type, first)
+        )
+        return ASK_MISSING
+
+    # اكتملت البيانات — نحفظ
+    db = SessionLocal()
     try:
-        reply = process_user_text(user_text, telegram_user_id)
-    except Exception as e:
-        logger.error(f"خطأ في معالجة الرسالة: {e}")
-        reply = "حدث خطأ أثناء معالجة رسالتك، حاول مرة أخرى"
+        reply = save_record(db, telegram_user_id, partial, raw) or "تم الحفظ."
+    finally:
+        db.close()
+    context.user_data.clear()
+    update.message.reply_text(reply)
+    return ConversationHandler.END
 
-    await update.message.reply_text(reply)
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("أُلغيت العملية. يمكنك إرسال عملية جديدة متى شئت.")
+    return ConversationHandler.END
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -199,18 +376,39 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("لم أستطع فهم الصوت، حاول مرة أخرى أو أرسل نصًا.")
             return
 
-        reply = process_user_text(text, telegram_user_id)
+        result = analyze_message(text)
+        intent = result.get("intent")
+
+        if intent == "record":
+            db = SessionLocal()
+            try:
+                reply = save_record(db, telegram_user_id, result, text) or "تم الحفظ."
+            finally:
+                db.close()
+        elif intent == "query":
+            reply = handle_query_intent(result, telegram_user_id)
+        else:
+            reply = "أهلًا! يمكنك إرسال عملية أو سؤال عن بياناتك."
+        await update.message.reply_text(reply)
     except Exception as e:
         logger.error(f"خطأ في معالجة الصوت: {e}")
         reply = "حدث خطأ أثناء معالجة الرسالة الصوتية، حاول مرة أخرى"
-
-    await update.message.reply_text(reply)
+        await update.message.reply_text(reply)
 
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_entry)],
+            states={
+                ASK_MISSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_missing)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+            allow_reentry=True,
+        )
+    )
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     logger.info("البوت يعمل الآن... اضغط CTRL+C للإيقاف")
     app.run_polling()

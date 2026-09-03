@@ -1,12 +1,9 @@
-import os
 import json
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from app.config import GEMINI_API_KEY
 
-load_dotenv()
-
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 STT_PROMPT = """
 أعد كتابة الكلام في هذا الملف الصوتي كنص مكتوب حرفيًا (نص فقط، بدون أي شرح أو مقدمة أو علامات اقتباس).
@@ -21,7 +18,7 @@ SYSTEM_PROMPT = """
 
 {
   "intent": "record" | "query" | "chat",
-  "type": "expense" | "income" | "task" | "order" | "note" | "unknown",
+  "type": "expense" | "income" | "task" | "order" | "note" | "complete_task" | "unknown",
   "amount": number | null,
   "currency": string | null,
   "person": string | null,
@@ -43,7 +40,8 @@ SYSTEM_PROMPT = """
 قواعد تحديد type (فقط عندما intent = "record"):
 - دفع مبلغ لمورد → "expense"
 - استلام مبلغ من عميل → "income"
-- مهمة أو تذكير → "task"
+- مهمة أو تذكير جديد → "task"
+- إنهاء/إنجاز مهمة موجودة → "complete_task" + ضع وصف المهمة في "description"
 - طلبية من/إلى عميل أو مورد → "order"
 - معلومة عامة يريد حفظها → "note"
 - غير واضح → "unknown"
@@ -68,6 +66,8 @@ SYSTEM_PROMPT = """
 "ما هي مهامي؟" → intent: query, query_details: {metric: list_tasks, period: all_time, person: null}
 "شو المهام المتأخرة؟" → intent: query, query_details: {metric: list_overdue_tasks, period: all_time, person: null}
 "مرحبا" → intent: chat
+"أنجزت مهمة الاتصال بسامر" → intent: record, type: complete_task, description: "الاتصال بسامر"
+"خلصت المهمة اللي بعنوانها شراء مواد" → intent: record, type: complete_task, description: "شراء مواد"
 
 تذكير: أي رسالة يُقصد بها السؤال عن إجمالي/كمية/ملخص للبيانات المخزنة فهي intent=query، ولا تنسَ ملء metric وperiod وperson بدقة ودائمًا.
 """

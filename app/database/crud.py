@@ -62,6 +62,44 @@ def list_overdue_tasks(db: Session, telegram_user_id: int):
     )
 
 
+def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
+    now = datetime.utcnow()
+    updated = db.query(Task).filter(
+        Task.telegram_user_id == telegram_user_id,
+        Task.status == "pending",
+        Task.due_date != None,  # noqa: E711
+        Task.due_date < now,
+    ).update({"status": "overdue"})
+    db.commit()
+    return updated
+
+
+def find_pending_task(db: Session, telegram_user_id: int, description_hint: str) -> Task | None:
+    return (
+        db.query(Task)
+        .filter(
+            Task.telegram_user_id == telegram_user_id,
+            Task.status == "pending",
+            Task.description.ilike(f"%{description_hint}%"),
+        )
+        .order_by(Task.created_at.desc())
+        .first()
+    )
+
+
+def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | None:
+    task = db.query(Task).filter(
+        Task.id == task_id,
+        Task.telegram_user_id == telegram_user_id,
+    ).first()
+    if task and task.status == "pending":
+        task.status = "done"
+        db.commit()
+        db.refresh(task)
+        return task
+    return None
+
+
 def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_message: str) -> Transaction:
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
@@ -78,22 +116,23 @@ def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_messa
     return transaction
 
 
-def get_monthly_total(db: Session, telegram_user_id: int, transaction_type: str) -> float:
+def get_monthly_total(db: Session, telegram_user_id: int, transaction_type: str) -> dict:
     from datetime import datetime
     from sqlalchemy import func, extract
 
     now = datetime.utcnow()
-    total = (
-        db.query(func.sum(Transaction.amount))
+    rows = (
+        db.query(Transaction.currency, func.sum(Transaction.amount))
         .filter(
             Transaction.telegram_user_id == telegram_user_id,
             Transaction.type == transaction_type,
             extract("year", Transaction.created_at) == now.year,
             extract("month", Transaction.created_at) == now.month,
         )
-        .scalar()
+        .group_by(Transaction.currency)
+        .all()
     )
-    return total or 0.0
+    return {row[0] or "غير محددة": row[1] for row in rows}
 
 
 def get_period_range(period: str):
@@ -123,6 +162,7 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
 
     # معالجة الاستعلام عن المهام
     if metric in ("list_tasks", "list_overdue_tasks"):
+        mark_overdue_tasks(db, telegram_user_id)
         if metric == "list_tasks":
             tasks = list_pending_tasks(db, telegram_user_id)
         else:
@@ -150,12 +190,14 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
 
     if metric == "total_expenses":
         q = q.filter(Transaction.type == "expense")
-        total = q.with_entities(func.sum(Transaction.amount)).scalar() or 0
+        rows = q.with_entities(Transaction.currency, func.sum(Transaction.amount)).group_by(Transaction.currency).all()
+        total = {row[0] or "غير محددة": row[1] for row in rows}
         return {"metric": metric, "period": period, "person": person, "result": total}
 
     elif metric == "total_income":
         q = q.filter(Transaction.type == "income")
-        total = q.with_entities(func.sum(Transaction.amount)).scalar() or 0
+        rows = q.with_entities(Transaction.currency, func.sum(Transaction.amount)).group_by(Transaction.currency).all()
+        total = {row[0] or "غير محددة": row[1] for row in rows}
         return {"metric": metric, "period": period, "person": person, "result": total}
 
     elif metric == "count_transactions":
