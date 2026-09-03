@@ -74,10 +74,15 @@ SYSTEM_PROMPT = """
 
 
 def analyze_message(text: str) -> dict:
-    from datetime import datetime
+    from app.timeutil import now_local
 
-    today = datetime.utcnow()
-    date_reference = f"التاريخ المرجعي اليوم: {today.strftime('%Y-%m-%d %H:%M')}"
+    # التاريخ المرجعي يُرسل بالتوقيت المحلي (فلسطين) حتى يُحسب "غدًا"/"هذا الأسبوع"
+    # وفق زمن المستخدم الفعلي، لا زمن UTC (لتجنّب انزياح بضع ساعات قرب منتصف الليل).
+    today = now_local()
+    date_reference = (
+        f"التاريخ المرجعي اليوم (بالتوقيت المحلي لفلسطين / {today.tzinfo}): "
+        f"{today.strftime('%Y-%m-%d %H:%M')}"
+    )
     response = client.models.generate_content(
         model="gemini-3.1-flash-lite",
         contents=f"{date_reference}\n\n{SYSTEM_PROMPT}\n\nرسالة المستخدم: {text}",
@@ -89,9 +94,13 @@ def analyze_message(text: str) -> dict:
     raw_text = response.text.strip()
     raw_text = raw_text.replace("```json", "").replace("```", "").strip()
     try:
-        return json.loads(raw_text)
+        parsed = json.loads(raw_text)
     except json.JSONDecodeError:
-        return {"intent": "unknown", "error": "failed_to_parse", "raw": raw_text}
+        parsed = {"intent": "unknown", "error": "failed_to_parse", "raw": raw_text}
+    # تحقق من صحة البنية وتصحيح الأنواع (لا نثق باستجابة الـ AI)
+    from app.schemas import normalize_analysis
+
+    return normalize_analysis(parsed)
 
 
 def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from dateutil import parser as date_parser
@@ -6,21 +6,24 @@ from app.database.models import Transaction, Task
 
 
 def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str) -> Task:
+    from app.timeutil import to_utc_naive
+
     description = data.get("description") or data.get("raw") or raw_message
     due_date_str = data.get("date")
     due_date = None
     if due_date_str:
-        # GitHub: أولاً جرب ISO، ثم dateutil المرن
+        # Gemini يُرجع التواريخ بالتوقيت المحلي؛ نخزّنها كـ UTC للمقارنة الموحّدة
         try:
             due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
-            # ننشئ datetime بدون tz لتوحيد المقارنة
-            if due_date.tzinfo is not None:
-                due_date = due_date.replace(tzinfo=None)
+            if due_date.tzinfo is None:
+                # بلا منطقة زمنية صريحة → نعتبرها بالتوقيت المحلي (فلسطين)
+                due_date = to_utc_naive(due_date)
         except Exception:
             try:
-                due_date = date_parser.parse(due_date_str)
-                if due_date.tzinfo is not None:
-                    due_date = due_date.replace(tzinfo=None)
+                parsed = date_parser.parse(due_date_str)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=None)
+                due_date = to_utc_naive(parsed)
             except Exception:
                 due_date = None
 
@@ -38,32 +41,49 @@ def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str
     return task
 
 
-def list_pending_tasks(db: Session, telegram_user_id: int):
+def _person_filter(person: str | None):
+    """فلترة SQL حسب الشخص (بمطابقة جزئية تشبه المعاملات)."""
+    if person:
+        return Task.person.like(f"%{person}%")
+    return None
+
+
+def list_pending_tasks(db: Session, telegram_user_id: int, person: str | None = None):
+    filters = [Task.telegram_user_id == telegram_user_id, Task.status == "pending"]
+    pf = _person_filter(person)
+    if pf is not None:
+        filters.append(pf)
     return (
         db.query(Task)
-        .filter(Task.telegram_user_id == telegram_user_id, Task.status == "pending")
+        .filter(*filters)
         .order_by(Task.due_date.asc().nulls_last())
         .all()
     )
 
 
-def list_overdue_tasks(db: Session, telegram_user_id: int):
-    now = datetime.utcnow()
+def list_overdue_tasks(db: Session, telegram_user_id: int, person: str | None = None):
+    # تُرجع المهام المسجَّلة كمتأخرة (status == "overdue") — بعد أن
+    # يقوم mark_overdue_tasks بتحديثها. (لا نعتمد على status == "pending"
+    # لأنه لا يأتي بالنتائج بعد التحديث.)
+    filters = [
+        Task.telegram_user_id == telegram_user_id,
+        Task.status == "overdue",
+    ]
+    pf = _person_filter(person)
+    if pf is not None:
+        filters.append(pf)
     return (
         db.query(Task)
-        .filter(
-            Task.telegram_user_id == telegram_user_id,
-            Task.status == "pending",
-            Task.due_date != None,  # noqa: E711
-            Task.due_date < now,
-        )
+        .filter(*filters)
         .order_by(Task.due_date.asc())
         .all()
     )
 
 
 def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
-    now = datetime.utcnow()
+    from app.timeutil import now_utc
+
+    now = now_utc()
     updated = db.query(Task).filter(
         Task.telegram_user_id == telegram_user_id,
         Task.status == "pending",
@@ -117,17 +137,24 @@ def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_messa
 
 
 def get_monthly_total(db: Session, telegram_user_id: int, transaction_type: str) -> dict:
-    from datetime import datetime
-    from sqlalchemy import func, extract
+    from app.timeutil import now_local, to_utc_naive
+    from dateutil.relativedelta import relativedelta
 
-    now = datetime.utcnow()
+    local_now = now_local()
+    # حدود الشهر الميلادي حسب التوقيت المحلي (وليس UTC) لتفادي انزياح الشهر
+    local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    local_end = (local_start + relativedelta(months=1))
+
+    start_utc = to_utc_naive(local_start)
+    end_utc = to_utc_naive(local_end)
+
     rows = (
         db.query(Transaction.currency, func.sum(Transaction.amount))
         .filter(
             Transaction.telegram_user_id == telegram_user_id,
             Transaction.type == transaction_type,
-            extract("year", Transaction.created_at) == now.year,
-            extract("month", Transaction.created_at) == now.month,
+            Transaction.created_at >= start_utc,
+            Transaction.created_at < end_utc,
         )
         .group_by(Transaction.currency)
         .all()
@@ -136,24 +163,30 @@ def get_monthly_total(db: Session, telegram_user_id: int, transaction_type: str)
 
 
 def get_period_range(period: str):
-    from datetime import datetime, timedelta
+    from app.timeutil import now_local, to_utc_naive
 
-    now = datetime.utcnow()
+    local_now = now_local()
+
     if period == "today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_week":
-        start = now - timedelta(days=now.weekday())
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_start = local_now - timedelta(days=local_now.weekday())
+        local_start = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_year":
-        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        local_start = local_now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     else:  # all_time
-        start = None
-    return start, now
+        local_start = None
+
+    # القيم المخزنة بصيغة UTC → نحوّل حدود الفترة المحلية إلى UTC للمقارنة الصحيحة
+    start = to_utc_naive(local_start) if local_start is not None else None
+    return start, None
 
 
 def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
+    from app.timeutil import to_local_naive
+
     metric = query_details.get("metric")
     period = query_details.get("period") or "all_time"
     person = query_details.get("person")
@@ -164,18 +197,17 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     if metric in ("list_tasks", "list_overdue_tasks"):
         mark_overdue_tasks(db, telegram_user_id)
         if metric == "list_tasks":
-            tasks = list_pending_tasks(db, telegram_user_id)
+            tasks = list_pending_tasks(db, telegram_user_id, person)
         else:
-            tasks = list_overdue_tasks(db, telegram_user_id)
-        if person:
-            tasks = [t for t in tasks if t.person and person in t.person]
+            tasks = list_overdue_tasks(db, telegram_user_id, person)
         result = [
             {
                 "id": t.id,
                 "description": t.description,
                 "person": t.person,
                 "status": t.status,
-                "due_date": t.due_date.strftime("%Y-%m-%d %H:%M") if t.due_date else None,
+                # معروض بالتوقيت المحلي (قيم المخزن UTC)
+                "due_date": to_local_naive(t.due_date).strftime("%Y-%m-%d %H:%M") if t.due_date else None,
             }
             for t in tasks
         ]
