@@ -1,37 +1,80 @@
+import re
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from dateutil import parser as date_parser
-from app.database.models import Transaction, Task
+from app.database.models import Transaction, Task, Note
+
+# تطبيع العملة نحو رموز ISO 4217 (مناسبة للشيقل والدولار في فلسطين)
+CURRENCY_ALIASES = {
+    "شيكل": "ILS", "الشيكل": "ILS", "شواكل": "ILS", "شيقل": "ILS",
+    "شياقل": "ILS", "شيقلا": "ILS", "₪": "ILS", "nis": "ILS", "₪:": "ILS",
+    "shekel": "ILS", "shekels": "ILS", "ils": "ILS",
+    "دولار": "USD", "الدولار": "USD", "دولارات": "USD", "$": "USD",
+    "usd": "USD", "dollar": "USD", "dollars": "USD",
+    "دينار": "JOD", "الدينار": "JOD", "دنانير": "JOD", "jd": "JOD",
+    "يورو": "EUR", "€": "EUR", "euro": "EUR", "eur": "EUR",
+}
 
 
-def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str) -> Task:
-    from app.timeutil import to_utc_naive
+def normalize_currency(raw: str | None) -> str | None:
+    """يحوّل أي صيغة عملة إلى رمز ISO موحّد (ILS لشيقل، USD لدولار...)."""
+    if not raw:
+        return None
+    key = raw.strip().lower().replace(" ", "")
+    if key in CURRENCY_ALIASES:
+        return CURRENCY_ALIASES[key]
+    # تطابق جزئي (مثل "شيكل جديد", "دولار امريكي")
+    for alias, code in CURRENCY_ALIASES.items():
+        if alias in raw:
+            return code
+    return raw.strip() or None
 
-    description = data.get("description") or data.get("raw") or raw_message
-    due_date_str = data.get("date")
-    due_date = None
-    if due_date_str:
-        # Gemini يُرجع التواريخ بالتوقيت المحلي؛ نخزّنها كـ UTC للمقارنة الموحّدة
-        try:
-            due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
-            if due_date.tzinfo is None:
-                # بلا منطقة زمنية صريحة → نعتبرها بالتوقيت المحلي (فلسطين)
-                due_date = to_utc_naive(due_date)
-        except Exception:
-            try:
-                parsed = date_parser.parse(due_date_str)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=None)
-                due_date = to_utc_naive(parsed)
-            except Exception:
-                due_date = None
+
+MAX_DESCRIPTION_LEN = 500  # حد أقصى لطول النصوص الحرة (الوصف/الطلبية/الملاحظة)
+
+
+def _clean_text(value) -> str | None:
+    """ينظّف نصًا حرًا: يقلّص المسافات ويحدّ طوله (أو يعيد None)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    return s[:MAX_DESCRIPTION_LEN]
+
+
+def _clean_person(value) -> str | None:
+    """ينظّف حقل الشخص: نص فاضي → None (حتى لا يكسر فلترة person في الاستعلامات)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _is_duplicate_message(db: Session, model, telegram_user_id: int, telegram_message_id: int | None) -> bool:
+    """يتحقق هل تم تسجيل نفس الرسالة مسبقًا (idempotency)."""
+    if telegram_message_id is None:
+        return False
+    return db.query(model).filter(
+        model.telegram_user_id == telegram_user_id,
+        model.telegram_message_id == telegram_message_id,
+    ).first() is not None
+
+
+def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str,
+                telegram_message_id: int | None = None) -> Task | None:
+    if _is_duplicate_message(db, Task, telegram_user_id, telegram_message_id):
+        return None
+
+    due_date = parse_date_local(data.get("date")) if data.get("date") else None
 
     task = Task(
         telegram_user_id=telegram_user_id,
-        description=description,
+        telegram_message_id=telegram_message_id,
+        description=_clean_text(data.get("description") or data.get("raw") or raw_message) or "مهمة",
         due_date=due_date,
-        person=data.get("person"),
+        person=_clean_person(data.get("person")),
         status="pending",
         raw_message=raw_message,
     )
@@ -120,12 +163,52 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
     return None
 
 
-def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_message: str) -> Transaction:
+def parse_date_local(date_str: str) -> datetime | None:
+    """يحوّل نص تاريخ (صيغة ISO أو صيغة مرنة) إلى datetime بالتوقيت المحلي (UTC).
+
+    يتوافق مع كل إصدارات بايثون: نجرب أولاً صيغة صريحة "YYYY-MM-DD HH:MM[:SS]"
+    ثم dateutil المرن. القيمة الناتجة تُعتبر بالتوقيت المحلي وتُرجع كـ UTC.
+    """
+    from app.timeutil import to_utc_naive
+
+    if not date_str:
+        return None
+    s = date_str.strip().replace("Z", "+00:00")
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d",
+    ]
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(s, fmt)
+            return to_utc_naive(parsed)
+        except ValueError:
+            continue
+    # معالجة أي جزء زمني صريح (+00:00 إلخ)
+    try:
+        parsed = datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            parsed = date_parser.parse(s)
+        except Exception:
+            return None
+    return to_utc_naive(parsed)
+
+
+def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_message: str,
+                       telegram_message_id: int | None = None) -> Transaction | None:
+    if _is_duplicate_message(db, Transaction, telegram_user_id, telegram_message_id):
+        return None
+
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
+        telegram_message_id=telegram_message_id,
         type=data.get("type"),
         amount=data.get("amount"),
-        currency=data.get("currency"),
+        currency=normalize_currency(data.get("currency")),
         person=data.get("person"),
         description=data.get("description"),
         raw_message=raw_message,
@@ -136,30 +219,24 @@ def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_messa
     return transaction
 
 
-def get_monthly_total(db: Session, telegram_user_id: int, transaction_type: str) -> dict:
-    from app.timeutil import now_local, to_utc_naive
-    from dateutil.relativedelta import relativedelta
+def create_note(db: Session, telegram_user_id: int, data: dict, raw_message: str,
+                telegram_message_id: int | None = None) -> Note | None:
+    """يخزّن الطلبيات والملاحظات (order / note) بدل إضاعتها بصمت."""
+    if _is_duplicate_message(db, Note, telegram_user_id, telegram_message_id):
+        return None
 
-    local_now = now_local()
-    # حدود الشهر الميلادي حسب التوقيت المحلي (وليس UTC) لتفادي انزياح الشهر
-    local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    local_end = (local_start + relativedelta(months=1))
-
-    start_utc = to_utc_naive(local_start)
-    end_utc = to_utc_naive(local_end)
-
-    rows = (
-        db.query(Transaction.currency, func.sum(Transaction.amount))
-        .filter(
-            Transaction.telegram_user_id == telegram_user_id,
-            Transaction.type == transaction_type,
-            Transaction.created_at >= start_utc,
-            Transaction.created_at < end_utc,
-        )
-        .group_by(Transaction.currency)
-        .all()
+    note = Note(
+        telegram_user_id=telegram_user_id,
+        telegram_message_id=telegram_message_id,
+        note_type=data.get("type"),  # order | note
+        description=data.get("description") or data.get("raw") or raw_message,
+        person=data.get("person"),
+        raw_message=raw_message,
     )
-    return {row[0] or "غير محددة": row[1] for row in rows}
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return note
 
 
 def get_period_range(period: str):

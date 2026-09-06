@@ -5,6 +5,9 @@ from app.config import GEMINI_API_KEY
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# نموذج Gemini المستخدم للتحليل ونسخ الصوت (متحقق من توفره في الـ API)
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+
 STT_PROMPT = """
 أعد كتابة الكلام في هذا الملف الصوتي كنص مكتوب حرفيًا (نص فقط، بدون أي شرح أو مقدمة أو علامات اقتباس).
 حافظ على الصياغة كما قالها المتحدث وبنفس اللغة. إذا كان الكلام بالعربية أعد النص بالعربية.
@@ -84,8 +87,9 @@ def analyze_message(text: str) -> dict:
         f"{today.strftime('%Y-%m-%d %H:%M')}"
     )
     response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
-        contents=f"{date_reference}\n\n{SYSTEM_PROMPT}\n\nرسالة المستخدم: {text}",
+        model=GEMINI_MODEL,
+        # النظام في system_instruction فقط (لا نكرره داخل contents لتفادي ازدواجية الـ tokens)
+        contents=f"{date_reference}\n\nرسالة المستخدم: {text}",
         config={
             "safety_settings": [],
             "system_instruction": SYSTEM_PROMPT,
@@ -105,7 +109,7 @@ def analyze_message(text: str) -> dict:
 
 def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
+        model=GEMINI_MODEL,
         contents=[
             STT_PROMPT,
             types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),

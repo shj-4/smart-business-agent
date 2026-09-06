@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import TELEGRAM_BOT_TOKEN
 from app.database.db import get_db, engine
-from app.database.models import Transaction, Task
+from app.database.models import Transaction, Task, Note
 
 app = FastAPI(
     title="Smart Business Agent API",
@@ -39,9 +39,19 @@ async def root():
 
 
 @app.get("/health")
-async def health():
-    """فحص بسيط لمدى استجابة التطبيق (بدون لمس قاعدة البيانات)."""
-    return {"status": "healthy"}
+async def health(db: Session = Depends(get_db)):
+    """فحص حقيقي: اتصال قاعدة البيانات + صحة الجداول الأساسية."""
+    db_ok = False
+    try:
+        db.execute(func.count(Transaction.id))
+        db_ok = True
+    except Exception:
+        pass
+
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "database": "connected" if db_ok else "disconnected",
+    }
 
 
 @app.get("/status")
@@ -68,6 +78,7 @@ async def status(db: Session = Depends(get_db)):
         "counts": {
             "transactions": db.query(func.count(Transaction.id)).scalar() if db_ok else None,
             "tasks": db.query(func.count(Task.id)).scalar() if db_ok else None,
+            "notes": db.query(func.count(Note.id)).scalar() if db_ok else None,
         },
     }
 
