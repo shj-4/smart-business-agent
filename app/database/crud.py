@@ -1,7 +1,9 @@
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from dateutil import parser as date_parser
 from app.database.models import Transaction, Task, Note
 
@@ -52,6 +54,20 @@ def _clean_person(value) -> str | None:
     return s or None
 
 
+def _to_decimal(value) -> Decimal | None:
+    """يحوّل المبلغ إلى Decimal بدقة نقطتين عشريتين (برای تجنّب أخطاء تقريب float).
+
+    الحقل amount معرّف بـ Numeric(12,2) في قاعدة البيانات؛ استخدام float مباشرة
+    قد يُدخل قيمًا مثل 0.30000000000000004. نحوّل هنا عبر Decimal مع تقريب مصرفي.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 def _is_duplicate_message(db: Session, model, telegram_user_id: int, telegram_message_id: int | None) -> bool:
     """يتحقق هل تم تسجيل نفس الرسالة مسبقًا (idempotency)."""
     if telegram_message_id is None:
@@ -60,6 +76,19 @@ def _is_duplicate_message(db: Session, model, telegram_user_id: int, telegram_me
         model.telegram_user_id == telegram_user_id,
         model.telegram_message_id == telegram_message_id,
     ).first() is not None
+
+
+def soft_delete_last(db: Session, model, telegram_user_id: int) -> object | None:
+    """يرجّع آخر سجل غير محذوف للمستخدم، أو None. (لأمر /undo)"""
+    return (
+        db.query(model)
+        .filter(
+            model.telegram_user_id == telegram_user_id,
+            model.deleted_at.is_(None),
+        )
+        .order_by(model.id.desc())
+        .first()
+    )
 
 
 def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str,
@@ -79,7 +108,11 @@ def create_task(db: Session, telegram_user_id: int, data: dict, raw_message: str
         raw_message=raw_message,
     )
     db.add(task)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
     db.refresh(task)
     return task
 
@@ -91,8 +124,8 @@ def _person_filter(person: str | None):
     return None
 
 
-def list_pending_tasks(db: Session, telegram_user_id: int, person: str | None = None):
-    filters = [Task.telegram_user_id == telegram_user_id, Task.status == "pending"]
+def list_pending_tasks(db: Session, telegram_user_id: int, person: str | None = None, limit: int = 50):
+    filters = [Task.telegram_user_id == telegram_user_id, Task.status == "pending", Task.deleted_at.is_(None)]
     pf = _person_filter(person)
     if pf is not None:
         filters.append(pf)
@@ -100,17 +133,19 @@ def list_pending_tasks(db: Session, telegram_user_id: int, person: str | None = 
         db.query(Task)
         .filter(*filters)
         .order_by(Task.due_date.asc().nulls_last())
+        .limit(limit)
         .all()
     )
 
 
-def list_overdue_tasks(db: Session, telegram_user_id: int, person: str | None = None):
+def list_overdue_tasks(db: Session, telegram_user_id: int, person: str | None = None, limit: int = 50):
     # تُرجع المهام المسجَّلة كمتأخرة (status == "overdue") — بعد أن
     # يقوم mark_overdue_tasks بتحديثها. (لا نعتمد على status == "pending"
     # لأنه لا يأتي بالنتائج بعد التحديث.)
     filters = [
         Task.telegram_user_id == telegram_user_id,
         Task.status == "overdue",
+        Task.deleted_at.is_(None),
     ]
     pf = _person_filter(person)
     if pf is not None:
@@ -119,6 +154,7 @@ def list_overdue_tasks(db: Session, telegram_user_id: int, person: str | None = 
         db.query(Task)
         .filter(*filters)
         .order_by(Task.due_date.asc())
+        .limit(limit)
         .all()
     )
 
@@ -130,6 +166,7 @@ def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
     updated = db.query(Task).filter(
         Task.telegram_user_id == telegram_user_id,
         Task.status == "pending",
+        Task.deleted_at.is_(None),
         Task.due_date != None,  # noqa: E711
         Task.due_date < now,
     ).update({"status": "overdue"})
@@ -143,6 +180,7 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
         .filter(
             Task.telegram_user_id == telegram_user_id,
             Task.status == "pending",
+            Task.deleted_at.is_(None),
             Task.description.ilike(f"%{description_hint}%"),
         )
         .order_by(Task.created_at.desc())
@@ -154,6 +192,7 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
     task = db.query(Task).filter(
         Task.id == task_id,
         Task.telegram_user_id == telegram_user_id,
+        Task.deleted_at.is_(None),
     ).first()
     if task and task.status == "pending":
         task.status = "done"
@@ -207,14 +246,18 @@ def create_transaction(db: Session, telegram_user_id: int, data: dict, raw_messa
         telegram_user_id=telegram_user_id,
         telegram_message_id=telegram_message_id,
         type=data.get("type"),
-        amount=data.get("amount"),
+        amount=_to_decimal(data.get("amount")),
         currency=normalize_currency(data.get("currency")),
-        person=data.get("person"),
-        description=data.get("description"),
+        person=_clean_person(data.get("person")),
+        description=_clean_text(data.get("description")),
         raw_message=raw_message,
     )
     db.add(transaction)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
     db.refresh(transaction)
     return transaction
 
@@ -229,25 +272,32 @@ def create_note(db: Session, telegram_user_id: int, data: dict, raw_message: str
         telegram_user_id=telegram_user_id,
         telegram_message_id=telegram_message_id,
         note_type=data.get("type"),  # order | note
-        description=data.get("description") or data.get("raw") or raw_message,
-        person=data.get("person"),
+        description=_clean_text(data.get("description") or data.get("raw") or raw_message) or "ملاحظة",
+        person=_clean_person(data.get("person")),
         raw_message=raw_message,
     )
     db.add(note)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
     db.refresh(note)
     return note
 
 
 def get_period_range(period: str):
-    from app.timeutil import now_local, to_utc_naive
+    from app.timeutil import now_local, to_utc_naive, first_day_of_week
 
     local_now = now_local()
 
     if period == "today":
         local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_week":
-        local_start = local_now - timedelta(days=local_now.weekday())
+        # الأسبوع يبدأ من أول يوم قابل للتكوين (افتراضيًا الأحد لفلسطين/السياق العربي)
+        fd = first_day_of_week()
+        weekday = local_now.weekday()
+        local_start = local_now - timedelta(days=(weekday - fd) % 7)
         local_start = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_month":
         local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -290,7 +340,10 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
         ]
         return {"metric": metric, "period": period, "person": person, "result": result, "kind": "list"}
 
-    q = db.query(Transaction).filter(Transaction.telegram_user_id == telegram_user_id)
+    q = db.query(Transaction).filter(
+        Transaction.telegram_user_id == telegram_user_id,
+        Transaction.deleted_at.is_(None),
+    )
 
     if start:
         q = q.filter(Transaction.created_at >= start)
@@ -315,3 +368,39 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
 
     else:
         return {"metric": metric, "period": period, "person": person, "result": None, "error": "unsupported_metric"}
+
+
+def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
+    """تراجع/يحذف (soft delete) آخر سجل أضافه المستخدم (عبر /undo).
+
+    يفحص الجداول الثلاثة (معاملات/مهام/طلبيات&ملاحظات)، يختار الأحدث
+    ويثبّت deleted_at عليه — فيختفي من كل الاستعلامات لكن يبقى في DB.
+    """
+    from app.timeutil import now_utc
+
+    candidates = []
+    for model in (Transaction, Task, Note):
+        row = soft_delete_last(db, model, telegram_user_id)
+        if row is not None:
+            candidates.append((row.created_at, model, row))
+
+    if not candidates:
+        return None
+
+    # الأحدث إطلاقًا
+    _, model, row = max(candidates, key=lambda c: c[0])
+
+    row.deleted_at = now_utc()
+    db.commit()
+    db.refresh(row)
+
+    if model is Transaction:
+        kind = "معاملة"
+        label = (row.description or "")[:60]
+    elif model is Note:
+        kind = "طلبية/ملاحظة"
+        label = (row.description or "")[:60]
+    else:
+        kind = "مهمة"
+        label = (row.description or "")[:60]
+    return {"kind": kind, "label": label}

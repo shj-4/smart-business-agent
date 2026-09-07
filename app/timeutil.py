@@ -19,6 +19,17 @@ from zoneinfo import ZoneInfo
 _LOCAL_TZ_NAME = os.getenv("TIMEZONE", "Asia/Gaza")
 LOCAL_TZ = ZoneInfo(_LOCAL_TZ_NAME)
 
+# أوّل يوم في الأسبوع (قابل للتكوين عبر متغير البيئة FIRST_DAY_OF_WEEK).
+# القيمة بصيغة weekday() الخاصة بـ Python حيث الاثنين=0 ... الأحد=6.
+# الافتراضي 6 (الأحد) لأن الأسبوع في فلسطين/السياق العربي يبدأ غالبًا من الأحد.
+DEFAULT_FIRST_DAY = int(os.getenv("FIRST_DAY_OF_WEEK", "6"))
+
+
+def first_day_of_week() -> int:
+    """يعيد أوّل يوم في الأسبوع (0=الاثنين, 6=الأحد) محصورًا في نطاق صالح."""
+    day = DEFAULT_FIRST_DAY % 7
+    return day
+
 
 def now_utc() -> datetime:
     """الآن بصيغة UTC (naive) — نفس صيغة التخزين في قاعدة البيانات."""

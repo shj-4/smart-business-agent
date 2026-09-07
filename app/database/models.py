@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, BigInteger, Boolean
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, BigInteger, Boolean, UniqueConstraint
 from app.database.db import Base
 
 
@@ -9,10 +9,14 @@ class Transaction(Base):
     نستخدم عمود type لتمييز النوع (expense / income)
     """
     __tablename__ = "transactions"
+    __table_args__ = (
+        # message_id فريد لكل محادثة، لذا القيد فريد مركّب (مستخدِم + رسالة)
+        UniqueConstraint("telegram_user_id", "telegram_message_id", name="uq_transactions_user_message"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
-    telegram_message_id = Column(BigInteger, index=True, nullable=True, unique=True)
+    telegram_message_id = Column(BigInteger, nullable=True)
 
     type = Column(String, nullable=False)        # expense | income
     amount = Column(Numeric(12, 2), nullable=True)  # مبلغ مالي بدقة عالية
@@ -33,10 +37,13 @@ class Note(Base):
     يوهم المستخدم بأن البيانات حُفظت بينما تضيع بصمت. هذا الجدول يعالج ذلك.
     """
     __tablename__ = "notes"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", "telegram_message_id", name="uq_notes_user_message"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
-    telegram_message_id = Column(BigInteger, index=True, nullable=True, unique=True)
+    telegram_message_id = Column(BigInteger, nullable=True)
 
     note_type = Column(String, nullable=False)   # order | note
     description = Column(String, nullable=True)   # نص الطلبية/الملاحظة
@@ -52,10 +59,13 @@ class Task(Base):
     جدول المهام والتذكيرات
     """
     __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", "telegram_message_id", name="uq_tasks_user_message"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
-    telegram_message_id = Column(BigInteger, index=True, nullable=True, unique=True)
+    telegram_message_id = Column(BigInteger, nullable=True)
 
     description = Column(String, nullable=False)  # وصف المهمة
     due_date = Column(DateTime, nullable=True)     # الموعد المحدد

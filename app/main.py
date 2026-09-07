@@ -11,6 +11,7 @@ FastAPI تطبيق منفصل عن البوت (bot.py).
 """
 
 from datetime import datetime, timezone
+import os
 
 from fastapi import FastAPI, Depends
 from sqlalchemy import func
@@ -70,7 +71,8 @@ async def status(db: Session = Depends(get_db)):
         "checked_at": now.isoformat(),
         "database": {
             "connected": db_ok,
-            "url": str(engine.url).replace("sqlite:///", "").split("\\")[-1],
+            # اسم الملف فقط (بدون المسار المطلق) — يعمل على ويندوز ولينكس
+            "file": os.path.basename(str(engine.url).replace("sqlite:///", "")),
         },
         "config": {
             "telegram_token_set": bool(TELEGRAM_BOT_TOKEN),
