@@ -808,6 +808,12 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lambda: _analyze_media_sync(audio_bytes, mime, media_kind)
     )
 
+    if (result or {}).get("injection_guard"):
+        await update.message.reply_text(
+            "هذه الصورة تحتوي على تعليمات مضمّنة داخل نصها؛ تجاهلتها حفاظًا على أمان حسابك."
+        )
+        return None
+
     if not text:
         await update.message.reply_text(f"لم أستطع فهم الـ{media_kind}، حاول مرة أخرى أو أرسل نصًا.")
         return None

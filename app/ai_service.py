@@ -349,11 +349,52 @@ RECEIPT_SYSTEM_PROMPT = """
 """
 
 
+IMAGE_TEXT_PROMPT = """
+اقرأ النص المكتوب الظاهر في هذه الصورة حرفيًا (نص فقط، بدون أي شرح أو مقدمة
+أو علامات اقتباس). إن لم يكن في الصورة نص مكتوب، أعد فراغًا.
+"""
+
+
+def image_text_for_guard(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    """يستخرج النص المكتوب داخل الصورة لفحص حقن البرومبت قبل التحليل.
+
+    المضمون: صورة فاتورة قد تحمل داخلها نصًا يحاول إعادة برمجة المساعد
+    (مثل "تجاهل التعليمات السابقة") — نفحصه بالحارس البرمجي نفسه الذي
+    يستخدمه مسار النصوص، بدل الاعتماد على توجيه ناعم داخل البرومبت.
+    """
+    try:
+        response = retry(
+            stop=_RETRY_STOP,
+            wait=_RETRY_WAIT,
+            retry=_RETRY_RETRY,
+        )(
+            lambda: _call_gemini(
+                contents=[
+                    IMAGE_TEXT_PROMPT,
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                ],
+                config={"safety_settings": []},
+            )
+        )()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("تعذر استخراج نص الصورة لفحص الحقن: %s", exc)
+        return ""
+    return (response.text or "").strip()
+
+
 def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     """يحلل صورة فاتورة/إيصال ويستخرج (المبلغ، التاريخ، المورد...).
 
     يمرّ عبر نفس مسار _call_gemini مع retry، ونفس خطة إصلاح الـ JSON عند الفشل.
+    يفحص نصّ الصورة بحارس حقن البرومبت قبل أي معالجة هيكلية.
     """
+    transcript = image_text_for_guard(image_bytes, mime_type)
+    if has_injection_pattern(transcript):
+        logger.info(
+            "رُصدت محاولة حقن برومبت داخل صورة فاتورة — تجاهلت التحليل: %.60s", transcript
+        )
+        return {"intent": "chat", "injection_guard": True, "type": "unknown", "raw": transcript[:200]}
+
     try:
         response = retry(
             stop=_RETRY_STOP,

@@ -98,6 +98,35 @@ class TestFieldEncryption:
         )
         assert tx.amount == 999.50
 
+    def test_unreadable_ciphertext_shows_placeholder_not_raw(self, db_session, monkeypatch):
+        """تدوير المفتاح (أو خطأ ضبطه): لا يُعرض النص المشفَّر الخام للمستخدم."""
+        _enable_encryption(monkeypatch)
+        from app.database.crud import create_transaction
+
+        tx = create_transaction(
+            db_session,
+            111,
+            {"type": "expense", "amount": 300, "currency": "ILS", "description": "سرّي"},
+            raw_message="دفعة سرية",
+            telegram_message_id=1,
+        )
+        raw = db_session.execute(
+            sa_text("SELECT description, amount, raw_message FROM transactions WHERE id=:i"),
+            {"i": tx.id},
+        ).one()
+        assert str(raw.description).startswith("v1$")
+
+        # تبديل المفتاح (محاكاة تدوير) → القيم القديمة تصبح غير قابلة للقراءة
+        OTHER_KEY = base64.b64encode(b"7" * 32).decode("ascii")
+        monkeypatch.setattr("app.config.settings.encryption_key", OTHER_KEY)
+
+        db_session.expire_all()
+        loaded = db_session.get(type(tx), tx.id)
+        assert loaded.description == "غير قابلة للقراءة"
+        assert "v1$" not in str(loaded.description)
+        assert loaded.raw_message == "غير قابلة للقراءة"
+        assert loaded.amount is None  # المبالغ رقمية: لا تسريب ولا كسر من النوع
+
 
 class TestSumInPython:
     def test_run_query_totals_with_encryption(self, db_session, monkeypatch):

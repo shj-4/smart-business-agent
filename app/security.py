@@ -7,6 +7,8 @@
     حتى لا يفقد البيانات الحالية، ويستمر عمل الاختبارات/التطوير.
   - عند تفعيله: تُشفَّر القيم على الكتابة وتُفكَّر على القراءة بشفافية.
     القيم القديمة المخزنة كنص واضح تُفكَّر فشلًا → نعود للقيمة الخام (هجرة تدريجية).
+  - قيمة تبدأ بـ v1$ ولا يمكن فكّها بالمفتاح الحالي (تدوير مفتاح أو خطأ ضبط):
+    يُعرض بديل واضح بدل تسريب النص المشفَّر الخام للمستخدم النهائي.
 
 التنسيق المخزن: "v1$<nonce b64>.<ciphertext b64>" (AES-256-GCM، nonce عشوائي).
 """
@@ -23,6 +25,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _ENCRYPTED_PREFIX = "v1$"
+UNREADABLE_VALUE = "غير قابلة للقراءة"
 _warned_unset = False
 
 
@@ -108,7 +111,13 @@ class EncryptedString(TypeDecorator):
         if value is None:
             return None
         dec = decrypt_text(value)
-        return dec if dec is not None else str(value)
+        if dec is not None:
+            return dec
+        if is_encrypted(value):
+            # قيمة مشفّرة لا تُقرأ بالمفتاح الحالي (تدوير مفتاح / ضبط خاطئ) —
+            # لا نُسرّب النص المشفَّر الخام للمستخدم.
+            return UNREADABLE_VALUE
+        return str(value)
 
 
 class EncryptedNumeric(TypeDecorator):
@@ -139,6 +148,9 @@ class EncryptedNumeric(TypeDecorator):
             return None
         raw = str(value)
         dec = decrypt_text(raw)
+        if dec is None and is_encrypted(raw):
+            # قيمة مشفّرة بلا مفتاح صالح — لا نُسرّب النص الخام (المبالغ رقمية)
+            return None
         if dec is None:
             dec = raw  # قيمة قديمة مخزنة كنص واضح
         try:
