@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     report_time: str = Field(
         default="19:00", description="وقت إرسال التقارير الدورية (HH:MM بالتوقيت المحلي)"
     )
-    chart_months: int = Field(default=6, description="عدد الأشهر المرسومة في رسم /chart")
+    chart_months: int = Field(
+        default=6, gt=0, description="عدد الأشهر المرسومة في رسم /chart"
+    )
 
     # --- قاعدة البيانات ---
     database_url: str | None = Field(

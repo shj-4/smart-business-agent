@@ -1517,6 +1517,7 @@ def monthly_totals(db: Session, telegram_user_id: int, months: int = 6) -> list[
     """
     from app.timeutil import now_local, to_local_naive, to_utc_naive
 
+    months = max(1, int(months))
     local_now = now_local()
     # نبدأ من أول الشهر الحالي ونرجع months × 30 يوم تقريبًا لتغطية شهور كاملة
     months_labels = []

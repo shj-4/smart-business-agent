@@ -351,6 +351,18 @@ class TestMonthlyTotals:
         assert months[0]["label"] <= months[1]["label"] <= months[2]["label"]
         assert all(m["by_currency"] == {} for m in months)
 
+    def test_zero_or_negative_months_is_safe(self, db_session):
+        assert monthly_totals(db_session, USER_A, months=0)  # لم ينهار بـ IndexError
+        assert monthly_totals(db_session, USER_A, months=-5)[0]["label"]
+
+    def test_settings_reject_chart_months_zero(self):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            from app.config import Settings
+
+            Settings(chart_months=0)
+
     def test_aggregates_current_month(self, db_session, monkeypatch):
         _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
         cur_lo, _ = get_comparison_ranges("this_month")["current"]
