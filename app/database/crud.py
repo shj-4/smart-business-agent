@@ -1250,8 +1250,10 @@ def update_task(db: Session, row: Task, fields: dict) -> Task:
     from app.audit import log_audit
     from app.timeutil import now_utc
 
-    old = {key: getattr(row, key, None) for key in ("description", "person", "due_date")}
-    for key in ("description", "person", "due_date"):
+    old = {
+        key: getattr(row, key, None) for key in ("description", "person", "due_date", "priority")
+    }
+    for key in ("description", "person", "due_date", "priority"):
         if key in fields and fields[key] is not None:
             if key == "due_date":
                 row.due_date = parse_date_local(fields[key])
@@ -1259,6 +1261,8 @@ def update_task(db: Session, row: Task, fields: dict) -> Task:
                 row.person = _clean_person(fields[key])
             elif key == "description":
                 row.description = _clean_text(fields[key]) or row.description
+            elif key == "priority":
+                row.priority = _normalize_priority(fields[key])
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)

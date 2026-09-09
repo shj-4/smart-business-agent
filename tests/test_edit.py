@@ -12,7 +12,7 @@ from app.database.crud import (
     update_task,
     update_transaction,
 )
-from app.database.models import Transaction
+from app.database.models import Task, Transaction
 
 USER_A = 111
 USER_B = 222
@@ -133,6 +133,32 @@ class TestUpdateTask:
         _, task, _ = _seed_all(db_session)
         updated = update_task(db_session, task, {"description": "   "})
         assert updated.description == "الاتصال بسامر"
+        assert task.priority == "normal"
+
+    def test_updates_priority(self, db_session):
+        _, task, _ = _seed_all(db_session)
+        updated = update_task(db_session, task, {"priority": "high"})
+        assert updated.priority == "high"
+
+    def test_priority_normalizes_arabic_values(self, db_session):
+        _, task, _ = _seed_all(db_session)
+        assert update_task(db_session, task, {"priority": "عاجل"}).priority == "high"
+        assert update_task(db_session, task, {"priority": "منخفضة"}).priority == "low"
+
+    def test_invalid_priority_falls_back_to_normal(self, db_session):
+        _, task, _ = _seed_all(db_session)
+        updated = update_task(db_session, task, {"priority": "غير معروف"})
+        assert updated.priority == "normal"
+
+    def test_priority_field_is_a_real_column(self, db_session):
+        _, task, _ = _seed_all(db_session)
+        assert isinstance(task, Task)
+        prior = task.priority
+        update_task(db_session, task, {"priority": "high"})
+        db_session.expire_all()
+        persisted = db_session.get(Task, task.id)
+        assert persisted.priority == "high"
+        assert persisted.priority != prior
 
 
 class TestUpdateNote:
