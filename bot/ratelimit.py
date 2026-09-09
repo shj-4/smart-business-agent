@@ -68,13 +68,21 @@ def is_rate_limited(user_id: int) -> bool:
         return False
 
 
+def _new_cleanup_timer():
+    """مؤقت تنظيف دوري (خيط daemon) — يتجنّب كلمة ``daemon`` في منشئ Timer
+    لأن Python 3.14 رفضها في threading.Timer؛ الضبط بعد الإنشاء متوافق مع كل النسخ."""
+    timer = threading.Timer(_CLEANUP_INTERVAL, _cleanup_loop)
+    timer.daemon = True
+    return timer
+
+
 def _cleanup_loop() -> None:
     """دورة واحدة من التنظيف، ثم تُجدول نفسها مجددًا عبر Timer (daemon)."""
     global _cleanup_timer, _last_prune
     with _RATE_LOCK:
         _prune_rate_buckets(time.monotonic())
         _last_prune = time.monotonic()
-    _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL, _cleanup_loop, daemon=True)
+    _cleanup_timer = _new_cleanup_timer()
     _cleanup_timer.start()
 
 
@@ -83,7 +91,7 @@ def start_cleanup() -> None:
     global _cleanup_timer
     with _RATE_LOCK:
         if _cleanup_timer is None:
-            _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL, _cleanup_loop, daemon=True)
+            _cleanup_timer = _new_cleanup_timer()
             _cleanup_timer.start()
 
 
