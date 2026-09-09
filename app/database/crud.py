@@ -1,3 +1,4 @@
+import calendar
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -536,16 +537,25 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
 
     from app.timeutil import to_local_naive, to_utc_naive
 
-    local_due = to_local_naive(due)
-    if rule == "daily":
-        next_due = local_due + timedelta(days=1)
-    elif rule == "weekly":
-        next_due = local_due + timedelta(days=7)
-    elif rule == "monthly":
-        year = local_due.year + (1 if local_due.month == 12 else 0)
-        month = 1 if local_due.month == 12 else local_due.month + 1
-        next_due = local_due.replace(year=year, month=month)
-    else:
+    try:
+        local_due = to_local_naive(due)
+        if rule == "daily":
+            next_due = local_due + timedelta(days=1)
+        elif rule == "weekly":
+            next_due = local_due + timedelta(days=7)
+        elif rule == "monthly":
+            year = local_due.year + (1 if local_due.month == 12 else 0)
+            month = 1 if local_due.month == 12 else local_due.month + 1
+            # موعد شهري في يوم 29/30/31 مقابل شهر أقصر: نقيّد اليوم لآخر يوم
+            # صالح في الشهر الهدف بدل ValueError (يلتف على إثبات الإنجاز).
+            last_day = calendar.monthrange(year, month)[1]
+            next_due = local_due.replace(
+                year=year, month=month, day=min(local_due.day, last_day)
+            )
+        else:
+            return
+    except ValueError:
+        # تعذّر حساب الموعد التالي — تُهمَل إعادة الجدولة بأمان (المهمة أُنجزت).
         return
 
     spawn = Task(

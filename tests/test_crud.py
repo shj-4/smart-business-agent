@@ -17,7 +17,7 @@ from app.database.crud import (
     undo_last_record,
 )
 from app.database.models import Note, Task, Transaction
-from app.timeutil import now_utc
+from app.timeutil import now_utc, to_local_naive
 
 USER_A = 111
 USER_B = 222
@@ -435,6 +435,58 @@ class TestTaskPriorityRecurrence:
             .count()
             == 0
         )
+
+    def test_complete_monthly_respawn_clamps_to_shorter_month(self, db_session):
+        """مهمة شهرية في 31 يناير → فبراير أقصر: يجب تقييد اليوم لآخر يوم صالح
+        (28 في 2026) بدل طرح ValueError بعد إثبات الإنجاز."""
+        task = create_task(
+            db_session,
+            USER_A,
+            {"description": "فاتورة شهرية", "recurrence": "monthly", "date": "2026-01-31 10:00"},
+            raw_message="فاتورة كل شهر 31",
+        )
+        done = complete_task(db_session, USER_A, task.id)
+        assert done.status == "done"
+        spawned = (
+            db_session.query(Task)
+            .filter(Task.status == "pending", Task.deleted_at.is_(None))
+            .one()
+        )
+        local_due = to_local_naive(spawned.due_date)
+        assert local_due.year == 2026 and local_due.month == 2 and local_due.day == 28
+
+    def test_complete_monthly_respawn_across_dec_jan(self, db_session):
+        task = create_task(
+            db_session,
+            USER_A,
+            {"description": "اشتراك سنوي", "recurrence": "monthly", "date": "2026-12-31 09:00"},
+            raw_message="اشتراك كل شهر آخر يوم",
+        )
+        done = complete_task(db_session, USER_A, task.id)
+        assert done.status == "done"
+        spawned = (
+            db_session.query(Task)
+            .filter(Task.status == "pending", Task.deleted_at.is_(None))
+            .one()
+        )
+        local_due = to_local_naive(spawned.due_date)
+        assert local_due.year == 2027 and local_due.month == 1 and local_due.day == 31
+
+    def test_complete_monthly_respawn_leap_year(self, db_session):
+        task = create_task(
+            db_session,
+            USER_A,
+            {"description": "مراجعة شهرية", "recurrence": "monthly", "date": "2024-01-31 08:00"},
+            raw_message="كل شهر مراجعة",
+        )
+        complete_task(db_session, USER_A, task.id)
+        spawned = (
+            db_session.query(Task)
+            .filter(Task.status == "pending", Task.deleted_at.is_(None))
+            .one()
+        )
+        local_due = to_local_naive(spawned.due_date)
+        assert local_due.year == 2024 and local_due.month == 2 and local_due.day == 29
 
 
 # ---------- صلاحيات المساحة المشتركة (مرتكز فقط يحذف/يعدّل) ----------
