@@ -482,6 +482,62 @@ def setup_periodic_reports(app) -> None:
     logger.info("تم تسجيل فحص التقارير الدورية كل %d دقيقة", REPORT_CHECK_INTERVAL_MINUTES)
 
 
+# ---------- تنبيه انحراف الإنفاق عن المتوسط (#37) ----------
+
+_LAST_DEVIATION_SENT: dict[int, str] = {}
+
+
+def deviation_check(context) -> None:
+    """يرسل تنبيهًا يوميًا واحدًا لكل مساحة عمل عند انحراف شهرٍ فوق حدٍّ.
+
+    الحارس في الذاكرة (date لكل مستخدم) — يُعاد التنبيه في اليوم التالي فقط.
+    """
+    from app.database.crud import accessible_user_ids, deviation_summary, user_ids_with_data
+
+    db = SessionLocal()
+    try:
+        today = now_utc().strftime("%Y-%m-%d")
+        for uid in user_ids_with_data(db):
+            try:
+                summary = deviation_summary(db, uid)
+                flagged = [d for d in summary["deviations"] if d.get("significant")]
+                if not flagged or _LAST_DEVIATION_SENT.get(uid) == today:
+                    continue
+
+                msg = (
+                    "🚨 انحراف واضح في إنفاقاتك هذا الشهر\n\n"
+                    + "\n".join(
+                        f"• {('مصاريف' if d['kind'] == 'expense' else 'إيرادات')} ({d['currency']}): {d['pct']}%"
+                        for d in flagged
+                    )
+                    + "\n\nللمفاصلة: /deviation"
+                )
+                for member in accessible_user_ids(db, uid):
+                    try:
+                        context.bot.send_message(chat_id=member, text=msg)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
+                _LAST_DEVIATION_SENT[uid] = today
+            except Exception:  # noqa: BLE001
+                logger.exception("خطأ في حسابات الانحراف للمستخدم %s", uid)
+    finally:
+        db.close()
+
+
+def setup_deviation_check(app) -> None:
+    """يُسجّل مهمة متكررة لفحص انحراف الإنفاق."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — تنبيهات الانحراف لن تعمل.")
+        return
+    app.job_queue.run_repeating(
+        deviation_check,
+        interval=timedelta(minutes=CHECK_INTERVAL_MINUTES),
+        first=timedelta(seconds=90),
+        name="deviation_check",
+    )
+    logger.info("تم تسجيل فحص الانحراف كل %d دقيقة", CHECK_INTERVAL_MINUTES)
+
+
 # ---------- النسخ الاحتياطي اليومي التلقائي ----------
 
 BACKUP_INTERVAL_HOURS = 24

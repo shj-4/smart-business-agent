@@ -88,6 +88,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/credit — الحدود الائتمانية للأشخاص\n"
         "/stats — إحصائيات استخدامك\n"
         "/health — فحص صحة النظام\n"
+        "/export pdf — تصدير PDF بكل السجلات\n"
+        "/forecast — توقعات الأشهر القادمة\n"
+        "/deviation — انحراف الإنفاق عن المتوسط\n"
         "/lang — تبديل لغة الواجهة عربي/English\n"
         "/cancel — إلغاء أي عملية معلّقة\n\n"
         "📸 صوّر أي فاتورة وأرسلها، وسأستخرج تفاصيلها تلقائيًا.\n"
@@ -280,13 +283,18 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر /export [today|week|month] — ملف Excel واحد بكل السجلات للفترة المحددة."""
+    """أمر /export [today|week|month|pdf] — ملف Excel واحد بكل السجلات للفترة المحددة."""
     from datetime import timedelta
 
     from app.timeutil import first_day_of_week, now_local, to_utc_naive
-    from bot.exporters import generate_export_excel
 
     arg = (context.args[0] if context.args else "all").lower()
+    if arg in ("pdf", "بي_دي_إف"):
+        await _export_pdf(update, context)
+        return
+
+    from bot.exporters import generate_export_excel
+
     period = resolve_period_arg(arg)
     if period is None:
         await update.message.reply_text(f"لم أفهم الفترة \"{arg}\".\n{PERIOD_HINT}")
@@ -329,6 +337,57 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=buf,
         filename=filename,
         caption=f"{caption}\nيحتوي: معاملات + مهام + طلبيات وملاحظات",
+    )
+
+
+async def _export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تصدير PDF بكل السجلات (الفترة الاختيارية عبر /export pdf [period] أعلاه)."""
+    from datetime import timedelta
+
+    from app.timeutil import first_day_of_week, now_local, to_utc_naive
+    from bot.exporters import generate_export_pdf
+
+    arg = (context.args[1] if len(context.args or []) > 1 else "all").lower()
+    period = resolve_period_arg(arg)
+    local_now = now_local()
+    start = None
+    if period == "today":
+        local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = to_utc_naive(local)
+    elif period == "week":
+        fd = first_day_of_week()
+        weekday = local_now.weekday()
+        local = local_now - timedelta(days=(weekday - fd) % 7)
+        local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = to_utc_naive(local)
+    elif period == "month":
+        local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = to_utc_naive(local)
+
+    telegram_user_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        try:
+            buf = generate_export_pdf(db, telegram_user_id, start_utc=start)
+        except Exception:
+            logger.exception("خطأ في توليد PDF")
+            await update.message.reply_text(
+                "حدث خطأ أثناء توليد ملف PDF (reportlab غير متوفر؟). جرّب /export للملف Excel."
+            )
+            return
+    finally:
+        db.close()
+
+    if buf is None:
+        await update.message.reply_text("لم يُولَّد الملف.")
+        return
+
+    await update.message.reply_chat_action("upload_document")
+    now_str = local_now.strftime("%Y-%m-%d")
+    await update.message.reply_document(
+        document=buf,
+        filename=f"export_{arg}_{now_str}.pdf",
+        caption="تصدير PDF — يحتوي: معاملات + مهام + طلبيات وملاحظات",
     )
 
 
@@ -686,6 +745,40 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_user_stats(stats))
 
 
+async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /forecast [عدد الأشهر] — توقعات المصاريف/الإيرادات للأشهر القادمة."""
+    from app.database.crud import forecast_totals
+    from bot.formatters import format_forecast
+
+    telegraph_id = update.effective_user.id
+    months = 3
+    if context.args:
+        try:
+            months = max(1, min(int(context.args[0]), 12))
+        except ValueError:
+            months = 3
+    db = SessionLocal()
+    try:
+        payload = forecast_totals(db, telegraph_id, months=months)
+    finally:
+        db.close()
+    await update.message.reply_text(format_forecast(payload))
+
+
+async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /deviation — انحراف إنفاق/إيراد الشهر الحالي عن متوسط آخر 3 أشهر."""
+    from app.database.crud import deviation_summary
+    from bot.formatters import format_deviation
+
+    telegraph_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        payload = deviation_summary(db, telegraph_id)
+    finally:
+        db.close()
+    await update.message.reply_text(format_deviation(payload))
+
+
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر مخفي /admin_stats — إحصائيات عامة للمسؤول (لا يكشف بيانات فردية)."""
     from app.admin import build_admin_stats
@@ -915,6 +1008,8 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("credit", credit_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("forecast", forecast_command))
+    app.add_handler(CommandHandler("deviation", deviation_command))
 
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation
@@ -928,11 +1023,12 @@ def register_handlers(app) -> None:
     app.add_error_handler(system_error_handler)
 
     # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، الفواتير، الحدود
-    # الائتمانية، التقارير الدورية، النسخ الاحتياطي
+    # الائتمانية، التقارير الدورية، انحراف الإنفاق، النسخ الاحتياطي
     from bot.reminders import (
         setup_budget_check,
         setup_credit_check,
         setup_daily_backup,
+        setup_deviation_check,
         setup_invoice_check,
         setup_overdue_reminder,
         setup_periodic_reports,
@@ -943,4 +1039,5 @@ def register_handlers(app) -> None:
     setup_invoice_check(app)
     setup_credit_check(app)
     setup_periodic_reports(app)
+    setup_deviation_check(app)
     setup_daily_backup(app)

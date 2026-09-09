@@ -301,3 +301,223 @@ def generate_export_excel(
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+# ---------- تصدير PDF (#35) عبر reportlab ----------
+
+
+def _pdf_font() -> str:
+    """يسجّل خطًا يدعم العربية (TTF من النظام) ويُعيد اسمه، أو Helvetica كخلفية."""
+    import os
+
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if _pdf_font.cached:
+        return _pdf_font.cached
+    candidates = (
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\times.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    )
+    chosen = "Helvetica"
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont("ArabicImport", path))
+                chosen = "ArabicImport"
+                break
+            except Exception:  # noqa: BLE001
+                continue
+    _pdf_font.cached = chosen
+    return chosen
+
+
+_pdf_font.cached = None
+
+
+def _pdf_text(value, font: str) -> str:
+    """يعيد نصًا (قد يكون عربيًا) جاهزًا لعرض صحيح في PDF — تشكيل+اتجاه إن توفرت."""
+    text = str(value or "")
+    if font == "Helvetica" or not text.strip():
+        return text.replace("\n", " ")
+    if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+        try:
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+
+            return get_display(arabic_reshaper.reshape(text))
+        except Exception:  # noqa: BLE001
+            pass
+        return text.replace("\n", " ")
+    # اتجاه عكسي يتجنّب كسر النص الإنجليزي مع أرقام
+    return text.replace("\n", " ")
+
+
+def generate_export_pdf(
+    db: Session,
+    telegram_user_id: int,
+    start_utc=None,
+    end_utc=None,
+) -> io.BytesIO:
+    """يولّد ملف PDF واحدًا بكل السجلات (معاملات + مهام + طلبيات/ملاحظات).
+
+    يعتمد على reportlab (مكتبة اختيارية تُحمَّل عند الاستدعاء). يعيد BytesIO.
+    """
+    from datetime import datetime
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    from app.database.crud import mark_overdue_tasks
+
+    _FONT = _pdf_font()
+
+    tq = db.query(Transaction).filter(
+        Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Transaction.deleted_at.is_(None),
+    )
+    if start_utc:
+        tq = tq.filter(Transaction.created_at >= start_utc)
+    if end_utc:
+        tq = tq.filter(Transaction.created_at <= end_utc)
+    transactions = tq.order_by(Transaction.created_at.desc()).all()
+
+    mark_overdue_tasks(db, telegram_user_id)
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.deleted_at.is_(None),
+        )
+        .order_by(Task.due_date.asc().nulls_last())
+        .all()
+    )
+    notes = (
+        db.query(Note)
+        .filter(
+            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Note.deleted_at.is_(None),
+        )
+        .order_by(Note.created_at.desc())
+        .all()
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleRTL", parent=styles["Title"], fontSize=15, fontName=_FONT)
+    heading_style = ParagraphStyle(
+        "HeadingRTL", parent=styles["Heading2"], fontSize=12, fontName=_FONT
+    )
+    body_style = ParagraphStyle("BodyRTL", parent=styles["BodyText"], fontSize=9, fontName=_FONT)
+    cell_style = ParagraphStyle("CellRTL", parent=styles["BodyText"], fontSize=8, fontName=_FONT)
+
+    def _as_table(headers, rows, first_total_idx: int | None = None):
+        data = [[Paragraph(_pdf_text(h, _FONT), cell_style) for h in headers]]
+        for r in rows:
+            data.append([Paragraph(_pdf_text(cell, _FONT), cell_style) for cell in r])
+        table = Table(data, repeatRows=1)
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2F5496")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#EEF2FA")]),
+            ("FONTNAME", (0, 0), (-1, -1), _FONT),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]
+        if first_total_idx is not None:
+            style.append(
+                ("FONTNAME", (0, first_total_idx), (-1, -1), "Helvetica-Bold" if _FONT == "Helvetica" else _FONT)
+            )
+        table.setStyle(TableStyle(style))
+        return table
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    story = [Paragraph("تقرير النشاط المالي الكامل", title_style), Spacer(1, 2 * mm)]
+    story.append(Paragraph(f"تاريخ التوليد: {now_str}", body_style))
+    story.append(Spacer(1, 3 * mm))
+
+    story.append(Paragraph("١) المعاملات المالية", heading_style))
+    tx_rows = []
+    total_expense = Decimal("0")
+    total_income = Decimal("0")
+    for r in transactions:
+        amount = r.amount or Decimal("0")
+        local_date = to_local_naive(r.created_at)
+        tx_rows.append(
+            [
+                local_date.strftime("%Y-%m-%d %H:%M") if local_date else "",
+                "مصروف" if r.type == "expense" else "إيراد",
+                format(float(amount), ".2f"),
+                r.currency or "",
+                r.person or "",
+                r.category or "",
+                r.description or "",
+            ]
+        )
+        if r.type == "expense":
+            total_expense += amount
+        else:
+            total_income += amount
+    tx_headers = ["التاريخ", "النوع", "المبلغ", "العملة", "الشخص", "التصنيف", "الوصف"]
+    first_total_idx = None
+    if tx_rows:
+        tx_rows.append(["الإجمالي", "مصروفات", format(float(total_expense), ".2f"), "", "", "", ""])
+        tx_rows.append(["", "إيرادات", format(float(total_income), ".2f"), "", "", "", ""])
+        tx_rows.append(["", "الصافي", format(float(total_income - total_expense), ".2f"), "", "", "", ""])
+        first_total_idx = 1 + (len(tx_rows) - 3)  # فهرس أول سطر إجماليات داخل data
+    else:
+        tx_rows.append(["(لا توجد معاملات)", "", "", "", "", "", ""])
+    story.append(_as_table(tx_headers, tx_rows, first_total_idx))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph("٢) المهام", heading_style))
+    status_labels = {"pending": "قيد الانتظار", "overdue": "متأخرة", "done": "مكتملة"}
+    task_rows = [
+        [
+            status_labels.get(t.status, t.status),
+            t.description or "",
+            t.person or "",
+            to_local_naive(t.due_date).strftime("%Y-%m-%d %H:%M") if t.due_date else "",
+        ]
+        for t in tasks
+    ]
+    if not task_rows:
+        task_rows.append(["(لا توجد مهام)", "", "", ""])
+    story.append(_as_table(["الحالة", "الوصف", "الشخص", "الموعد"], task_rows))
+    story.append(Spacer(1, 4 * mm))
+
+    story.append(Paragraph("٣) الطلبيات والملاحظات", heading_style))
+    type_labels = {"order": "طلبية", "note": "ملاحظة"}
+    note_rows = [
+        [
+            type_labels.get(n.note_type, n.note_type),
+            n.description or "",
+            n.person or "",
+            n.category or "",
+            to_local_naive(n.created_at).strftime("%Y-%m-%d %H:%M") if n.created_at else "",
+        ]
+        for n in notes
+    ]
+    if not note_rows:
+        note_rows.append(["(لا توجد طلبيات/ملاحظات)", "", "", "", ""])
+    story.append(_as_table(["النوع", "الوصف", "الشخص", "التصنيف", "تاريخ الإنشاء"], note_rows))
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), rightMargin=8 * mm, leftMargin=8 * mm)
+    doc.build(story)
+    buf.seek(0)
+    return buf

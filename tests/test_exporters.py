@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 
 from app.database.crud import create_note, create_task, create_transaction
 from bot.exporters import (
+    generate_export_pdf,
     generate_notes_excel,
     generate_tasks_excel,
     generate_transactions_excel,
@@ -84,3 +85,35 @@ class TestNotesExcel:
         ws = wb.active
         values = [row[0] for row in ws.iter_rows(values_only=True)]
         assert any(v == "طلبية" for v in values)
+
+
+class TestExportPdf:
+    def test_empty_db_produces_valid_pdf(self, db_session):
+        buf = generate_export_pdf(db_session, USER_A)
+        assert isinstance(buf, BytesIO)
+        buf.seek(0)
+        head = buf.read(5)
+        assert head == b"%PDF-"
+        assert len(buf.getvalue()) > 1000
+
+    def test_pdf_includes_seeded_rows(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 300, "currency": "ILS", "description": "مواد"},
+            raw_message="دفعة 300",
+        )
+        create_task(
+            db_session,
+            USER_A,
+            {"description": "مهمة أ", "date": "2026-09-20 12:00"},
+            raw_message="مهمة أ",
+        )
+        create_note(
+            db_session,
+            USER_A,
+            {"type": "order", "description": "طلب أسمنت", "person": "محمد"},
+            raw_message="طلبية أسمنت",
+        )
+        buf = generate_export_pdf(db_session, USER_A)
+        assert len(buf.getvalue()) > 1500

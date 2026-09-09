@@ -559,3 +559,54 @@ def format_health_report(checks: list[dict]) -> str:
             line += f" — {detail}"
         lines.append(line)
     return "\n".join(lines)
+
+
+# ---------- التنبؤات (/forecast) ----------
+
+
+def format_forecast(payload: dict) -> str:
+    """يعرض توقعات المصاريف/الإيرادات للأشهر القادمة."""
+    months = payload.get("months") or []
+    if not months:
+        return "لا توجد بيانات كافية للتنبؤ بعد — أضف عمليات على الأقل شهرين."
+
+    lines = [
+        "🔮 توقعات الأشهر القادمة (نموذج تبسيطي إرشادي)\n",
+        f"مبنية على متوسط اتجاه آخر {payload.get('history', 6)} أشهر (حتى {payload.get('last_key', '—')}).",
+    ]
+    for m in months:
+        exp_parts = [f"{_fmt_amount(v)} {c}" for c, v in m["expense"].items() if v]
+        inc_parts = [f"{_fmt_amount(v)} {c}" for c, v in m["income"].items() if v]
+        exp_line = " + ".join(exp_parts) if exp_parts else "—"
+        inc_line = " + ".join(inc_parts) if inc_parts else "—"
+        unified_line = ""
+        if m.get("unified_expense") is not None:
+            unified_line = (
+                f"\n   📉 الموحّد المتوقع (بعملة الأساس {payload.get('base', '')}): "
+                f"{_fmt_amount(m['unified_expense'])}"
+            )
+        lines.append(f"\n🗓️ {m['label']}:\n• مصاريف: {exp_line}{unified_line}\n• إيرادات: {inc_line}")
+    lines.append("\n⚠️ التوقعات إرشادية ولا تُغني عن التخطيط الفعلي.")
+    return "\n".join(lines)
+
+
+# ---------- انحراف الإنفاق (/deviation) ----------
+
+
+def format_deviation(payload: dict) -> str:
+    """يعرض انحراف الشهر الحالي عن متوسط الأشهر الثلاثة السابقة."""
+    deviations = payload.get("deviations") or []
+    if not deviations:
+        return "لا توجد انحرافات ملحوظة هذا الشهر مقابل متوسط آخر 3 أشهر."
+
+    kind_name = {"expense": "مصاريف", "income": "إيرادات"}
+    lines = ["📉 انحراف الشهر الحالي مقابل متوسط آخر 3 أشهر:"]
+    for d in deviations:
+        arrow = "⬆️ فوق المتوسط" if d["pct"] >= 0 else "⬇️ تحت المتوسط"
+        lines.append(
+            f"• {kind_name.get(d['kind'], d['kind'])} ({d['currency']}): "
+            f"{_fmt_amount(d['current'])} مقابل متوسط {_fmt_amount(d['average'])} "
+            f"({d['pct']}%) — {arrow} {'⚠️' if d['significant'] else ''}"
+        )
+    lines.append(f"\nحدّ الإشارة: انحراف ≥ {payload.get('threshold_pct', 30)}%.")
+    return "\n".join(lines)
