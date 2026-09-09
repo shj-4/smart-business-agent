@@ -1083,14 +1083,15 @@ async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from app.database.crud import search_records
 
-        recs = search_records(db, uid, term, limit=50)
+        recs, meta = search_records(db, uid, term, limit=50, return_meta=True)
     finally:
         db.close()
 
     context.user_data["pending_search_term"] = term
-    from bot.menus import _records_page_payload
+    from bot.menus import _records_page_payload, _search_partial_hint
 
-    text, markup = _records_page_payload(recs, term, 1, "sr")
+    hint = _search_partial_hint(meta)
+    text, markup = _records_page_payload(recs, term, 1, "sr", search_hint=hint)
     await update.message.reply_text(text, reply_markup=markup)
     return None
 

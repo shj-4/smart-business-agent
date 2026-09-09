@@ -155,6 +155,48 @@ def list_workspace(db: Session, telegram_user_id: int) -> dict | None:
     }
 
 
+def transfer_workspace_ownership(
+    db: Session, current_owner: int, new_owner: int
+) -> bool:
+    """ينقل ملكية المساحة إلى عضو قائم فيها — يصبح هو مرتكزها الجديد.
+
+    مفيد عند التنحي/تسليم الإدارة: كل صفوف المساحة تُعاد توجيهها إلى
+    workspace_id == new_owner. يعيد False لغير المالك أو لعضو ليس في المساحة.
+    """
+    wid = workspace_for_user(db, current_owner)
+    if wid != current_owner or new_owner == current_owner:
+        return False
+    target = (
+        db.query(WorkspaceMember)
+        .filter(
+            WorkspaceMember.telegram_user_id == new_owner,
+            WorkspaceMember.workspace_id == wid,
+        )
+        .first()
+    )
+    if target is None:
+        return False
+    db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == wid).update(
+        {"workspace_id": new_owner}
+    )
+    db.commit()
+    return True
+
+
+def dissolve_workspace(db: Session, owner: int) -> bool:
+    """يفكّ المساحة المشتركة كليًا — كل عضو يعود مستخدمًا فرديًا.
+
+    بيانات الأعضاء (معاملات/مهام/ملاحظات) تبقى موجودة بلا أي فقدان؛ يفقد فقط
+    الربط المشترك. يعيد False إن لم يكن المستخدم مالكًا لأي مساحة.
+    """
+    wid = workspace_for_user(db, owner)
+    if wid != owner:
+        return False
+    deleted = db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == wid).delete()
+    db.commit()
+    return deleted > 0
+
+
 def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
     """يُستدعى بعد أي كتابة: يمسح الاستعلامات المؤقتة لكل من يرى بيانات هذا المستخدم.
 
@@ -1017,6 +1059,56 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
     return {"kind": kind, "label": label}
 
 
+def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
+    """يستعيد أحدث سجل محذوف (soft-delete) — أمر /redo (عكس /undo).
+
+    يبحث عن أحدث deleted_at بين المعاملات/المهام/الملاحظات المحذوفة في نطاق
+    المستخدم ويزيله — فيعود السجل للظهور في كل الاستعلامات.
+    """
+    from app.audit import log_audit
+
+    if not can_manage_records(db, telegram_user_id):
+        log_audit(telegram_user_id, "denied_redo", "workspace_role")
+        return None
+
+    accessible = accessible_user_ids(db, telegram_user_id)
+    candidates = []
+    for model in (Transaction, Task, Note):
+        row = (
+            db.query(model)
+            .filter(
+                model.telegram_user_id.in_(accessible),
+                model.deleted_at.isnot(None),
+            )
+            .order_by(model.deleted_at.desc())
+            .first()
+        )
+        if row is not None:
+            candidates.append((row.deleted_at, model, row))
+
+    if not candidates:
+        return None
+
+    _, model, row = max(candidates, key=lambda c: c[0])
+    row.deleted_at = None
+    db.commit()
+    db.refresh(row)
+
+    if model is Transaction:
+        kind = "معاملة"
+    elif model is Note:
+        kind = "طلبية/ملاحظة"
+    else:
+        kind = "مهمة"
+    label = (row.description or "")[:60]
+
+    log_audit(
+        telegram_user_id, "restore_record", f"{model.__name__}:{row.id}", detail=(label or "")[:80]
+    )
+    _invalidate_caches(db, telegram_user_id)
+    return {"kind": kind, "label": label}
+
+
 def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> list[dict]:
     """يعرض آخر سجلات المستخدم (معاملات + مهام + ملاحظات) مرتبة بالأحدث."""
     from app.timeutil import to_local_naive
@@ -1127,22 +1219,29 @@ def delete_record_by_id(
     return str(label)
 
 
-def search_records(db: Session, telegram_user_id: int, term: str, limit: int = 30) -> list[dict]:
+def search_records(
+    db: Session, telegram_user_id: int, term: str, limit: int = 30, return_meta: bool = False
+) -> list[dict] | tuple[list[dict], dict]:
     """بحث نصي بسيط في آخر سجلات المستخدم (شخص/تصنيف/وصف/قيمة/نوع).
 
     الوصف وقيم المبالغ مشفّرة، لذلك نقرأ عددًا محدودًا من السجلات الحديثة
     ونطابقها في Python (مستوى البيانات الشخصية يكفي أداءً). يعيد نفس بنية
     list_recent_records ليعاد استخدامها في عرض قوائم الأزرار.
+
+    مع return_meta=True يعيد (نتائج, meta) حيث meta يحتوي per_model=حجم النافذة
+    وsaturated=True إن امتلأت النافذة (قد توجد سجلات أقدم مطابقة لم تُفحص) —
+    ليُبلَّغ المستخدم أن البحث جزئي بدل وهم "لا توجد نتائج".
     """
     from app.timeutil import to_local_naive
 
     needle = (term or "").strip().lower()
     if not needle:
-        return []
+        return ([], {"per_model": 0, "saturated": False}) if return_meta else []
 
     accessible = accessible_user_ids(db, telegram_user_id)
     per_model = max(limit * 2, 100)
     matches: list[dict] = []
+    saturated = False
     kinds = {
         "expense": "مصروف",
         "income": "إيراد",
@@ -1162,6 +1261,8 @@ def search_records(db: Session, telegram_user_id: int, term: str, limit: int = 3
             .limit(per_model)
             .all()
         )
+        if len(rows) == per_model:
+            saturated = True
         for r in rows:
             haystack_parts = [
                 (r.person or ""),
@@ -1201,7 +1302,10 @@ def search_records(db: Session, telegram_user_id: int, term: str, limit: int = 3
                     }
                 )
     matches.sort(key=lambda c: c["created_at"], reverse=True)
-    return matches[:limit]
+    result = matches[:limit]
+    if return_meta:
+        return result, {"per_model": per_model, "saturated": saturated}
+    return result
 
 
 def get_user_lang(db: Session, telegram_user_id: int) -> str:
@@ -1342,6 +1446,14 @@ def create_budget(
 
     currency = normalize_currency(target) if scope == "currency" else None
     person = target.strip() if scope == "person" else None
+
+    if scope == "currency":
+        from app.exchange import CURRENCY_NAMES
+
+        if currency is None or currency.upper() not in CURRENCY_NAMES:
+            # عملة غير معروفة (normalize_currency تمرر النص كما هو) — رفضها
+            # بدل إنشاء ميزانية لن تطابقها أي معاملة أبدًا (تبقى 0% للأبد).
+            return None
 
     if not monthly_limit:
         return None

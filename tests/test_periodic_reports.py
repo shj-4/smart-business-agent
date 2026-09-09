@@ -13,6 +13,7 @@ Unit tests لميزات المرحلة الرابعة (بلا شبكة):
 from datetime import datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -580,3 +581,36 @@ class TestBudgetCommandScope:
     def test_unknown_scope_rejected_with_clear_message(self, db_session, monkeypatch):
         replies = self._run(["add", "supplier", "محمد", "1500"], db_session, monkeypatch)
         assert replies and "النطاق غير معروف" in replies[0]
+
+    def test_unknown_currency_rejected_with_clear_message(self, db_session, monkeypatch):
+        replies = self._run(["add", "currency", "XYZ", "2000"], db_session, monkeypatch)
+        assert replies and "العملة غير معروفة" in replies[0]
+
+
+# ---------- تنبيه الميزانيات: يصل لكل أعضاء المساحة ----------
+
+
+class TestBudgetAlertBroadcast:
+    def test_alert_sent_to_all_workspace_members(self, db_session, monkeypatch):
+        import bot.reminders as reminders
+        from app.database.crud import create_budget, create_workspace, invite_to_workspace
+
+        owner, partner = 700, 800
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, partner)
+        budget = create_budget(db_session, owner, "person", "محمد", "100")
+        budget.alerted_status = 0
+        db_session.commit()
+
+        sent = []
+
+        class _FakeBot:
+            def send_message(self, chat_id, text, parse_mode=None):
+                sent.append(chat_id)
+
+        context = SimpleNamespace(bot=_FakeBot())
+        usage = {"limit": "100", "spent": "150", "percent": 150, "over": True}
+        reminders._notify_budget(context, db_session, budget, usage)
+
+        assert set(sent) == {owner, partner}
+        assert budget.alerted_status == 2

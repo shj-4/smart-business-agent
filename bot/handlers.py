@@ -73,6 +73,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/menu — القائمة الرئيسية\n"
         "/done وصف — إنجاز مهمة\n"
         "/undo — تراجع عن آخر سجل\n"
+        "/redo — استعادة آخر سجل تم التراجع عنه\n"
         "/convert مبلغ من إلى — تحويل عملة (مثل: /convert 300 ILS USD)\n"
         "/budget سقف — إدارة ميزانية شهرية\n"
         "/report — ملخص الفترة\n"
@@ -150,6 +151,27 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("لا يوجد سجلات سابقة يمكن التراجع عنها.")
+
+
+async def redo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /redo — يستعيد آخر سجل تم التراجع عنه (/undo عكسيًا)."""
+    from app.database.crud import restore_last_deleted
+
+    telegram_user_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        restored = restore_last_deleted(db, telegram_user_id)
+    finally:
+        db.close()
+    if restored:
+        from bot.menus import MAIN_HOME_KEYBOARD
+
+        await update.message.reply_text(
+            f"تمت استعادة آخر سجل:\n{restored['kind']}: {restored['label'] or '(بدون وصف)'}",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+    else:
+        await update.message.reply_text("لا توجد سجلات محذوفة يمكن استعادتها.")
 
 
 async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,6 +469,18 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
+            if scope == "currency":
+                from app.database.crud import normalize_currency
+                from app.exchange import CURRENCY_NAMES
+
+                norm = normalize_currency(target)
+                if norm is None or norm.upper() not in CURRENCY_NAMES:
+                    await update.message.reply_text(
+                        f"العملة غير معروفة: {target}.\n"
+                        "العملات المدعومة: " + "، ".join(sorted(CURRENCY_NAMES))
+                    )
+                    return
+
             budget = create_budget(db, telegram_user_id, scope, target, limit_str)
             if not budget:
                 await update.message.reply_text(
@@ -720,6 +754,7 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("undo", undo_command))
+    app.add_handler(CommandHandler("redo", redo_command))
     app.add_handler(CommandHandler("lang", lang_command))
     app.add_handler(CommandHandler("convert", convert_command))
     app.add_handler(CommandHandler("report", report_command))

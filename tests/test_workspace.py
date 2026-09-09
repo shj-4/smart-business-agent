@@ -6,6 +6,7 @@ from app.database.crud import (
     accessible_user_ids,
     create_transaction,
     create_workspace,
+    dissolve_workspace,
     invite_to_workspace,
     is_workspace_owner,
     leave_workspace,
@@ -13,6 +14,7 @@ from app.database.crud import (
     list_workspace,
     remove_from_workspace,
     run_query,
+    transfer_workspace_ownership,
     workspace_for_user,
 )
 
@@ -141,3 +143,42 @@ class TestSharedWorkspace:
         cache_set("run_query:91:total_expenses:this_month:None", {"ILS": 6.0})
         _add_tx(db_session, 90, 50)
         assert get("run_query:91:total_expenses:this_month:None") == {"ILS": 6.0}
+
+
+class TestWorkspaceOwnershipTransfer:
+    def test_transfer_ownership(self, db_session):
+        owner, partner = 5, 6
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, partner)
+
+        assert transfer_workspace_ownership(db_session, owner, partner) is True
+        assert is_workspace_owner(db_session, partner) is True
+        assert is_workspace_owner(db_session, owner) is False
+        assert workspace_for_user(db_session, owner) == partner
+        assert workspace_for_user(db_session, partner) == partner
+
+        # المالك الجديد يملك صلاحيات الإدارة
+        assert invite_to_workspace(db_session, partner, 7) is True
+        assert accessible_user_ids(db_session, owner) == {5, 6, 7}
+
+    def test_transfer_refuses_non_member_or_non_owner(self, db_session):
+        create_workspace(db_session, 5)
+        invite_to_workspace(db_session, 5, 6)
+        assert transfer_workspace_ownership(db_session, 6, 5) is False  # عضو ليس مالكًا
+        assert transfer_workspace_ownership(db_session, 5, 99) is False  # خارج المساحة
+        assert transfer_workspace_ownership(db_session, 5, 5) is False  # مالك لنفسه
+
+    def test_dissolve_workspace_returns_all_to_individual(self, db_session):
+        owner, partner = 5, 6
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, partner)
+
+        assert dissolve_workspace(db_session, partner) is False  # ليس مالكًا
+        assert dissolve_workspace(db_session, owner) is True
+        assert workspace_for_user(db_session, owner) is None
+        assert workspace_for_user(db_session, partner) is None
+        assert accessible_user_ids(db_session, owner) == {owner}
+
+    def test_dissolve_refuses_non_owner(self, db_session):
+        create_workspace(db_session, 5)
+        assert dissolve_workspace(db_session, 6) is False

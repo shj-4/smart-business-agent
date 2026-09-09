@@ -347,14 +347,21 @@ async def dashboard_tasks(
     _auth: None = Depends(require_dashboard_auth),
 ):
     """جدول المهام مع حالة كل مهمة."""
-    from app.database.crud import mark_overdue_tasks
+    from app.database.crud import mark_overdue_tasks, workspace_for_user
 
-    # تحديث المهام المتأخرة (كل المستخدمين)
+    # تحديث المهام المتأخرة (كل المستخدمين) — مرة واحدة لكل مساحة مشتركة
+    # (mark_overdue_tasks يحدّث كل أعضاء accessible_user_ids، فالتكرار على كل
+    # عضوٍ في مساحة من N أعضاء يُنفّذ نفس التحديث N مرات بلا داعٍ).
     try:
         db.query(func.count(Task.id)).scalar()  # التأكد من اتصال
-        # تحديث لجميع المستخدمين بشكل بسيط
+        seen = set()
         for (uid,) in db.query(Task.telegram_user_id).distinct().all():
-            mark_overdue_tasks(db, uid)
+            wid = workspace_for_user(db, uid)
+            anchor = wid if wid is not None else uid
+            if anchor in seen:
+                continue
+            seen.add(anchor)
+            mark_overdue_tasks(db, anchor)
     except Exception:
         pass
 

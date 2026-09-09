@@ -13,7 +13,9 @@ from app.database.crud import (
     create_transaction,
     list_pending_tasks,
     mark_overdue_tasks,
+    restore_last_deleted,
     run_query,
+    search_records,
     undo_last_record,
 )
 from app.database.models import Note, Task, Transaction
@@ -360,6 +362,113 @@ class TestUndoLastRecord:
         db_session.commit()
 
         assert undo_last_record(db_session, USER_A) is None
+
+
+# ---------- restore_last_deleted (إعادة/redo) ----------
+
+
+class TestRestoreLastDeleted:
+    def test_none_when_nothing_deleted(self, db_session):
+        assert restore_last_deleted(db_session, USER_A) is None
+
+    def test_restores_most_recently_deleted(self, db_session):
+        tx = Transaction(
+            telegram_user_id=USER_A,
+            telegram_message_id=1,
+            type="expense",
+            amount=Decimal("100"),
+            description="دفعة محذوفة",
+            created_at=datetime(2026, 1, 1),
+            deleted_at=datetime(2026, 1, 3),
+        )
+        note = Note(
+            telegram_user_id=USER_A,
+            telegram_message_id=2,
+            note_type="note",
+            description="ملاحظة محذوفة لاحقًا",
+            created_at=datetime(2026, 1, 2),
+            deleted_at=datetime(2026, 1, 5),
+        )
+        db_session.add_all([tx, note])
+        db_session.commit()
+
+        restored = restore_last_deleted(db_session, USER_A)
+        assert restored["kind"] == "طلبية/ملاحظة"
+        assert restored["label"] == "ملاحظة محذوفة لاحقًا"
+        assert db_session.query(Note).filter(Note.id == note.id).one().deleted_at is None
+        assert (
+            db_session.query(Transaction).filter(Transaction.id == tx.id).one().deleted_at
+            is not None
+        )
+
+        second = restore_last_deleted(db_session, USER_A)
+        assert second["kind"] == "معاملة"
+        assert db_session.query(Transaction).filter(Transaction.id == tx.id).one().deleted_at is None
+        assert restore_last_deleted(db_session, USER_A) is None
+
+    def test_only_scoped_records_restorable(self, db_session):
+        tx = Transaction(
+            telegram_user_id=USER_B,
+            telegram_message_id=1,
+            type="expense",
+            amount=Decimal("5"),
+            description="خاص بآخر",
+            created_at=datetime(2026, 1, 1),
+            deleted_at=datetime(2026, 1, 4),
+        )
+        db_session.add(tx)
+        db_session.commit()
+        assert restore_last_deleted(db_session, USER_A) is None
+
+
+# ---------- search_records: نافذة البحث والنتائج الجزئية ----------
+
+
+class TestSearchRecordsWindow:
+    def test_matches_and_meta_not_saturated(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 300, "currency": "ILS", "description": "مواد حديد"},
+            raw_message="دفعة مواد حديد",
+        )
+        hits, meta = search_records(db_session, USER_A, "حديد", return_meta=True)
+        assert len(hits) == 1
+        assert meta["saturated"] is False
+
+    def test_partial_hint_flag_when_window_full(self, db_session):
+        # أكثر من 100 سجل تملأ نافذة البحث → saturated ليُعلَن أن النتائج جزئية
+        for i in range(105):
+            create_transaction(
+                db_session,
+                USER_A,
+                {
+                    "type": "expense",
+                    "amount": 1,
+                    "currency": "ILS",
+                    "description": f"دفعة عامة {i}",
+                },
+                raw_message=f"دفعة {i}",
+            )
+        # أقدم سجل (0) خارج نافذة الـ100 الأحدث: لن يظهر، لكن النافذة ممتلئة
+        hits, meta = search_records(db_session, USER_A, "دفعة عامة 0", return_meta=True)
+        assert meta["saturated"] is True
+        assert not hits
+        # سجل داخل النافذة يظهر طبيعيًا
+        hits2, _ = search_records(db_session, USER_A, "دفعة عامة 6", return_meta=True)
+        assert len(hits2) >= 1
+
+    def test_plain_calls_return_list_for_backward_compat(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 50, "currency": "ILS", "description": "كهرباء"},
+            raw_message="فاتورة كهرباء",
+        )
+        result = search_records(db_session, USER_A, "كهرباء")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["model"] == "Transaction"
 
 
 # ---------- أولويات وتكرار المهام ----------

@@ -157,8 +157,33 @@ def budget_check(context) -> None:
             db.close()
 
 
+def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
+    """يرسل تنبيه ميزانية لكل أعضاء المساحة المشتركة (لا المُنشئ فقط).
+
+    budget_usage يحسب الاستهلاك عبر accessible_user_ids (كل الأعضاء)، لذا كل من
+    يرى الميزانية يجب أن يصلَه التنبيه — وإلا تجاوزَ أحد الأعضاء السقف ولم يعلم.
+    """
+    from app.database.crud import accessible_user_ids
+
+    sent_any = False
+    for uid in accessible_user_ids(db, budget.telegram_user_id):
+        try:
+            context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
+            sent_any = True
+        except Exception as exc:
+            logger.error("فشل إرسال تنبيه ميزانية %s للمستخدم %s: %s", budget.id, uid, exc)
+    if sent_any:
+        budget.alerted_status = status
+        budget.updated_at = now_utc()
+        db.commit()
+        logger.info("تنبيه ميزانية %s أُرسل بنجاح (status=%s)", budget.id, status)
+
+
 def _notify_budget(context, db, budget, usage) -> None:
-    """يرسل تنبيه اقتراب/تجاوز لميزانية واحدة إذا استحق (مرة واحدة كل شهر)."""
+    """يرسل تنبيه اقتراب/تجاوز لميزانية واحدة إذا استحق (مرة واحدة كل شهر).
+
+    الإرسال موحَّد لكل أعضاء المساحة المشتركة عبر _broadcast_budget_alert.
+    """
     from app.exchange import CURRENCY_NAMES
 
     limit = usage["limit"]
@@ -180,35 +205,16 @@ def _notify_budget(context, db, budget, usage) -> None:
             f"السقف: {limit}",
             f"الاستهلاك: {percent}%",
         ]
-        try:
-            context.bot.send_message(
-                chat_id=budget.telegram_user_id, text="\n".join(lines), parse_mode="Markdown"
-            )
-        except Exception as exc:
-            logger.error("فشل إرسال تنبيه تجاوز ميزانية %s: %s", budget.id, exc)
-            return
-        budget.alerted_status = 2
-        budget.updated_at = now_utc()
-        db.commit()
-        logger.info("تنبيه تجاوز ميزانية %s للمستخدم %s", budget.id, budget.telegram_user_id)
+        _broadcast_budget_alert(context, db, budget, lines, status=2)
+        return
 
-    elif percent >= WARNING_THRESHOLD * 100 and budget.alerted_status < 1:
+    if percent >= WARNING_THRESHOLD * 100 and budget.alerted_status < 1:
         lines = [
             f"⚠️ اقتربت من سقف ميزانيتك لـ**{budget_name}**",
             f"المصروف: {spent} {budget.currency or ''} من أصل {limit}",
             f"الاستهلاك: {percent}%",
         ]
-        try:
-            context.bot.send_message(
-                chat_id=budget.telegram_user_id, text="\n".join(lines), parse_mode="Markdown"
-            )
-        except Exception as exc:
-            logger.error("فشل إرسال تنبيه اقتراب ميزانية %s: %s", budget.id, exc)
-            return
-        budget.alerted_status = 1
-        budget.updated_at = now_utc()
-        db.commit()
-        logger.info("تنبيه اقتراب ميزانية %s للمستخدم %s", budget.id, budget.telegram_user_id)
+        _broadcast_budget_alert(context, db, budget, lines, status=1)
 
 
 def setup_budget_check(app) -> None:

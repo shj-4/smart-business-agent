@@ -835,7 +835,7 @@ PAGE_SIZE = 5
 
 
 def _records_page_payload(
-    recs: list[dict], term: str | None, page: int, prefix: str
+    recs: list[dict], term: str | None, page: int, prefix: str, search_hint: str | None = None
 ) -> tuple[str, InlineKeyboardMarkup]:
     """يرجّع (نص, لوحة أزرار) لصفحة سجلات — يعرض التعديل/الحذف وتنقّل الصفحات."""
     total = len(recs)
@@ -846,6 +846,8 @@ def _records_page_payload(
 
     heading = "🕘 آخر العمليات — " if not term else "🔍 نتائج البحث — "
     lines = [f"{heading}صفحة {page}/{pages}"]
+    if search_hint:
+        lines.append(search_hint)
     if not chunk:
         lines.append("لا توجد سجلات بعد." if not term else "لا توجد نتائج مطابقة.")
     for r in chunk:
@@ -923,6 +925,13 @@ async def _handle_search_start(query, context, parts: list):
     )
 
 
+def _search_partial_hint(meta: dict | None) -> str | None:
+    """تنبيه صريح بأن البحث محدود بنافذة السجلات الأحدث (تشفير يمنع LIKE في SQL)."""
+    if meta and meta.get("saturated"):
+        return f"⚠️ بحثتُ في آخر {meta['per_model']} سجلًا لكل نوع — قد توجد نتائج أقدم غير ظاهرة."
+    return None
+
+
 async def _handle_search_page(query, context, parts: list):
     term = context.user_data.get("pending_search_term")
     if not term:
@@ -932,10 +941,11 @@ async def _handle_search_page(query, context, parts: list):
     uid = query.from_user.id
     db = SessionLocal()
     try:
-        recs = search_records(db, uid, term, limit=50)
+        recs, meta = search_records(db, uid, term, limit=50, return_meta=True)
     finally:
         db.close()
-    text, markup = _records_page_payload(recs, term, page, "sr")
+    hint = _search_partial_hint(meta)
+    text, markup = _records_page_payload(recs, term, page, "sr", search_hint=hint)
     await query.edit_message_text(text, reply_markup=markup)
 
 
