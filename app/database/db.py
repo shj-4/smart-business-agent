@@ -8,18 +8,24 @@ from app.config import settings
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def build_database_url(base_dir: str, env_url: str | None = None) -> str:
-    """يرجع رابط الاتصال الفعال: DATABASE_URL من .env/البيئة إن وُجد وإلا SQLite الافتراضي.
+def build_database_url(
+    base_dir: str, env_url: str | None = None, app_env: str | None = None
+) -> str:
+    """يرجع رابط الاتصال الفعال: DATABASE_URL إن وُجد وإلا SQLite لكل بيئة.
 
-    هذا هو المكان الوحيد الذي يُقرر فيه أي قاعدة بيانات تُستخدم — الانتقال إلى
-    MySQL/PostgreSQL يتم فقط بتعيين DATABASE_URL بدون أي تعديل كود.
+    فكرة الفصل بين البيئات: في التطوير نستخدم business.db مباشرة (توافق مع ما هو
+    موجود)، بينما staging/production يحصلان على اسم ملف مستقل
+    (business_staging.db / business_production.db) حتى لا تلمس الثلاث نسخ أي بيانات
+    حقيقية. إعداد DATABASE_URL يتفوّق دائمًا (مسار MySQL/PostgreSQL).
     """
     if env_url and env_url.strip():
         return env_url.strip()
-    return f"sqlite:///{os.path.join(base_dir, 'data', 'business.db')}"
+    env = (app_env or "").strip().lower()
+    filename = "business.db" if not env or env == "development" else f"business_{env}.db"
+    return f"sqlite:///{os.path.join(base_dir, 'data', filename)}"
 
 
-DATABASE_URL = build_database_url(BASE_DIR, settings.database_url)
+DATABASE_URL = build_database_url(BASE_DIR, settings.database_url, settings.app_env)
 
 _is_sqlite = DATABASE_URL.startswith("sqlite")
 

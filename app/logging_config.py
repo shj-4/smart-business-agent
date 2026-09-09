@@ -8,6 +8,7 @@
 - التنسيق يتضمن الطابع الزمني والمنسّق ومستوى السجل، مع دعم النصوص العربية.
 """
 
+import json
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -24,22 +25,50 @@ MAX_BYTES = 5 * 1024 * 1024  # 5MB
 BACKUP_COUNT = 5  # يحتفظ بـ 5 ملفات قديمة (app.log.1 .. app.log.5)
 
 
+class JsonFormatter(logging.Formatter):
+    """مُنسّق سجلات JSON (سطر واحد لكل حدث) — للتجميع المركزي والمعالجة الآلية."""
+
+    def __init__(self, service: str = ""):
+        super().__init__()
+        self.service = service
+
+    def format(self, record):
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "service": self.service or "",
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _make_formatter(service: str) -> logging.Formatter:
+    """يختار المُنسّق حسب LOG_FORMAT (text افتراضيًا / json للتجميع المركزي)."""
+    if os.environ.get("LOG_FORMAT", "").strip().lower() == "json":
+        return JsonFormatter(service)
+    return logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - "
+        + (f"[{service}] " if service else "")
+        + "%(message)s"
+    )
+
+
 def configure_logging(level: int = logging.INFO, service: str = "") -> None:
     """
     يهيّئ root logger بمعالجة ملف دوّار + إخراج للطرفية.
 
     - service: اسم يظهر في بداية كل سطر لتمييز المصدر (مثل "bot" أو "api").
+    - تنسيق JSON عبر LOG_FORMAT=json (انظر _make_formatter).
     - استدعاؤها أكثر من مرة لا يضيف معالجات مكررة (idempotent).
     """
     # نطبّق الإخراج على root logger ليشمل جميع المكتبات (httpx, telegram, uvicorn...)
     root = logging.getLogger()
     root.setLevel(level)
 
-    fmt = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - "
-        + (f"[{service}] " if service else "")
-        + "%(message)s"
-    )
+    fmt = _make_formatter(service)
 
     # تجنّب إضافة معالجات مكررة عند إعادة الاستدعاء
     for h in list(root.handlers):

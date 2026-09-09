@@ -21,6 +21,7 @@ from telegram.ext import ContextTypes
 
 from app.database.crud import (
     complete_task,
+    delete_record_by_id,
     delete_task_by_id,
     get_record_by_id,
     list_done_tasks,
@@ -29,11 +30,13 @@ from app.database.crud import (
     list_recent_records,
     mark_overdue_tasks,
     run_query,
+    search_records,
 )
 from app.database.db import SessionLocal
 from app.timeutil import to_local_naive
 from bot.conversation import _clear_all_pending
 from bot.formatters import format_query_result
+from bot.i18n import remember_lang, t, user_lang
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +132,8 @@ SETTINGS_DOCS = {
 
 TOOLS_MENU = [
     [("✏️ تعديل آخر سجل", "el:last")],
+    [("🕘 آخر العمليات", "his:p:1")],
+    [("🔍 بحث", "sb:start")],
     [("💰 الميزانيات", "bg:list")],
     [("📈 الرسم البياني", "tool:chart")],
     [("📦 تصدير Excel", "ex:menu")],
@@ -153,8 +158,30 @@ EXPORT_CAPTIONS = {
 }
 
 
-def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    return build_menu(MAIN_MENU)
+def _main_menu_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
+    rows = [
+        [(t("btn_record", lang), "menu:record")],
+        [(t("btn_reports", lang), "menu:reports")],
+        [(t("btn_tasks", lang), "menu:tasks")],
+        [(t("btn_tools", lang), "menu:tools")],
+        [(t("btn_settings", lang), "menu:settings")],
+    ]
+    return build_menu(rows)
+
+
+def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
+    base = [
+        [("el:last", t("btn_edit_last", lang))],
+        [("his:p:1", t("btn_history", lang))],
+        [("sb:start", t("btn_search", lang))],
+        [("bg:list", t("btn_budget", lang))],
+        [("tool:chart", t("btn_chart", lang))],
+        [("ex:menu", t("btn_export", lang))],
+        [("tool:convert", t("btn_convert", lang))],
+        [("ws:status", t("btn_workspace", lang))],
+        [("menu:main", t("btn_back", lang))],
+    ]
+    return build_menu([[(label, cb) for cb, label in row] for row in base])
 
 
 def _report_metrics_keyboard(period: str) -> InlineKeyboardMarkup:
@@ -171,10 +198,16 @@ def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     return build_menu(rows)
 
 
-async def send_main_menu(message, context, text: str = MAIN_MENU_TEXT):
+async def send_main_menu(message, context, text: str = ""):
     """يرسل القائمة الرئيسية كرسالة جديدة (لأوامر /start و /menu)."""
     _clear_all_pending(context)
-    await message.reply_text(text, reply_markup=_main_menu_keyboard())
+    lang = (
+        user_lang(getattr(message, "from_user", None).id)
+        if getattr(message, "from_user", None)
+        else "ar"
+    )
+    body = text or t("main_title", lang)
+    await message.reply_text(body, reply_markup=_main_menu_keyboard(lang))
 
 
 # ---------- رصف القوائم إداريًا ----------
@@ -189,10 +222,15 @@ PAGES = {
 
 
 async def _handle_menu(query, context, parts: list):
+    lang = user_lang(query.from_user.id)
     target = parts[0] if parts else "main"
     if target == "main":
         _clear_all_pending(context)
-        await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=_main_menu_keyboard())
+        await query.edit_message_text(t("main_title", lang), reply_markup=_main_menu_keyboard(lang))
+        return
+    if target == "tools":
+        title = t("tools_title", lang)
+        await query.edit_message_text(title, reply_markup=_tools_keyboard(lang))
         return
     title, rows = PAGES.get(target, ("القائمة الرئيسية", MAIN_MENU))
     await query.edit_message_text(title, reply_markup=build_menu(rows))
@@ -698,37 +736,30 @@ async def _handle_export(query, context, parts: list):
     await query.edit_message_text("تم إرسال ملف التصدير ✅", reply_markup=_home_keyboard())
 
 
-# ---------- تعديل آخر سجل (el / rf) ----------
+# ---------- تعديل السجلات (el / rf) ----------
 
 
-async def _handle_edit_last(query, context, parts: list | None = None):
-    """زر "تعديل آخر سجل": يعرض حقول آخر سجل محفوظ كأزرار تعديل."""
+async def _start_record_edit(query, context, model_name: str, record_id: int) -> None:
+    """يعرض حقول سجل محدد كأزرار تعديل (يُستخدم لآخر سجل ولملفات التاريخ)."""
     from bot.editing import EDITABLE_FIELDS, FIELD_LABELS_AR, _get_current_value
 
     _clear_all_pending(context)
     uid = query.from_user.id
     db = SessionLocal()
     try:
-        recs = list_recent_records(db, uid, limit=1)
-        record = None
-        model_name = None
-        if recs:
-            model_name = recs[0]["model"]
-            record, _ = get_record_by_id(db, uid, model_name, recs[0]["id"])
+        record, _ = get_record_by_id(db, uid, model_name, record_id)
     finally:
         db.close()
 
     if record is None:
-        await query.edit_message_text(
-            "لا توجد سجلات محفوظة لتعديلها.", reply_markup=_home_keyboard()
-        )
+        await query.edit_message_text("لم أجد السجل (ربما حُذف).", reply_markup=_home_keyboard())
         return
 
     context.user_data["pending_record_edit_id"] = record.id
     context.user_data["pending_record_edit_model"] = model_name
     context.user_data["pending_record_edit_obj"] = record
 
-    lines = ["✏️ آخر سجل — اختر الحقل لتعديله:\n"]
+    lines = ["✏️ تعديل السجل — اختر الحقل:\n"]
     if model_name == "Transaction":
         lines.append(f"• المبلغ: {_get_current_value(record, 'amount')}")
         lines.append(f"• العملة: {_get_current_value(record, 'currency')}")
@@ -755,8 +786,27 @@ async def _handle_edit_last(query, context, parts: list | None = None):
     await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
 
 
+async def _handle_edit_last(query, context, parts: list | None = None):
+    """زر "تعديل آخر سجل": يعرض حقول آخر سجل محفوظ كأزرار تعديل."""
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs = list_recent_records(db, uid, limit=1)
+        model_name = recs[0]["model"] if recs else None
+        record_id = recs[0]["id"] if recs else None
+    finally:
+        db.close()
+
+    if record_id is None or model_name is None:
+        await query.edit_message_text(
+            "لا توجد سجلات محفوظة لتعديلها.", reply_markup=_home_keyboard()
+        )
+        return
+    await _start_record_edit(query, context, model_name, record_id)
+
+
 async def _handle_record_field(query, context, parts: list):
-    """زر حقل تعديل آخر سجل (rf:Model:Field أو rf:end)."""
+    """زر حقل تعديل سجل (rf:Model:Field أو rf:end)."""
     from bot.editing import FIELD_LABELS_AR, _get_current_value
 
     if not parts or parts[0] == "end":
@@ -779,6 +829,150 @@ async def _handle_record_field(query, context, parts: list):
     )
 
 
+# ---------- آخر العمليات + البحث (his / rb / sb / sr) ----------
+
+PAGE_SIZE = 5
+
+
+def _records_page_payload(
+    recs: list[dict], term: str | None, page: int, prefix: str
+) -> tuple[str, InlineKeyboardMarkup]:
+    """يرجّع (نص, لوحة أزرار) لصفحة سجلات — يعرض التعديل/الحذف وتنقّل الصفحات."""
+    total = len(recs)
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 1), pages)
+    start = (page - 1) * PAGE_SIZE
+    chunk = recs[start : start + PAGE_SIZE]
+
+    heading = "🕘 آخر العمليات — " if not term else "🔍 نتائج البحث — "
+    lines = [f"{heading}صفحة {page}/{pages}"]
+    if not chunk:
+        lines.append("لا توجد سجلات بعد." if not term else "لا توجد نتائج مطابقة.")
+    for r in chunk:
+        lines.append(f"• {r['date'] or '—'} | {r['kind']}: {r['label']}")
+        if r["person"]:
+            lines.append(f"   👤 {r['person']}")
+
+    rows: list[list[tuple[str, str]]] = []
+    for r in chunk:
+        rows.append(
+            [
+                (f"✏️ تعديل #{r['id']}", f"rb:e:{r['model']}:{r['id']}"),
+                (f"🗑️ حذف #{r['id']}", f"rb:d:{r['model']}:{r['id']}"),
+            ]
+        )
+    nav: list[tuple[str, str]] = []
+    if page > 1:
+        nav.append((f"⬅️ ص{page - 1}", f"{prefix}:p:{page - 1}"))
+    if page < pages:
+        nav.append((f"ص{page + 1} ➡️", f"{prefix}:p:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    return "\n".join(lines), build_menu(rows)
+
+
+def _records_page_number(parts: list) -> int:
+    """يستخرج رقم الصفحة من callback (p:2 أو 2)."""
+    if not parts:
+        return 1
+    raw = parts[-1]
+    return int(raw) if raw.isdigit() else 1
+
+
+async def _handle_history(query, context, parts: list):
+    page = _records_page_number(parts)
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs = list_recent_records(db, uid, limit=50)
+    finally:
+        db.close()
+    text, markup = _records_page_payload(recs, None, page, "his")
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def _handle_record_action(query, context, parts: list):
+    """أزرار سريعة في صفحات السجلات: rb:e:Model:id (تعديل) / rb:d:Model:id (حذف)."""
+    act = parts[0] if parts else ""
+    if act == "e" and len(parts) == 3 and parts[2].isdigit():
+        await _start_record_edit(query, context, parts[1], int(parts[2]))
+        return
+    if act == "d" and len(parts) == 3 and parts[2].isdigit():
+        uid = query.from_user.id
+        db = SessionLocal()
+        try:
+            deleted = delete_record_by_id(db, uid, parts[1], int(parts[2]))
+        finally:
+            db.close()
+        if deleted:
+            await query.answer("حُذف السجل ✅")
+        else:
+            await query.answer("تعذّر الحذف (صلاحيات أو سجل غير موجود).")
+        await _handle_history(query, context, ["p", "1"])
+        return
+    await _handle_history(query, context, ["p", "1"])
+
+
+async def _handle_search_start(query, context, parts: list):
+    _clear_all_pending(context)
+    context.user_data["pending_search"] = True
+    await query.edit_message_text(
+        "🔍 اكتب كلمة البحث (شخص، تصنيف، وصف، قيمة أو نوع):\nمثال: محمد أو فاتورة",
+        reply_markup=_home_keyboard(),
+    )
+
+
+async def _handle_search_page(query, context, parts: list):
+    term = context.user_data.get("pending_search_term")
+    if not term:
+        await _handle_search_start(query, context, parts)
+        return
+    page = _records_page_number(parts)
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs = search_records(db, uid, term, limit=50)
+    finally:
+        db.close()
+    text, markup = _records_page_payload(recs, term, page, "sr")
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+# ---------- اللغة (ln) ----------
+
+
+def _lang_keyboard() -> InlineKeyboardMarkup:
+    return build_menu(
+        [
+            [("🌐 العربية", "ln:ar"), ("🌐 English", "ln:en")],
+            [("🏠 القائمة الرئيسية", "menu:main")],
+        ]
+    )
+
+
+def send_lang_menu(message, text: str = ""):
+    """يرسل شاشة اختيار اللغة كرسالة جديدة (لأمر /lang)."""
+    return message.reply_text(text or "اختر لغة الواجهة:", reply_markup=_lang_keyboard())
+
+
+async def _handle_lang(query, context, parts: list):
+    lang = "en" if (parts and parts[0] == "en") else "ar"
+    uid = query.from_user.id
+    from app.database.crud import set_user_lang
+
+    db = SessionLocal()
+    try:
+        set_user_lang(db, uid, lang)
+    finally:
+        db.close()
+    remember_lang(uid, lang)
+    await query.edit_message_text(
+        t("lang_done_en" if lang == "en" else "lang_done_ar", lang),
+        reply_markup=_lang_keyboard(),
+    )
+
+
 # ---------- Router موحّد ----------
 
 HANDLERS = {
@@ -793,6 +987,11 @@ HANDLERS = {
     "ws": _handle_workspace,
     "el": _handle_edit_last,
     "rf": _handle_record_field,
+    "his": _handle_history,
+    "rb": _handle_record_action,
+    "sb": _handle_search_start,
+    "sr": _handle_search_page,
+    "ln": _handle_lang,
 }
 
 

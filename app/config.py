@@ -25,6 +25,16 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = Field(default="", description="Bot token من @BotFather")
     gemini_api_key: str = Field(default="", description="مفتاح Google Gemini API")
+    app_env: str = Field(
+        default="development",
+        description="البيئة: development | staging | production — تُغيّر قاعدة SQLite الافتراضية "
+        "حتى لا تُجرَّب ميزات جديدة على بيانات حقيقية (database_url إن وُجد يتفوق عليها).",
+    )
+    log_format: str = Field(
+        default="text",
+        description="تنسيق سجلات الخادم: text | json — json يعطي سطر JSON منظمًا لكل حدث "
+        "لتجميع مركزي (مثل Loki/CloudWatch).",
+    )
     timezone: str = Field(default="Asia/Gaza", description="المنطقة الزمنية المحلية")
     first_day_of_week: int = Field(default=6, description="أول يوم في الأسبوع (6=الأحد)")
     base_currency: str = Field(default="ILS", description="العملة الأساسية للمجموع الموحّد")

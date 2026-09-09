@@ -320,3 +320,32 @@ def setup_periodic_reports(app) -> None:
         name="periodic_reports",
     )
     logger.info("تم تسجيل فحص التقارير الدورية كل %d دقيقة", REPORT_CHECK_INTERVAL_MINUTES)
+
+
+# ---------- النسخ الاحتياطي اليومي التلقائي ----------
+
+BACKUP_INTERVAL_HOURS = 24
+
+
+def daily_backup_job(context) -> None:
+    """نسخة احتياطية يومية من قاعدة SQLite عبر خدمة app.database.backup."""
+    from app.database.backup import run_backup
+
+    try:
+        run_backup()
+    except Exception:
+        logger.exception("فشل النسخ الاحتياطي اليومي")
+
+
+def setup_daily_backup(app) -> None:
+    """يُسجّل دورة يومية للنسخ الاحتياطي (أول نسخة بعد ~ساعة من التشغيل)."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — النسخ الاحتياطي اليومي لن يعمل.")
+        return
+    app.job_queue.run_repeating(
+        daily_backup_job,
+        interval=timedelta(hours=BACKUP_INTERVAL_HOURS),
+        first=timedelta(hours=1),
+        name="daily_backup",
+    )
+    logger.info("تم تسجيل النسخ الاحتياطي اليومي (%d ساعة)", BACKUP_INTERVAL_HOURS)

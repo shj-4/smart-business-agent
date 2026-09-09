@@ -12,11 +12,14 @@ import time
 
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60.0
+GLOBAL_RATE_LIMIT_MAX = 100  # حد كلي لكل العملية (حماية من إغراق عام)
+GLOBAL_RATE_LIMIT_WINDOW = 60.0
 _RATE_BUCKET_MAX_ENTRIES = 1024  # حد أقصى للإدخالات قبل التنظيف الفوري
 _CLEANUP_INTERVAL = RATE_LIMIT_WINDOW  # دورة التنظيف الدوري
 
 _RATE_LOCK = threading.Lock()
 _rate_buckets: dict = {}
+_global_stamps: list = []
 _last_prune: float = 0.0
 _cleanup_timer = None
 
@@ -29,6 +32,18 @@ def _prune_rate_buckets(now: float) -> None:
     ]
     for uid in expired:
         _rate_buckets.pop(uid, None)
+    global_start = now - GLOBAL_RATE_LIMIT_WINDOW
+    _global_stamps[:] = [t for t in _global_stamps if t > global_start]
+
+
+def _global_limit_hit(now: float) -> bool:
+    """حد كلي (لكل العملية) ضمن نافذة زمنية — حماية من إغراق شامل."""
+    window_start = now - GLOBAL_RATE_LIMIT_WINDOW
+    _global_stamps[:] = [t for t in _global_stamps if t > window_start]
+    if len(_global_stamps) >= GLOBAL_RATE_LIMIT_MAX:
+        return True
+    _global_stamps.append(now)
+    return False
 
 
 def is_rate_limited(user_id: int) -> bool:
@@ -41,6 +56,8 @@ def is_rate_limited(user_id: int) -> bool:
         ):
             _prune_rate_buckets(now)
             _last_prune = now
+        if _global_limit_hit(now):
+            return True
         window_start = now - RATE_LIMIT_WINDOW
         stamps = [t for t in _rate_buckets.get(user_id, []) if t > window_start]
         if len(stamps) >= RATE_LIMIT_MAX:

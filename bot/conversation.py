@@ -323,6 +323,8 @@ def _clear_seeds(context: ContextTypes.DEFAULT_TYPE) -> None:
         "pending_record_edit_id",
         "pending_record_edit_model",
         "pending_record_edit_field",
+        "pending_search",
+        "pending_search_term",
     ):
         context.user_data.pop(key, None)
 
@@ -544,6 +546,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await task_edit_value(update, context)
     if context.user_data.get("pending_record_edit_id"):
         return await record_edit_value(update, context)
+    if context.user_data.get("pending_search"):
+        return await search_value(update, context)
     if context.user_data.get("pending_budget"):
         return await budget_add_value(update, context)
     if context.user_data.get("pending_convert"):
@@ -1033,6 +1037,36 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     label = FIELD_LABELS_AR.get(field, field)
     await update.message.reply_text(f"تم تحديث {label} بنجاح ✅", reply_markup=MAIN_HOME_KEYBOARD)
+    return None
+
+
+async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بحث في السجلات (رسالة نصية بعد زر "🔍 بحث"): يرد بنتائج صفحات بأزرار."""
+    term = (update.message.text or "").strip()
+    context.user_data.pop("pending_search", None)
+    if not term:
+        from bot.menus import MAIN_HOME_KEYBOARD
+
+        await update.message.reply_text(
+            "أرسل كلمة البحث (شخص، تصنيف، وصف، قيمة أو نوع) أو /cancel.",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+        return None
+
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import search_records
+
+        recs = search_records(db, uid, term, limit=50)
+    finally:
+        db.close()
+
+    context.user_data["pending_search_term"] = term
+    from bot.menus import _records_page_payload
+
+    text, markup = _records_page_payload(recs, term, 1, "sr")
+    await update.message.reply_text(text, reply_markup=markup)
     return None
 
 

@@ -119,6 +119,28 @@ def test_build_database_url_helpers():
     assert build_database_url(r"C:\proj", "   ") == "sqlite:///C:\\proj\\data\\business.db"
 
 
+def test_build_database_url_env_separation():
+    # تطوير (افتراضي/صريح) → نفس ملف business.db
+    assert (
+        build_database_url(r"C:\proj", None, "development")
+        == "sqlite:///C:\\proj\\data\\business.db"
+    )
+    # بيئة أخرى → ملف مستقل حتى لا تُجرَّب ميزات على بيانات حقيقية
+    assert (
+        build_database_url(r"C:\proj", None, "staging")
+        == "sqlite:///C:\\proj\\data\\business_staging.db"
+    )
+    assert (
+        build_database_url(r"C:\proj", None, "Production")
+        == "sqlite:///C:\\proj\\data\\business_production.db"
+    )
+    # DATABASE_URL يتفوق دائمًا على اسم الملف حسب البيئة
+    assert (
+        build_database_url(r"C:\proj", "postgresql://x:y@h/db", "staging")
+        == "postgresql://x:y@h/db"
+    )
+
+
 def test_transactions_composite_index_in_metadata():
     idx_names = {i.name for i in Transaction.__table__.indexes}
     assert "ix_transactions_user_created" in idx_names

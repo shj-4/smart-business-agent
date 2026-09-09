@@ -467,7 +467,7 @@ class TestEditLastFlow:
         q, edited = _build_query("el:last")
         ctx = _context()
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
-        assert "آخر سجل" in edited[0][0]
+        assert "تعديل السجل" in edited[0][0]
         assert _find_button(edited[0][1], "rf:Transaction:amount")
         assert _find_button(edited[0][1], "rf:Transaction:description")
         assert _find_button(edited[0][1], "rf:end")
@@ -551,3 +551,93 @@ class TestEditLastFlow:
         line = menus._task_line(task)
         assert "⚡" in line
         assert "🔁" in line
+
+
+class TestHistorySearchAndLang:
+    def _seed_tasks(self, db, n=6, person="سامر"):
+        from app.database.crud import create_task
+
+        created = []
+        for i in range(n):
+            created.append(
+                create_task(
+                    db,
+                    USER_A,
+                    {"description": f"مهمة {i}", "person": person, "date": "2026-09-10 10:00"},
+                    raw_message=f"task {i}",
+                )
+            )
+        return created
+
+    def test_history_page_shows_pagination(self, db_session, monkeypatch):
+        self._seed_tasks(db_session)
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("his:p:1")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "صفحة 1/2" in edited[0][0]
+        assert _find_button(edited[0][1], "his:p:2")
+        assert _find_button(edited[0][1], "rb:e:Task:6")
+
+        q2, edited2 = _build_query("his:p:2")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q2), _context()))
+        assert "صفحة 2/2" in edited2[0][0]
+        assert _find_button(edited2[0][1], "his:p:1")
+        assert _find_button(edited2[0][1], "rb:e:Task:1")
+
+    def test_record_action_edit_and_delete(self, db_session, monkeypatch):
+        from app.database.crud import list_recent_records
+
+        task = self._seed_tasks(db_session, n=1)[0]
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+
+        q, edited = _build_query(f"rb:e:Task:{task.id}")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "تعديل السجل" in edited[0][0]
+        assert _find_button(edited[0][1], "rf:Task:description")
+
+        qd, edited_d = _build_query(f"rb:d:Task:{task.id}")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=qd), _context()))
+        db = db_session
+        remaining = db.query(type(task)).filter(type(task).id == task.id).first()
+        assert remaining is not None and remaining.deleted_at is not None
+        recs = list_recent_records(db, USER_A, limit=50)
+        assert recs == []
+
+    def test_search_start_asks_term(self, db_session, monkeypatch):
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("sb:start")
+        ctx = _context()
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        assert ctx.user_data.get("pending_search") is True
+        assert "كلمة البحث" in edited[0][0]
+
+    def test_search_page_uses_term(self, db_session, monkeypatch):
+        self._seed_tasks(db_session, n=3, person="محمد")
+        self._seed_tasks(db_session, n=2, person="سامر")
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("sr:p:1")
+        ctx = _context({"pending_search_term": "محمد"})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        assert "نتائج البحث" in edited[0][0]
+        text, _ = edited[0]
+        assert text.count("👤 محمد") == 3
+        assert _find_button(edited[0][1], "rb:d:Task:1")
+
+    def test_lang_toggle_to_english(self, db_session, monkeypatch):
+        from bot import i18n
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("ln:en")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "English" in edited[0][0]
+        assert i18n.user_lang(USER_A) == "en"
+
+        q2, edited2 = _build_query("menu:main")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q2), _context()))
+        assert "Main menu" in edited2[0][0]
+        assert _find_button(edited2[0][1], "ln:ar") or _find_button(edited2[0][1], "menu:settings")
+
+    def test_tools_menu_has_history_and_search_buttons(self):
+        kb = menus._tools_keyboard("ar")
+        assert _find_button(kb, "his:p:1")
+        assert _find_button(kb, "sb:start")

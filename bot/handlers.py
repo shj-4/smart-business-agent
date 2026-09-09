@@ -28,9 +28,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=(
             f"أهلًا بك {first} 👋\nأنا مساعدك الذكي لإدارة أعمالك.\n"
             "اختر من القائمة، أو أرسل مباشرة أي عملية أو سؤال\n"
-            "مثل:\n• 300 شيكل لمحمد مقابل مواد\n• كم صرفت هذا الشهر؟"
+            "مثل:\n• 300 شيكل لمحمد مقابل مواد\n• كم صرفت هذا الشهر؟\n"
+            "🕘 اطلب /help لعرض دليل الأوامر الكامل."
         ),
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /help — دليل شامل للأوامر والأزرار بدون أي تحليل AI."""
+    from bot.menus import send_main_menu
+
+    guide = (
+        "📖 دليل استخدام البوت — مساعد أعمالك الذكي\n\n"
+        "🗣️ اكتب مباشرة أي عملية أو سؤال، مثل:\n"
+        "• 300 شيكل لمحمد مقابل مواد\n"
+        "• صرفت 500 دولار فاتورة كهرباء\n"
+        "• كم صرفت هذا الشهر؟ / كم لي على سامر؟\n\n"
+        "🧭 الأزرار الرئيسية:\n"
+        "• 💰 تسجيل عملية — مصاريف/إيراد/طلبية/ملاحظة/مهمة\n"
+        "• 📊 التقارير — ملخصات، روسم، مقارنة فترات\n"
+        "• 📋 مهامي — قوائم المهام وإنجازها وحذفها\n"
+        "• 🧰 أدوات — آخر سجل، ميزانيات، رسم بياني، تصدير، تحويل، بحث، مساحة مشتركة\n\n"
+        "⌨️ الأوامر السريعة:\n"
+        "/menu — القائمة الرئيسية\n"
+        "/done وصف — إنجاز مهمة\n"
+        "/undo — تراجع عن آخر سجل\n"
+        "/convert مبلغ من إلى — تحويل عملة (مثل: /convert 300 ILS USD)\n"
+        "/budget سقف — إدارة ميزانية شهرية\n"
+        "/report — ملخص الفترة\n"
+        "/export — تصدير Excel\n"
+        "/chart — رسم بياني بالمصاريف\n"
+        "/report_on — تقرير دوري تلقائي\n"
+        "/report_off — إيقاف التقرير الدوري\n"
+        "/work — إدارة المساحة المشتركة\n"
+        "/lang — تبديل لغة الواجهة عربي/English\n"
+        "/cancel — إلغاء أي عملية معلّقة\n\n"
+        "📸 صوّر أي فاتورة وأرسلها، وسأستخرج تفاصيلها تلقائيًا.\n"
+        "🎤 أرسل صوتًا وسأفهمه كعملية.\n\n"
+        "تحتاج تفاصيل أكثر؟ أرسل أي سؤال مكتوبًا بصياغتك الطبيعية."
+    )
+    await send_main_menu(update.message, context, text=guide)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,6 +104,13 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("لم أجد مهمة مطابقة ضمن مهامك المعلّقة.")
     finally:
         db.close()
+
+
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /lang — تبديل لغة الواجهة بين العربية والإنجليزية."""
+    from bot.menus import send_lang_menu
+
+    await send_lang_menu(update.message)
 
 
 async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -640,9 +684,11 @@ async def system_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 def register_handlers(app) -> None:
     """يُسجّل كل المعالجات في Application (بما فيها ConversationHandler)."""
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("undo", undo_command))
+    app.add_handler(CommandHandler("lang", lang_command))
     app.add_handler(CommandHandler("convert", convert_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("budget", budget_command))
@@ -666,9 +712,10 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(menu_callback_router))
     app.add_error_handler(system_error_handler)
 
-    # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، التقارير الدورية
+    # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، التقارير الدورية، النسخ الاحتياطي
     from bot.reminders import (
         setup_budget_check,
+        setup_daily_backup,
         setup_overdue_reminder,
         setup_periodic_reports,
     )
@@ -676,3 +723,4 @@ def register_handlers(app) -> None:
     setup_overdue_reminder(app)
     setup_budget_check(app)
     setup_periodic_reports(app)
+    setup_daily_backup(app)

@@ -13,6 +13,7 @@ from app.database.models import (
     ReportPref,
     Task,
     Transaction,
+    UserPref,
     WorkspaceMember,
 )
 
@@ -1069,6 +1070,145 @@ def get_record_by_id(db: Session, telegram_user_id: int, model_name: str, record
         .first()
     )
     return row, model
+
+
+def delete_record_by_id(
+    db: Session, telegram_user_id: int, model_name: str, record_id: int
+) -> str | None:
+    """Soft-delete لسجل محدد بنوعه (معاملة/مهمة/ملاحظة) بضوابط الأدوار.
+
+    الأفراد يمسحون سجلاتهم؛ أعضاء المساحة المشتركة يمسحها المرتكز (المالك) فقط —
+    وأي رفض يُسجَّل في سجل التدقيق. ترجع تسمية السجل المحذوف أو None.
+    """
+    from app.audit import log_audit
+
+    if not can_manage_records(db, telegram_user_id):
+        log_audit(
+            telegram_user_id,
+            "denied_record_delete",
+            f"{model_name}:{record_id}",
+            detail="عضو في مساحة مشتركة وليس المرتكز",
+        )
+        return None
+    row, _ = get_record_by_id(db, telegram_user_id, model_name, record_id)
+    if row is None:
+        return None
+    label = row.description or getattr(row, "amount", None) or "(بدون وصف)"
+    row.deleted_at = datetime.utcnow()
+    row.updated_at = datetime.utcnow()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
+    log_audit(
+        telegram_user_id,
+        "record_delete",
+        f"{model_name}:{record_id}",
+        detail=str(label)[:80],
+    )
+    _invalidate_caches(telegram_user_id)
+    return str(label)
+
+
+def search_records(db: Session, telegram_user_id: int, term: str, limit: int = 30) -> list[dict]:
+    """بحث نصي بسيط في آخر سجلات المستخدم (شخص/تصنيف/وصف/قيمة/نوع).
+
+    الوصف وقيم المبالغ مشفّرة، لذلك نقرأ عددًا محدودًا من السجلات الحديثة
+    ونطابقها في Python (مستوى البيانات الشخصية يكفي أداءً). يعيد نفس بنية
+    list_recent_records ليعاد استخدامها في عرض قوائم الأزرار.
+    """
+    from app.timeutil import to_local_naive
+
+    needle = (term or "").strip().lower()
+    if not needle:
+        return []
+
+    accessible = accessible_user_ids(db, telegram_user_id)
+    per_model = max(limit * 2, 100)
+    matches: list[dict] = []
+    kinds = {
+        "expense": "مصروف",
+        "income": "إيراد",
+        "task": "مهمة",
+        "order": "طلبية",
+        "note": "ملاحظة",
+    }
+
+    for model in (Transaction, Task, Note):
+        rows = (
+            db.query(model)
+            .filter(
+                model.telegram_user_id.in_(accessible),
+                model.deleted_at.is_(None),
+            )
+            .order_by(model.created_at.desc())
+            .limit(per_model)
+            .all()
+        )
+        for r in rows:
+            haystack_parts = [
+                (r.person or ""),
+                (getattr(r, "category", "") or ""),
+                (str(getattr(r, "amount", "") or "")),
+                (r.description or ""),
+                (r.raw_message or ""),
+            ]
+            if getattr(r, "note_type", None):
+                haystack_parts.append(kinds.get(r.note_type, r.note_type))
+            if getattr(r, "type", None) in kinds:
+                haystack_parts.append(kinds[r.type])
+            if any(needle in (part or "").lower() for part in haystack_parts):
+                local_dt = to_local_naive(r.created_at)
+                model_name = model.__name__
+                if model is Transaction:
+                    kind = "expense" if r.type == "expense" else "income"
+                    label = f"{r.amount} {r.currency or ''} - {r.description or ''}".strip(" -")
+                    extra = r.person or ""
+                elif model is Task:
+                    kind = "task"
+                    label = r.description or "(بدون وصف)"
+                    extra = r.person or ""
+                else:
+                    kind = r.note_type or "note"
+                    label = r.description or "(بدون وصف)"
+                    extra = r.person or ""
+                matches.append(
+                    {
+                        "id": r.id,
+                        "model": model_name,
+                        "kind": kind,
+                        "label": label[:80],
+                        "person": extra,
+                        "date": local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
+                        "created_at": r.created_at,
+                    }
+                )
+    matches.sort(key=lambda c: c["created_at"], reverse=True)
+    return matches[:limit]
+
+
+def get_user_lang(db: Session, telegram_user_id: int) -> str:
+    """لغة الواجهة المحفوظة للمستخدم (ar افتراضي)."""
+    row = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
+    return row.lang if row and row.lang else "ar"
+
+
+def set_user_lang(db: Session, telegram_user_id: int, lang: str) -> str:
+    """يحفظ لغة الواجهة ويعيدها (يقنّن إلى ar/en)."""
+    lang = "en" if (lang or "").strip().lower() == "en" else "ar"
+    row = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
+    if row is None:
+        row = UserPref(telegram_user_id=telegram_user_id, lang=lang)
+        db.add(row)
+    else:
+        row.lang = lang
+        row.updated_at = datetime.utcnow()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+    return lang
 
 
 def update_transaction(db: Session, row: Transaction, fields: dict) -> Transaction:

@@ -12,3 +12,5 @@ run_err.log
 *.db
 *.sqlite
 *.sqlite3
+.coverage
+htmlcov/

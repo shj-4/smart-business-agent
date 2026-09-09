@@ -212,3 +212,19 @@ class ReportPref(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True)
+
+
+class UserPref(Base):
+    """تفضيلات واجهة لكل مستخدم (صف واحد لكل معرّف).
+
+    lang: لغة الواجهة — "ar" (الافتراضي) أو "en".
+    """
+
+    __tablename__ = "user_prefs"
+    __table_args__ = (UniqueConstraint("telegram_user_id", name="uq_user_pref_user"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    lang = Column(String(2), nullable=False, default="ar")  # ar | en
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)

@@ -56,3 +56,4 @@ kiwisolver==1.5.1
 pyparsing==3.3.2
 et-xmlfile==2.0.0
 MarkupSafe==3.0.3
+pytest-cov==7.1.0
