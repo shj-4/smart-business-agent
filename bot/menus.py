@@ -135,6 +135,10 @@ TOOLS_MENU = [
     [("🕘 آخر العمليات", "his:p:1")],
     [("🔍 بحث", "sb:start")],
     [("💰 الميزانيات", "bg:list")],
+    [("💳 الديون والأرصدة", "tool:debts")],
+    [("🧾 الفواتير الآجلة", "tool:invoices")],
+    [("🛒 طلبياتي", "tool:orders")],
+    [("⚠️ الحدود الائتمانية", "tool:credit")],
     [("📈 الرسم البياني", "tool:chart")],
     [("📦 تصدير Excel", "ex:menu")],
     [("💱 تحويل عملة", "tool:convert")],
@@ -464,11 +468,11 @@ def _budget_list_payload(db, telegram_user_id: int) -> tuple[list[str], list]:
     for b in budgets:
         budget_monthly_reset(db, b)
         usage = budget_usage(db, b)
-        target_txt = (
-            CURRENCY_NAMES.get(b.currency, b.currency)
-            if b.scope == "currency"
-            else f"الشخص {b.person}"
-        )
+        target_txt = {
+            "currency": CURRENCY_NAMES.get(b.currency, b.currency),
+            "person": f"الشخص {b.person}",
+            "category": f"التصنيف {b.category}",
+        }.get(b.scope, str(getattr(b, b.scope, "")))
         if usage["over"]:
             status = "⚠️ تجاوزت"
         elif usage["percent"] >= 80:
@@ -490,7 +494,10 @@ async def _handle_budget_list(query, context):
     finally:
         db.close()
 
-    rows = [[("➕ إضافة (عملة)", "bg:add:currency"), ("➕ إضافة (شخص)", "bg:add:person")]]
+    rows = [
+        [("➕ إضافة (عملة)", "bg:add:currency"), ("➕ إضافة (شخص)", "bg:add:person")],
+        [("➕ إضافة (تصنيف)", "bg:add:category")],
+    ]
     for b in budgets:
         rows.append([("🗑️ حذف #" + str(b.id), f"bg:del:{b.id}")])
     rows.append([("🏠 القائمة الرئيسية", "menu:main")])
@@ -501,6 +508,8 @@ async def _handle_budget_add(query, context, scope: str):
     context.user_data["pending_budget"] = {"scope": scope}
     if scope == "person":
         prompt = "أرسل اسم الشخص والمبلغ:\nمثال — محمد 1500\n\n(أرسل /cancel للإلغاء)"
+    elif scope == "category":
+        prompt = "أرسل اسم التصنيف والمبلغ:\nمثال — مشتريات 2000\n\n(أرسل /cancel للإلغاء)"
     else:
         prompt = (
             "أرسل رمز العملة والمبلغ:\nمثال — ILS 2000 (أو: شيكل 2000)\n\n(أرسل /cancel للإلغاء)"
@@ -702,8 +711,95 @@ async def _handle_tool(query, context, parts: list):
         await _handle_tool_chart(query, context)
     elif act == "convert":
         await _handle_tool_convert(query, context)
+    elif act in ("debts", "invoices", "orders", "credit"):
+        await _tool_lists(query, context, act)
     else:
         await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
+
+
+async def _tool_lists(query, context, which: str):
+    """يعرض الديون/الفواتير/الطلبيات/الحدود الائتمانية كنصوص + أزرار إجراء."""
+    uid = query.from_user.id
+    from app.database.crud import (
+        credit_usage,
+        list_credit_limits,
+        list_invoices,
+        list_orders,
+        person_debts,
+    )
+    from bot.formatters import (
+        format_credit_limits,
+        format_debts,
+        format_invoices,
+        format_orders,
+    )
+
+    db = SessionLocal()
+    try:
+        if which == "debts":
+            text = format_debts(person_debts(db, uid))
+            rows = [[("🏠 القائمة الرئيسية", "menu:main")]]
+        elif which == "invoices":
+            invoices = list_invoices(db, uid, status=None, limit=30)
+            text = format_invoices(invoices)
+            rows = [
+                [
+                    ("💰 سداد #" + str(inv.id), f"inv:pay:{inv.id}")
+                    for inv in invoices[:6]
+                ]
+            ] if invoices else []
+            rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+        elif which == "orders":
+            orders = list_orders(db, uid, status="open", limit=30)
+            text = format_orders(orders)
+            rows = [[("✅ إنجاز #" + str(o.id), f"ord:done:{o.id}") for o in orders[:6]]]
+            if not rows or not rows[0]:
+                rows = []
+            rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+        else:  # credit
+            limits = list_credit_limits(db, uid)
+            payload = [{"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits]
+            text = format_credit_limits(payload)
+            rows = [[("🏠 القائمة الرئيسية", "menu:main")]]
+    finally:
+        db.close()
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _handle_invoice_pay(query, context, parts: list):
+    from app.database.crud import mark_invoice_paid
+
+    uid = query.from_user.id
+    invoice_id = int(parts[-1]) if parts else 0
+    db = SessionLocal()
+    try:
+        ok = mark_invoice_paid(db, uid, invoice_id)
+    except ValueError:
+        ok = False
+    finally:
+        db.close()
+    text = (
+        f"✅ سُدّدت الفاتورة {invoice_id}."
+        if ok
+        else "لم أجد هذه الفاتورة أو سُدّدت مسبقًا."
+    )
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_order_done(query, context, parts: list):
+    from app.database.crud import set_order_status
+
+    uid = query.from_user.id
+    note_id = int(parts[-1]) if parts else 0
+    db = SessionLocal()
+    try:
+        ok = set_order_status(db, uid, note_id, "done")
+    except ValueError:
+        ok = False
+    finally:
+        db.close()
+    text = f"✅ أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية."
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
 async def _handle_export(query, context, parts: list):
@@ -1002,6 +1098,8 @@ HANDLERS = {
     "sb": _handle_search_start,
     "sr": _handle_search_page,
     "ln": _handle_lang,
+    "inv": _handle_invoice_pay,
+    "ord": _handle_order_done,
 }
 
 

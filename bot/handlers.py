@@ -82,6 +82,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/report_on — تقرير دوري تلقائي\n"
         "/report_off — إيقاف التقرير الدوري\n"
         "/work — إدارة المساحة المشتركة\n"
+        "/debts — من يدين لك ومن تدين له\n"
+        "/invoices — الفواتير الآجلة\n"
+        "/orders — الطلبيات وحالتها\n"
+        "/credit — الحدود الائتمانية للأشخاص\n"
         "/lang — تبديل لغة الواجهة عربي/English\n"
         "/cancel — إلغاء أي عملية معلّقة\n\n"
         "📸 صوّر أي فاتورة وأرسلها، وسأستخرج تفاصيلها تلقائيًا.\n"
@@ -463,9 +467,11 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 scope = "currency"
             elif scope_txt.lower() in ("شخص", "person"):
                 scope = "person"
+            elif scope_txt.lower() in ("تصنيف", "category", "فئة"):
+                scope = "category"
             else:
                 await update.message.reply_text(
-                    "النطاق غير معروف. استخدم: عملة|currency أو شخص|person"
+                    "النطاق غير معروف. استخدم: عملة|currency أو شخص|person أو تصنيف|category"
                 )
                 return
 
@@ -489,7 +495,11 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            scope_txt = budget.currency if budget.scope == "currency" else f"الشخص {budget.person}"
+            scope_txt = {
+                "currency": budget.currency,
+                "person": f"الشخص {budget.person}",
+                "category": f"التصنيف {budget.category}",
+            }.get(budget.scope, budget.scope)
             await update.message.reply_text(
                 f"تم إنشاء ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
                 f"سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه."
@@ -524,10 +534,11 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for b in budgets:
             budget_monthly_reset(db, b)
             usage = budget_usage(db, b)
-            if b.scope == "currency":
-                target_txt = CURRENCY_NAMES.get(b.currency, b.currency)
-            else:
-                target_txt = f"الشخص {b.person}"
+            target_txt = {
+                "currency": CURRENCY_NAMES.get(b.currency, b.currency),
+                "person": f"الشخص {b.person}",
+                "category": f"التصنيف {b.category}",
+            }.get(b.scope, str(getattr(b, b.scope, "")))
             if usage["over"]:
                 status = "⚠️ تجاوزت"
             elif usage["percent"] >= 80:
@@ -542,6 +553,108 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines))
     finally:
         db.close()
+
+
+async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /debts — رصيد كل شخص (من يدين لك ومن تدين له)."""
+    from app.database.crud import person_debts
+    from bot.formatters import format_debts
+
+    telegraph_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        payload = person_debts(db, telegraph_id)
+    finally:
+        db.close()
+    await update.message.reply_text(format_debts(payload))
+
+
+async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /invoices — قائمة الفواتير الآجلة (معلّقة/متأخرة)."""
+    from app.database.crud import list_invoices
+    from bot.formatters import format_invoices
+
+    telegraph_id = update.effective_user.id
+    args = context.args or []
+    status_arg = (args[0].strip().lower() if args else "") or None
+    status_map = {"paid": "paid", "المسددة": "paid", "مدفوع": "paid"}
+    status = status_map.get(status_arg, "pending" if status_arg in (None, "pending", "المعلقة", "معلق") else None)
+
+    db = SessionLocal()
+    try:
+        invoices = list_invoices(db, telegraph_id, status=status, limit=50)
+    finally:
+        db.close()
+
+    title = {
+        "paid": "✅ الفواتير المسددة:",
+        "overdue": "⚠️ الفواتير المتأخرة:",
+        "pending": "🧾 الفواتير الآجلة:",
+    }.get(status or "pending")
+    await update.message.reply_text(format_invoices(invoices, title=title))
+
+
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /orders — قائمة الطلبيات وحالتها (مفتوحة/منجزة)."""
+    from app.database.crud import list_orders
+    from bot.formatters import format_orders
+
+    telegraph_id = update.effective_user.id
+    args = context.args or []
+    status_arg = (args[0].strip().lower() if args else "") or None
+    if status_arg in ("done", "منجزة", "مكتملة", "انجزت"):
+        status = "done"
+    elif status_arg in ("open", "مفتوحة", "المفتوحة"):
+        status = "open"
+    else:
+        status = "open"
+
+    db = SessionLocal()
+    try:
+        orders = list_orders(db, telegraph_id, status=status, limit=50)
+    finally:
+        db.close()
+
+    title = "✅ الطلبيات المنجزة:" if status == "done" else "🛒 الطلبيات المفتوحة:"
+    await update.message.reply_text(format_orders(orders, title=title))
+
+
+async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /credit — حدود ائتمانية للأشخاص.
+
+    /credit قائمة
+    /credit إضافة <الشخص> <المبلغ>   (مثال: /credit إضافة محمد 5000)
+    """
+    from app.database.crud import credit_usage, list_credit_limits, set_credit_limit
+    from bot.formatters import format_credit_limits
+
+    telegraph_id = update.effective_user.id
+    args = context.args or []
+    db = SessionLocal()
+    try:
+        if args and args[0].strip().lower() in ("add", "اضافة", "إضافة"):
+            if len(args) < 3:
+                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة محمد 5000")
+                return
+            person = args[1].strip()
+            limit = args[2]
+            row = set_credit_limit(db, telegraph_id, person, limit)
+            if not row:
+                await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا.")
+                return
+            await update.message.reply_text(
+                f"✅ حُدّد سقف ائتماني لـ {row.person}: {row.limit_amount}\n"
+                "سأرسل تنبيهًا عند الاقتراب من السقف أو تجاوزه."
+            )
+            return
+
+        limits = list_credit_limits(db, telegraph_id)
+        payload = [
+            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
+        ]
+    finally:
+        db.close()
+    await update.message.reply_text(format_credit_limits(payload))
 
 
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -767,6 +880,10 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("feedback", feedback_command))
     app.add_handler(CommandHandler("feedback_ack", feedback_ack_command))
     app.add_handler(CommandHandler("work", work_command))
+    app.add_handler(CommandHandler("debts", debts_command))
+    app.add_handler(CommandHandler("invoices", invoices_command))
+    app.add_handler(CommandHandler("orders", orders_command))
+    app.add_handler(CommandHandler("credit", credit_command))
 
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation
@@ -779,15 +896,20 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(menu_callback_router))
     app.add_error_handler(system_error_handler)
 
-    # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، التقارير الدورية، النسخ الاحتياطي
+    # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، الفواتير، الحدود
+    # الائتمانية، التقارير الدورية، النسخ الاحتياطي
     from bot.reminders import (
         setup_budget_check,
+        setup_credit_check,
         setup_daily_backup,
+        setup_invoice_check,
         setup_overdue_reminder,
         setup_periodic_reports,
     )
 
     setup_overdue_reminder(app)
     setup_budget_check(app)
+    setup_invoice_check(app)
+    setup_credit_check(app)
     setup_periodic_reports(app)
     setup_daily_backup(app)

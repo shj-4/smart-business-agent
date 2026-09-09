@@ -368,3 +368,121 @@ def _build_confirm_keyboard():
             ],
         ]
     )
+
+
+# ---------- ديون الأشخاص (#21) ----------
+
+
+def format_debts(payload: list[dict]) -> str:
+    """يعرض رصيد كل شخص: بماذا تدين له / بماذا يدين لك."""
+    if not payload:
+        return "لا توجد معاملات مع أشخاص بعد.\nسجّل مصروفًا أو إيرادًا باسم شخص وسأتابع ديونه."
+
+    lines = ["💳 الديون والأرصدة:\n"]
+    for d in payload:
+        name = d["person"]
+        base = d.get("base") or ""
+        net = d.get("balance_unified")
+        if net is not None:
+            if net > 0:
+                net_txt = f"✅ {_fmt_amount(net)} {base} لك (يدين لك)"
+            elif net < 0:
+                net_txt = f"⚠️ عليك له {_fmt_amount(abs(net))} {base}"
+            else:
+                net_txt = "↔️ متوازن"
+        elif d.get("partial"):
+            net_txt = "(لا يمكن توحيد العملات الآن — تعذر جلب سعر صرف)"
+        else:
+            net_txt = ""
+        lines.append(f"• {name}{'' if not net_txt else ' — ' + net_txt}")
+
+        for currency, info in (d.get("by_currency") or {}).items():
+            lines.append(
+                f"   • {currency}: الرصيد {_fmt_amount(info['balance'])}"
+                f" ({_fmt_amount(info['expense'])} دفعتُ له / {_fmt_amount(info['income'])} استلمتُ منه)"
+            )
+    lines.append("\nملاحظة: المبالغ الموجبة تعني أن الشخص مدين لك، والسالبة تعني أنك تدين له.")
+    return "\n".join(lines)
+
+
+# ---------- الفواتير الآجلة (#22) ----------
+
+
+def format_invoices(invoices, title: str = "🧾 الفواتير الآجلة:") -> str:
+    """يعرض قائمة فواتير (objects) بحالة ومبلغ وميعاد."""
+    if not invoices:
+        return f"{title}\nلا توجد فواتير."
+
+    lines = [title]
+    for inv in invoices:
+        person = inv.person or "بدون شخص"
+        due = getattr(inv, "due_date", None)
+        due_txt = ""
+        if due is not None:
+            try:
+                from app.timeutil import to_local_naive
+
+                due_txt = to_local_naive(due).strftime("%Y-%m-%d")
+            except Exception:
+                due_txt = ""
+        desc = (inv.description or "")[:40]
+        status_txt = {
+            "pending": "⏳",
+            "overdue": "⚠️",
+            "paid": "✅",
+        }.get(inv.status, inv.status)
+        line = f"{status_txt} #{inv.id} {person}: {_fmt_amount(inv.amount)} {inv.currency or ''}"
+        if due_txt:
+            line += f" — يستحق {due_txt}"
+        if desc:
+            line += f"\n      {desc}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+# ---------- الطلبيات (#38) ----------
+
+
+def format_orders(orders, title: str = "🛒 طلبياتك:") -> str:
+    """يعرض الطلبيات (Note note_type=order) بحالتها."""
+    if not orders:
+        return f"{title}\nلا توجد طلبيات."
+
+    lines = [title]
+    for o in orders:
+        person = o.person or ""
+        desc = (o.description or "(بدون وصف)")[:60]
+        status = o.status or "open"
+        flag = "⏳ مفتوحة" if status == "open" else "✅ منجزة"
+        person_txt = f" — {person}" if person else ""
+        lines.append(f"{o.id}. {desc}{person_txt} ({flag})")
+    return "\n".join(lines)
+
+
+# ---------- الحدود الائتمانية (#26) ----------
+
+
+def format_credit_limits(payload: list[dict]) -> str:
+    """يعرض الحدود الائتمانية مع الاستخدام الحالي لكل شخص."""
+    if not payload:
+        return (
+            "لا توجد حدود ائتمانية.\n"
+            "استخدم: /credit إضافة <الشخص> <المبلغ>\n"
+            "مثال: /credit إضافة محمد 5000"
+        )
+
+    lines = ["⚠️ الحدود الائتمانية:\n"]
+    for d in payload:
+        name = d["person"]
+        u = d["usage"]
+        if u["over"]:
+            status = "⚠️ تجاوزت"
+        elif u["percent"] >= 80:
+            status = "⚠️ قريب من السقف"
+        else:
+            status = "ضمن الحدود"
+        lines.append(
+            f"• {name}: الدين {_fmt_amount(u['outstanding'])} / {_fmt_amount(u['limit'])} "
+            f"({u['percent']}%) — {status}"
+        )
+    return "\n".join(lines)

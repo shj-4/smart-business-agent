@@ -194,6 +194,9 @@ def _notify_budget(context, db, budget, usage) -> None:
     if budget.scope == "currency":
         target_txt = CURRENCY_NAMES.get(budget.currency, budget.currency)
         budget_name = budget.name or f"مصروفات {target_txt}"
+    elif budget.scope == "category":
+        target_txt = budget.category
+        budget_name = budget.name or f"مصروفات {budget.category}"
     else:
         budget_name = budget.name or f"مصروفات {budget.person}"
         target_txt = budget.person
@@ -229,6 +232,156 @@ def setup_budget_check(app) -> None:
         name="budget_check",
     )
     logger.info("تم تسجيل فحص الميزانيات كل %d دقيقة", CHECK_INTERVAL_MINUTES)
+
+
+# ---------- تنبيهات الفواتير الآجلة (#22) ----------
+
+
+def invoice_check(context) -> None:
+    """يعلّم الفواتير المعلّقة المتأخرة ويرسل تنبيهًا (مرة واحدة) لكل أصحابها.
+
+    يُشار إلى الفواتير التي لا تزال pending مع تاريخ استحقاق ماضٍ على أنها
+    overdue، ويُنبَّه الأعضاء بلا تكرار بفضل عمود alerted (لا يُعاد إلا عند
+    إنشاء فاتورة جديدة متأخرة).
+    """
+    from app.database.crud import accessible_user_ids, mark_overdue_invoices
+
+    db = SessionLocal()
+    try:
+        overdue = mark_overdue_invoices(db)
+    except Exception:
+        logger.exception("خطأ في جلب الفواتير المتأخرة")
+        db.close()
+        return
+    db.close()
+
+    for inv in overdue:
+        db = SessionLocal()
+        try:
+            if inv.alerted:
+                db.close()
+                continue
+            owner = inv.telegram_user_id
+            lines = [
+                "⚠️ فاتورة آجلة استحقت ولم تُسدَّد!",
+                f"#{inv.id} {inv.person or 'بدون شخص'}: {inv.amount} {inv.currency or ''}",
+            ]
+            if inv.description:
+                lines.append(inv.description[:80])
+            sent_any = False
+            for uid in accessible_user_ids(db, owner):
+                try:
+                    context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
+                    sent_any = True
+                except Exception as exc:
+                    logger.error("فشل إرسال تنبيه فاتورة %s للمستخدم %s: %s", inv.id, uid, exc)
+            if sent_any:
+                inv.alerted = True
+                inv.updated_at = now_utc()
+                db.commit()
+                logger.info("تنبيه فاتورة متأخرة %s أُرسل", inv.id)
+        except Exception:
+            logger.exception("خطأ في إرسال تنبيه فاتورة %s", inv.id)
+        finally:
+            db.close()
+
+
+def setup_invoice_check(app) -> None:
+    """يُسجّل مهمة متكررة لفحص الفواتير الآجلة المتأخرة."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — تنبيهات الفواتير لن تعمل.")
+        return
+    app.job_queue.run_repeating(
+        invoice_check,
+        interval=timedelta(minutes=CHECK_INTERVAL_MINUTES),
+        first=timedelta(seconds=50),
+        name="invoice_check",
+    )
+    logger.info("تم تسجيل فحص الفواتير المتأخرة كل %d دقيقة", CHECK_INTERVAL_MINUTES)
+
+
+# ---------- تنبيهات الحدود الائتمانية (#26) ----------
+
+
+def credit_check(context) -> None:
+    """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى)."""
+    from app.database.crud import credit_usage, list_credit_limits
+    from app.database.models import CreditLimit
+
+    db = SessionLocal()
+    try:
+        user_ids = db.query(CreditLimit.telegram_user_id).distinct().all()
+    except Exception:
+        logger.exception("خطأ في جلب المستخدمين للحدود الائتمانية")
+        db.close()
+        return
+    db.close()
+
+    for (uid,) in user_ids:
+        db = SessionLocal()
+        try:
+            limits = list_credit_limits(db, uid)
+            for lim in limits:
+                usage = credit_usage(db, lim)
+                if usage["outstanding"] <= 0 or usage["limit"] <= 0:
+                    continue
+                _notify_credit(context, db, lim, usage)
+        except Exception:
+            logger.exception("خطأ في فحص حد ائتماني للمستخدم %s", uid)
+        finally:
+            db.close()
+
+
+def _notify_credit(context, db, limit_row, usage) -> None:
+    """ينبّه على اقتراب/تجاوز حد ائتماني واحد إن استحق (مرة لكل مستوى)."""
+    from app.database.crud import accessible_user_ids
+
+    over = usage["over"]
+    percent = usage["percent"]
+    name = limit_row.person
+
+    notify_status = None
+    if over and limit_row.alerted_status < 2:
+        name_line = f"⚠️ تجاوزت حدّك الائتماني مع **{name}**!"
+        detail = f"الدين عليك له: {usage['outstanding']} من أصل {usage['limit']} ({usage['percent']}%)"
+        notify_status = 2
+    elif percent >= WARNING_THRESHOLD * 100 and limit_row.alerted_status < 1:
+        name_line = f"⚠️ اقتربت من حدّك الائتماني مع **{name}**"
+        detail = (
+            f"الدين عليك له: {usage['outstanding']} من أصل {usage['limit']} ({usage['percent']}%)"
+        )
+        notify_status = 1
+    else:
+        return
+
+    sent_any = False
+    for uid in accessible_user_ids(db, limit_row.telegram_user_id):
+        try:
+            context.bot.send_message(
+                chat_id=uid, text=f"{name_line}\n{detail}", parse_mode="Markdown"
+            )
+            sent_any = True
+        except Exception as exc:
+            logger.error("فشل إرسال تنبيه حد ائتماني %s للمستخدم %s: %s", limit_row.id, uid, exc)
+    if sent_any:
+        limit_row.alerted_status = notify_status
+        limit_row.updated_at = now_utc()
+        db.commit()
+        logger.info("تنبيه حد ائتماني %s أُرسل (status=%s)", limit_row.id, notify_status)
+
+
+def setup_credit_check(app) -> None:
+    """يُسجّل مهمة متكررة لفحص الحدود الائتمانية."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — تنبيهات الحدود الائتمانية لن تعمل.")
+        return
+    app.job_queue.run_repeating(
+        credit_check,
+        interval=timedelta(minutes=CHECK_INTERVAL_MINUTES),
+        first=timedelta(seconds=55),
+        name="credit_check",
+    )
+    logger.info("تم تسجيل فحص الحدود الائتمانية كل %d دقيقة", CHECK_INTERVAL_MINUTES)
 
 
 # ---------- التقارير الدورية التلقائية ----------

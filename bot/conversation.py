@@ -171,6 +171,8 @@ def parse_budget_text(scope: str, raw: str) -> dict | None:
         if not code:
             return {"error": "عملة غير معروفة. جرّب رمزًا مثل ILS/USD/JOD أو شيكل/دولار/دينار"}
         target = code
+    elif scope == "category" and not target:
+        return {"error": "أرسل اسم التصنيف والمبلغ (مثال: مشتريات 2000)"}
     return {"scope": scope, "target": target, "monthly_limit": amount}
 
 
@@ -219,7 +221,11 @@ async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from bot.menus import MAIN_HOME_KEYBOARD
 
     if parsed is None:
-        example = "ILS 2000" if scope == "currency" else "محمد 1500"
+        example = {
+            "currency": "ILS 2000",
+            "person": "محمد 1500",
+            "category": "مشتريات 2000",
+        }.get(scope, "ILS 2000")
         await update.message.reply_text(f"لم أفهم الصيغة. أرسل مثل: {example}")
         return None
     if parsed.get("error"):
@@ -242,7 +248,11 @@ async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return None
 
-    scope_txt = budget.currency if budget.scope == "currency" else f"الشخص {budget.person}"
+    scope_txt = {
+        "currency": budget.currency,
+        "person": f"الشخص {budget.person}",
+        "category": f"التصنيف {budget.category}",
+    }.get(budget.scope, budget.scope)
     await update.message.reply_text(
         f"✅ أُنشئت ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
         "سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه.",

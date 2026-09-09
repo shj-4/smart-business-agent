@@ -66,6 +66,10 @@ class Transaction(Base):
     amount_in_base_currency = Column(EncryptedNumeric(), nullable=True)
     base_currency_at_creation = Column(String(16), nullable=True)
 
+    # حقول الضريبة (VAT): نسبة وكمية اختياريتان تُستخرجان عند التسجيل
+    vat_rate = Column(Numeric(6, 3), nullable=True)  # النسبة المؤوية (مثل 17.000)
+    vat_amount = Column(Numeric(12, 2), nullable=True)  # قيمة الضريبة بعملة العملية
+
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True)
@@ -92,6 +96,7 @@ class Note(Base):
     description = Column(EncryptedString(), nullable=True)  # نص الطلبية/الملاحظة (مشفر)
     person = Column(String(255), nullable=True)  # المورد أو العميل المرتبط إن وُجد
     category = Column(String(64), nullable=True)  # تصنيف اختياري (مشتريات، مواد خام...)
+    status = Column(String(16), nullable=True)  # الطلبيات: open | done (None للملاحظات)
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
@@ -169,6 +174,7 @@ class Budget(Base):
     scope يحدد نوع السقف:
       - "currency": سقف على إجمالي مصروفات عملة معيّنة (currency مثل ILS).
       - "person": سقف على إجمالي مصروفات شخص معيّن (تعامل بالدين).
+      - "category": سقف على مصروفات تصنيف معيّن (category مثل "مشتريات").
     monthly_limit: الحد الشهري.
     alerted_status: 0=لا تنبيه، 1=تنبيه اقتراب (≥80%)، 2=تنبيه تجاوز (≥100%).
     month_key: "YYYY-MM" للميزانية الجارية — يتغير الشهر عند قبول تنبيه جديد.
@@ -180,19 +186,67 @@ class Budget(Base):
             "telegram_user_id", "scope", "currency", name="uq_budget_user_scope_currency"
         ),
         UniqueConstraint("telegram_user_id", "scope", "person", name="uq_budget_user_scope_person"),
+        UniqueConstraint(
+            "telegram_user_id", "scope", "category", name="uq_budget_user_scope_category"
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
 
     name = Column(String(255), nullable=True)  # وصف/اسم اختياري
-    scope = Column(String(16), nullable=False)  # currency | person
+    scope = Column(String(16), nullable=False)  # currency | person | category
     currency = Column(String(16), nullable=True)  # عند scope=currency
     person = Column(String(255), nullable=True)  # عند scope=person
+    category = Column(String(64), nullable=True)  # عند scope=category
     monthly_limit = Column(Numeric(12, 2), nullable=False)
 
     alerted_status = Column(Integer, default=0, nullable=False)  # 0|1|2
     month_key = Column(String(7), default="", nullable=False)  # "YYYY-MM"
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class CreditLimit(Base):
+    """سقف ائتماني لشخص: أقصى دين عليك له (expense - income) يُنبَّه عند اقترابه.
+
+    طبيعة التعامل بالدين خطرة، لذا يوثّق المستخدم حدودًا ائتمانية للأشخاص ويعطي
+    البوت تنبيهًا عند الاقتراب من السقف أو تجاوزه (دون حجب العمليات).
+    """
+
+    __tablename__ = "credit_limits"
+    __table_args__ = (UniqueConstraint("telegram_user_id", "person", name="uq_credit_user_person"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    person = Column(String(255), nullable=False)
+    limit_amount = Column(Numeric(12, 2), nullable=False)
+
+    alerted_status = Column(Integer, default=0, nullable=False)  # 0=لا تنبيه | 1=اقتراب | 2=تجاوز
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class Invoice(Base):
+    """فاتورة آجلة (ذمم): مبلغ مستحق لشخص أو مورّد بتواريخ استحقاق.
+
+    status: pending | paid | overdue. عنصر "paid_at" يوثّق تاريخ السداد.
+    تنبيه الفاتورة المتأخرة يُرسل مرة واحدة بفضل عمود alerted.
+    """
+
+    __tablename__ = "invoices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    person = Column(String(255), nullable=True)  # المورّد/الجهة المستحقة
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(16), nullable=True)
+    description = Column(EncryptedString(), nullable=True)  # وصف الفاتورة (مشفر)
+    due_date = Column(DateTime, nullable=True)  # تاريخ الاستحقاق (UTC)
+    status = Column(String(16), nullable=False, default="pending")  # pending|paid|overdue
+    paid_at = Column(DateTime, nullable=True)
+    alerted = Column(Boolean, default=False, nullable=False)  # أُرسل تنبيه تأخر؟ (مرة واحدة)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True)

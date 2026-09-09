@@ -10,6 +10,8 @@ from app.cache import clear as clear_cache
 from app.database.models import (
     Budget,
     CorrectionFeedback,
+    CreditLimit,
+    Invoice,
     Note,
     ReportPref,
     Task,
@@ -698,6 +700,13 @@ def create_transaction(
     currency = normalize_currency(data.get("currency"))
     base_amount, base_at = _best_effort_base_amount(amount, currency)
 
+    vat_rate = _to_decimal(data.get("vat_rate"))
+    vat_amount = _to_decimal(data.get("vat_amount"))
+    if vat_rate is not None and (vat_rate < 0 or vat_rate > 1000):
+        vat_rate = None
+    if vat_amount is not None and vat_amount < 0:
+        vat_amount = None
+
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
         telegram_message_id=telegram_message_id,
@@ -710,6 +719,8 @@ def create_transaction(
         raw_message=raw_message,
         amount_in_base_currency=base_amount,
         base_currency_at_creation=base_at,
+        vat_rate=vat_rate.quantize(Decimal("0.001")) if vat_rate is not None else None,
+        vat_amount=vat_amount.quantize(Decimal("0.01")) if vat_amount is not None else None,
     )
     db.add(transaction)
     try:
@@ -741,6 +752,7 @@ def create_note(
         or "ملاحظة",
         person=_clean_person(data.get("person")),
         category=_clean_text(data.get("category")),
+        status="open" if data.get("type") == "order" else None,
         raw_message=raw_message,
     )
     db.add(note)
@@ -1232,17 +1244,21 @@ def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> 
                 label = r.description or "(بدون وصف)"
                 extra = r.person or ""
 
-            candidates.append(
-                {
-                    "id": r.id,
-                    "model": model.__name__,
-                    "kind": kind,
-                    "label": label[:80],
-                    "person": extra,
-                    "date": date_str,
-                    "created_at": r.created_at,
-                }
-            )
+            entry = {
+                "id": r.id,
+                "model": model.__name__,
+                "kind": kind,
+                "label": label[:80],
+                "person": extra,
+                "date": date_str,
+                "created_at": r.created_at,
+            }
+            if model is Transaction:
+                entry["vat_rate"] = r.vat_rate
+                entry["vat_amount"] = r.vat_amount
+            elif getattr(r, "note_type", None) == "order":
+                entry["status"] = r.status or "open"
+            candidates.append(entry)
 
     candidates.sort(key=lambda c: c["created_at"], reverse=True)
     return candidates[:limit]
@@ -1385,6 +1401,11 @@ def search_records(
                         "person": extra,
                         "date": local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
                         "created_at": r.created_at,
+                        "vat_rate": r.vat_rate if model is Transaction else None,
+                        "vat_amount": r.vat_amount if model is Transaction else None,
+                        "status": (r.status or "open")
+                        if getattr(r, "note_type", None) == "order"
+                        else None,
                     }
                 )
     matches.sort(key=lambda c: c["created_at"], reverse=True)
@@ -1525,13 +1546,15 @@ def create_budget(
     monthly_limit,
     name: str | None = None,
 ) -> Budget | None:
-    """ينشئ ميزانية شهرية: scope=currency أو scope=person، target هو العملة أو الاسم.
+    """ينشئ ميزانية شهرية: scope=currency/person/category، target هو العملة/الاسم/التصنيف.
 
     يعيد None إذا الميزانية موجودة مسبقًا (لكل مستخدم واحد لكل scope/هدف).
     """
 
+    scope = (scope or "").lower().strip()
     currency = normalize_currency(target) if scope == "currency" else None
     person = target.strip() if scope == "person" else None
+    category = _clean_text(target) if scope == "category" else None
 
     if scope == "currency":
         from app.exchange import CURRENCY_NAMES
@@ -1550,7 +1573,7 @@ def create_budget(
     if limit <= 0:
         return None
 
-    if not currency and not person:
+    if not currency and not person and not category:
         return None
 
     budget = Budget(
@@ -1558,6 +1581,7 @@ def create_budget(
         scope=scope,
         currency=currency,
         person=person,
+        category=category,
         name=_clean_text(name),
         monthly_limit=limit,
         month_key=_current_month_key(),
@@ -1632,6 +1656,8 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     )
     if budget.scope == "currency":
         q = q.filter(Transaction.currency == budget.currency)
+    elif budget.scope == "category":
+        q = q.filter(Transaction.category.like(f"%{budget.category}%"))
     else:
         q = q.filter(Transaction.person.like(f"%{budget.person}%"))
 
@@ -1658,6 +1684,340 @@ def budget_monthly_reset(db: Session, budget: Budget) -> bool:
         db.commit()
         return True
     return False
+
+
+# ---------- الديون والأشخاص (#21) ----------
+
+
+def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
+    """رصيد كل شخص بعدة عملات (بماذا تدين له / بماذا يدين لك).
+
+    يعيد قائمة مرتبة بالأحدث: لكل شخص by_currency: {مع الصفوف: income/expense/balance}
+    و balance_unified (بالعملة الأساس بدقة تاريخية عبر المبالغ المخزّنة) إن أمكن.
+    balance = income - expense: موجب = يدين لك، سالب = تدين له.
+    """
+    from app.config import settings
+
+    base = (settings.base_currency or "").upper().strip()
+    ids = accessible_user_ids(db, telegram_user_id)
+    rows = (
+        db.query(Transaction)
+        .filter(
+            Transaction.telegram_user_id.in_(ids),
+            Transaction.deleted_at.is_(None),
+            Transaction.person.isnot(None),
+        )
+        .all()
+    )
+
+    persons: dict[str, list] = {}
+    for r in rows:
+        name = (r.person or "").strip()
+        if not name:
+            continue
+        persons.setdefault(name, []).append(r)
+
+    result = []
+    for name, pr in persons.items():
+        per_cur: dict[str, dict] = {}
+        for r in pr:
+            c = r.currency or "غير محددة"
+            cell = per_cur.setdefault(c, {"income": Decimal("0"), "expense": Decimal("0")})
+            if r.amount is not None:
+                cell[r.type] = cell.get(r.type, Decimal("0")) + r.amount
+        by_currency = {}
+        for c, cell in per_cur.items():
+            balance = cell["income"] - cell["expense"]
+            by_currency[c] = {
+                "income": cell["income"].quantize(Decimal("0.01")),
+                "expense": cell["expense"].quantize(Decimal("0.01")),
+                "balance": balance.quantize(Decimal("0.01")),
+            }
+
+        unified_inc = _unified_totals_for_rows(
+            [r for r in pr if r.type == "income"], base
+        )["total"]
+        unified_exp = _unified_totals_for_rows(
+            [r for r in pr if r.type == "expense"], base
+        )["total"]
+        if unified_inc is not None and unified_exp is not None:
+            net = unified_inc - unified_exp
+        else:
+            net = None
+        result.append(
+            {
+                "person": name,
+                "by_currency": by_currency,
+                "balance_unified": net.quantize(Decimal("0.01")) if net is not None else None,
+                "base": base,
+                "partial": unified_inc is None or unified_exp is None,
+                # اتجاه الدين بلا أرقام: ما إذا كان صافي كل شيء موجبًا (يدين لك)
+                "net_positive": net is not None and net >= 0,
+                "last_activity": max((r.created_at for r in pr), default=None),
+            }
+        )
+
+    result.sort(key=lambda d: (d["last_activity"] is not None, d["last_activity"]), reverse=True)
+    return result
+
+
+# ---------- الفواتير الآجلة (#22) ----------
+
+
+def create_invoice(
+    db: Session,
+    telegram_user_id: int,
+    data: dict,
+    raw_message: str | None = None,
+) -> Invoice | None:
+    """ينشئ فاتورة آجلة؛ amount إلزامي. يعيد None على قيم غير صالحة."""
+    from app.config import settings
+
+    amount = _to_decimal(data.get("amount"))
+    if amount is None or amount <= 0:
+        return None
+    currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper()
+    due_date = data.get("due_date")
+    if isinstance(due_date, str) and due_date.strip():
+        try:
+            due_date = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+        except ValueError:
+            due_date = None
+        if due_date is not None and due_date.tzinfo is not None:
+            from app.timeutil import to_utc_naive
+
+            due_date = to_utc_naive(due_date)
+    if isinstance(due_date, datetime) and due_date.tzinfo is not None:
+        from app.timeutil import to_utc_naive
+
+        due_date = to_utc_naive(due_date)
+
+    invoice = Invoice(
+        telegram_user_id=telegram_user_id,
+        person=_clean_person(data.get("person")),
+        amount=amount.quantize(Decimal("0.01")),
+        currency=currency or None,
+        description=_clean_text(data.get("description")) or _clean_text(raw_message),
+        due_date=due_date,
+        status="pending",
+        alerted=False,
+    )
+    db.add(invoice)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
+    db.refresh(invoice)
+    _invalidate_caches(db, telegram_user_id)
+    return invoice
+
+
+def list_invoices(
+    db: Session, telegram_user_id: int, status: str | None = None, limit: int = 50
+) -> list[Invoice]:
+    """فواتير المستخدم (كل أعضاء المساحة) مطابقة لحالة اختيارية، الأحدث أولًا."""
+    from app.timeutil import now_utc, to_local_naive
+
+    q = db.query(Invoice).filter(
+        Invoice.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id))
+    )
+    if status and status in ("pending", "paid", "overdue"):
+        q = q.filter(Invoice.status == status)
+    invoices = q.order_by(Invoice.created_at.desc()).limit(limit).all()
+
+    # تعليم المتأخرة (حالة عرض) عند قراءتها — التغيير الفعلي للموديل الوارد في
+    # المهمة يبقى في مهمة الفحص الدوري حتى لا نكتب على كل قراءة.
+    for inv in invoices:
+        if (
+            inv.status == "pending"
+            and inv.due_date is not None
+            and to_local_naive(inv.due_date) < to_local_naive(now_utc())
+        ):
+            inv.status = "overdue"
+    return invoices
+
+
+def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bool:
+    """سداد فاتورة آجلة — تعيد True عند النجاح."""
+    invoice = (
+        db.query(Invoice)
+        .filter(
+            Invoice.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Invoice.id == invoice_id,
+        )
+        .first()
+    )
+    if invoice is None or invoice.status == "paid":
+        return False
+    from app.timeutil import now_utc
+
+    invoice.status = "paid"
+    invoice.paid_at = now_utc()
+    invoice.alerted = True  # لا مزيد من تنبيهات التأخر
+    db.commit()
+    _invalidate_caches(db, telegram_user_id)
+    return True
+
+
+def mark_overdue_invoices(db: Session, now_dt=None) -> list[Invoice]:
+    """يميّز الفواتير المعلّقة المتأخرة (استحقاقها مضى) — يرجّع المتأخرة حديثًا.
+
+    مستخدم من مهمة الفحص الدوري (reminders)؛ يكتب الحالة للعرض فقط دون إرسال.
+    """
+    from app.timeutil import now_utc
+
+    now_dt = now_dt or now_utc()
+    overdue = []
+    rows = (
+        db.query(Invoice)
+        .filter(Invoice.status == "pending", Invoice.due_date.isnot(None), Invoice.due_date < now_dt)
+        .all()
+    )
+    for inv in rows:
+        if inv.status != "overdue":
+            inv.status = "overdue"
+            overdue.append(inv)
+    if overdue:
+        db.commit()
+        for inv in overdue:
+            db.refresh(inv)  # حتى تبقى سماته قابلة للقراءة بعد إغلاق الجلسة
+    return overdue
+
+
+# ---------- دورة حياة الطلبيات (#38) ----------
+
+ORDER_STATUSES = ("open", "done")
+
+
+def list_orders(
+    db: Session, telegram_user_id: int, status: str | None = None, limit: int = 50
+) -> list[Note]:
+    """الطلبيات (note_type=order) مع فلتر حالة اختياري، الأحدث أولًا."""
+    q = db.query(Note).filter(
+        Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Note.deleted_at.is_(None),
+        Note.note_type == "order",
+    )
+    if status and status in ORDER_STATUSES:
+        q = q.filter(Note.status == status)
+    return q.order_by(Note.created_at.desc()).limit(limit).all()
+
+
+def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: str) -> bool:
+    """يغيّر حالة طلبية (open/done) — يعيد False إن لم توجد طلبية أو حالة غير صالحة."""
+    if status not in ORDER_STATUSES:
+        return False
+    note = (
+        db.query(Note)
+        .filter(
+            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Note.id == note_id,
+            Note.note_type == "order",
+            Note.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if note is None:
+        return False
+    from app.timeutil import now_utc
+
+    note.status = status
+    note.updated_at = now_utc()
+    db.commit()
+    _invalidate_caches(db, telegram_user_id)
+    return True
+
+
+# ---------- الحدود الائتمانية (#26) ----------
+
+
+def set_credit_limit(
+    db: Session, telegram_user_id: int, person: str, limit_amount,
+) -> CreditLimit | None:
+    """يحدد/يحدّث سقفًا ائتمانيًا لشخص. يعيد None على قيم غير صالحة."""
+    person = _clean_person(person)
+    if not person:
+        return None
+    try:
+        limit = Decimal(str(limit_amount)).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        return None
+    if limit <= 0:
+        return None
+
+    row = (
+        db.query(CreditLimit)
+        .filter(
+            CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            CreditLimit.person == person,
+        )
+        .first()
+    )
+    if row is None:
+        row = CreditLimit(telegram_user_id=telegram_user_id, person=person, limit_amount=limit)
+        db.add(row)
+    else:
+        row.limit_amount = limit
+    from app.timeutil import now_utc
+
+    row.alerted_status = 0  # إعادة تنبيه بحدود جديدة
+    row.updated_at = now_utc()
+    db.commit()
+    db.refresh(row)
+    _invalidate_caches(db, telegram_user_id)
+    return row
+
+
+def list_credit_limits(db: Session, telegram_user_id: int) -> list[CreditLimit]:
+    return (
+        db.query(CreditLimit)
+        .filter(CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)))
+        .order_by(CreditLimit.created_at.asc())
+        .all()
+    )
+
+
+def get_credit_limit(db: Session, telegram_user_id: int, person: str) -> CreditLimit | None:
+    return (
+        db.query(CreditLimit)
+        .filter(
+            CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            CreditLimit.person == person,
+        )
+        .first()
+    )
+
+
+def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
+    """استخدام السقف الائتماني لشخص: outstanding = المصروفات - الإيرادات.
+
+    موجب = الدين عليك لهذا الشخص؛ سلبي = يستفيد هو منك. يعيد:
+    {outstanding, limit, percent, over} حيث percent نسبة الدين الفعلي (الموجب فقط).
+    """
+    rows = (
+        db.query(Transaction)
+        .filter(
+            Transaction.telegram_user_id.in_(accessible_user_ids(db, limit_row.telegram_user_id)),
+            Transaction.deleted_at.is_(None),
+            Transaction.person.like(f"%{limit_row.person}%"),
+        )
+        .all()
+    )
+    income = sum((r.amount for r in rows if r.amount is not None and r.type == "income"), Decimal("0"))
+    expense = sum(
+        (r.amount for r in rows if r.amount is not None and r.type == "expense"), Decimal("0")
+    )
+    outstanding = expense - income
+    total = outstanding.quantize(Decimal("0.01"))
+    limit = (limit_row.limit_amount or Decimal("0")).quantize(Decimal("0.01"))
+    percent = float(total / limit * 100) if limit and total > 0 else 0.0
+    return {
+        "outstanding": total,
+        "limit": limit,
+        "percent": round(percent, 1),
+        "over": total >= limit,
+    }
 
 
 # ---------- تفضيلات التقارير الدورية ----------

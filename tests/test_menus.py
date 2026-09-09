@@ -393,6 +393,77 @@ class TestBudgetButtons:
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
         assert "حُذفت" in edited[0][0]
 
+    def test_budget_category_button_add_and_list(self, db_session, monkeypatch):
+        from app.database.crud import create_budget
+
+        create_budget(db_session, USER_A, "category", "مشتريات", "2000")
+        q, edited = _build_query("bg:list")
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert _find_button(edited[0][1], "bg:add:category")
+        assert "التصنيف مشتريات" in edited[0][0]
+
+    def test_budget_category_add_sets_pending(self):
+        q, edited = _build_query("bg:add:category")
+        ctx = _context()
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        assert ctx.user_data.get("pending_budget") == {"scope": "category"}
+        assert "مشتريات 2000" in edited[0][0]
+
+
+class TestDebtsInvoicesOrdersButtons:
+    def test_tool_debts_lists_balances(self, db_session, monkeypatch):
+        from app.database.crud import create_transaction
+
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر"}, "دفعة"
+        )
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("tool:debts")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "سامر" in edited[0][0]
+
+    def test_tool_invoices_shows_and_pay_button_works(self, db_session, monkeypatch):
+        from app.database.crud import create_invoice
+
+        inv = create_invoice(
+            db_session, USER_A, {"person": "مورّد", "amount": 500, "currency": "ILS"}, "فاتورة"
+        )
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("tool:invoices")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "مورّد" in edited[0][0]
+        assert _find_button(edited[0][1], f"inv:pay:{inv.id}")
+
+        q2, edited2 = _build_query(f"inv:pay:{inv.id}")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q2), _context()))
+        assert "سُدّدت" in edited2[0][0]
+
+    def test_tool_orders_done_button(self, db_session, monkeypatch):
+        from app.database.crud import create_note
+
+        note = create_note(
+            db_session, USER_A, {"type": "order", "description": "مواد من المورّد"}, "طلبية مواد"
+        )
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("tool:orders")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "مواد من المورّد" in edited[0][0]
+        assert _find_button(edited[0][1], f"ord:done:{note.id}")
+
+        q2, edited2 = _build_query(f"ord:done:{note.id}")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q2), _context()))
+        assert "أُنجز" in edited2[0][0]
+
+    def test_tool_credit_shows_limits(self, db_session, monkeypatch):
+        from app.database.crud import set_credit_limit
+
+        set_credit_limit(db_session, USER_A, "خالد", "5000")
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query("tool:credit")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "خالد" in edited[0][0]
+
 
 class TestWorkspaceButtons:
     def test_workspace_status_empty_offers_create(self):

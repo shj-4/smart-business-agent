@@ -9,14 +9,25 @@ from decimal import Decimal
 
 from app.database.crud import (
     complete_task,
+    create_invoice,
+    create_note,
     create_task,
     create_transaction,
+    credit_usage,
+    list_credit_limits,
+    list_invoices,
+    list_orders,
     list_pending_tasks,
+    mark_invoice_paid,
+    mark_overdue_invoices,
     mark_overdue_tasks,
     monthly_totals,
+    person_debts,
     restore_last_deleted,
     run_query,
     search_records,
+    set_credit_limit,
+    set_order_status,
     undo_last_record,
 )
 from app.database.models import Note, Task, Transaction
@@ -470,6 +481,263 @@ class TestSearchRecordsWindow:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0]["model"] == "Transaction"
+
+
+# ---------- الفواتير الآجلة (#22) ----------
+
+
+class TestInvoiceCrud:
+    def _invoice(self, db_session, **over):
+        data = {
+            "person": "مورّد الأثاث",
+            "amount": 1200,
+            "currency": "ILS",
+            "description": "تجهيزات مكتب",
+        }
+        data.update(over)
+        return create_invoice(db_session, USER_A, data, raw_message="فاتورة تجهيزات")
+
+    def test_create_and_list(self, db_session):
+        inv = self._invoice(db_session)
+        assert inv is not None
+        assert inv.status == "pending"
+        lst = list_invoices(db_session, USER_A)
+        assert len(lst) == 1
+        assert lst[0].id == inv.id
+
+    def test_create_rejects_non_positive_amount(self, db_session):
+        assert self._invoice(db_session, amount=0) is None
+        assert self._invoice(db_session, amount=-5) is None
+
+    def test_mark_paid(self, db_session):
+        inv = self._invoice(db_session)
+        assert mark_invoice_paid(db_session, USER_A, inv.id) is True
+        assert list_invoices(db_session, USER_A)[0].status == "paid"
+        # الدفع الثاني مرفوض
+        assert mark_invoice_paid(db_session, USER_A, inv.id) is False
+
+    def test_overdue_marking(self, db_session):
+        inv = self._invoice(db_session)
+        inv.due_date = now_utc() - timedelta(days=2)
+        db_session.commit()
+        overdue = mark_overdue_invoices(db_session)
+        assert [o.id for o in overdue] == [inv.id]
+        assert list_invoices(db_session, USER_A, status="overdue")[0].id == inv.id
+
+    def test_scoped_by_user(self, db_session):
+        inv = self._invoice(db_session)
+        assert mark_invoice_paid(db_session, USER_B, inv.id) is False
+        assert list_invoices(db_session, USER_B) == []
+
+
+# ---------- دورة حياة الطلبيات (#38) ----------
+
+
+class TestOrderStatus:
+    def test_create_order_starts_open(self, db_session):
+        note = create_note(
+            db_session,
+            USER_A,
+            {"type": "order", "description": "5 صناديق من المورّد"},
+            raw_message="طلبية 5 صناديق",
+        )
+        assert note.note_type == "order"
+        assert note.status == "open"
+
+    def test_plain_note_has_no_status(self, db_session):
+        note = create_note(
+            db_session,
+            USER_A,
+            {"type": "note", "description": "اجتماع يوم السبت"},
+            raw_message="ملاحظة اجتماع",
+        )
+        assert note.status is None
+
+    def test_mark_done_and_list(self, db_session):
+        note = create_note(
+            db_session, USER_A, {"type": "order", "description": "مواد"}, "طلبية مواد"
+        )
+        assert set_order_status(db_session, USER_A, note.id, "done") is True
+        done = list_orders(db_session, USER_A, status="done")
+        assert [o.id for o in done] == [note.id]
+        assert list_orders(db_session, USER_A, status="open") == []
+
+    def test_rejects_invalid_status_and_foreign_note(self, db_session):
+        note = create_note(
+            db_session, USER_A, {"type": "order", "description": "مواد"}, "طلبية مواد"
+        )
+        assert set_order_status(db_session, USER_A, note.id, "bad") is False
+        assert set_order_status(db_session, USER_B, note.id, "done") is False
+        assert note.status == "open"
+
+
+# ---------- حقول الضريبة (VAT) (#24) ----------
+
+
+class TestVatFields:
+    def test_create_transaction_stores_vat(self, db_session):
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 117,
+                "currency": "ILS",
+                "vat_rate": 17,
+                "vat_amount": 17,
+                "description": "فاتورة كهرباء ضريبية",
+            },
+            raw_message="فاتورة",
+        )
+        assert tx.vat_rate == Decimal("17.000")
+        assert tx.vat_amount == Decimal("17.00")
+
+    def test_invalid_vat_rate_rejected(self, db_session):
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 100,
+                "currency": "ILS",
+                "vat_rate": 5000,
+                "vat_amount": -5,
+                "description": "اختبار",
+            },
+            raw_message="اختبار",
+        )
+        assert tx.vat_rate is None
+        assert tx.vat_amount is None
+
+    def test_vat_fields_in_recent_records(self, db_session):
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 117,
+                "currency": "ILS",
+                "vat_rate": 17,
+                "vat_amount": 17,
+                "description": "فاتورة ضريبية",
+            },
+            raw_message="فاتورة",
+        )
+        from app.database.crud import list_recent_records
+
+        entry = next(e for e in list_recent_records(db_session, USER_A) if e["id"] == tx.id)
+        assert entry["vat_rate"] == Decimal("17.000")
+        assert entry["vat_amount"] == Decimal("17.00")
+
+
+# ---------- الحدود الائتمانية (#26) ----------
+
+
+class TestCreditLimits:
+    def test_set_and_list(self, db_session):
+        row = set_credit_limit(db_session, USER_A, "محمد ", "5000")
+        assert row is not None
+        assert row.person == "محمد"
+        assert row.limit_amount == Decimal("5000")
+        assert [lim.person for lim in list_credit_limits(db_session, USER_A)] == ["محمد"]
+
+    def test_invalid_limit_rejected(self, db_session):
+        assert set_credit_limit(db_session, USER_A, "محمد", "0") is None
+        assert set_credit_limit(db_session, USER_A, "محمد", "-5") is None
+        assert set_credit_limit(db_session, USER_A, "   ", "500") is None
+
+    def test_usage_outstanding_is_expense_minus_income(self, db_session):
+        set_credit_limit(db_session, USER_A, "محمد", "5000")
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 3000, "currency": "ILS", "person": "محمد"}, "دفعة لمحمد"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "income", "amount": 1000, "currency": "ILS", "person": "محمد"}, "استلام من محمد"
+        )
+        row = list_credit_limits(db_session, USER_A)[0]
+        usage = credit_usage(db_session, row)
+        assert usage["outstanding"] == Decimal("2000.00")
+        assert usage["percent"] == 40.0
+        assert usage["over"] is False
+
+    def test_usage_over_when_exceeds(self, db_session):
+        set_credit_limit(db_session, USER_A, "محمد", "1500")
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "محمد"}, "دفعة"
+        )
+        row = list_credit_limits(db_session, USER_A)[0]
+        assert credit_usage(db_session, row)["over"] is True
+
+
+# ---------- الديون والأشخاص (#21) ----------
+
+
+class TestPersonDebts:
+    def test_balances_per_person(self, db_session, monkeypatch):
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("1")},
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "income", "amount": 500, "currency": "ILS", "person": "سامر"}, "استلام من سامر"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر"}, "دفعة لسامر"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 200, "currency": "ILS", "person": "خالد"}, "دفعة لخالد"
+        )
+        debts = person_debts(db_session, USER_A)
+        by_name = {d["person"]: d for d in debts}
+        assert by_name["سامر"]["balance_unified"] == Decimal("200.00")  # مدين لك
+        assert by_name["خالد"]["balance_unified"] == Decimal("-200.00")  # تدين له
+        assert by_name["سامر"]["by_currency"]["ILS"]["income"] == Decimal("500.00")
+
+    def test_empty_when_no_person_rows(self, db_session):
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS"}, "بدون شخص"
+        )
+        assert person_debts(db_session, USER_A) == []
+
+    def test_scoped_to_workspace(self, db_session, monkeypatch):
+        monkeypatch.setattr("app.exchange.convert", lambda a, f, t: {"result": Decimal("5")})
+        create_transaction(
+            db_session, USER_B, {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد"}, "دفعة لخالد"
+        )
+        assert person_debts(db_session, USER_A) == []
+
+
+# ---------- الميزانية بنطاق التصنيف (#23) ----------
+
+
+class TestBudgetCategoryScope:
+    def test_create_and_usage(self, db_session):
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "category", "مشتريات", "2000")
+        assert budget is not None
+        assert budget.category == "مشتريات"
+
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 800, "currency": "ILS", "category": "مشتريات"},
+            "شراء مواد",
+        )
+        usage = budget_usage(db_session, budget)
+        assert usage["spent"] == Decimal("800.00")
+        assert usage["percent"] == 40.0
+
+    def test_duplicate_category_budget_rejected(self, db_session):
+        from app.database.crud import create_budget
+
+        assert create_budget(db_session, USER_A, "category", "مشتريات", "2000") is not None
+        assert create_budget(db_session, USER_A, "category", "مشتريات", "3000") is None
+
+    def test_empty_category_rejected(self, db_session):
+        from app.database.crud import create_budget
+
+        assert create_budget(db_session, USER_A, "category", "   ", "2000") is None
 
 
 # ---------- سعر الصرف المثبَّت وقت التسجيل (#25) ----------
