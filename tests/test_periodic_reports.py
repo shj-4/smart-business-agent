@@ -478,3 +478,52 @@ class TestBudgetCheckSessionCleanup:
         monkeypatch.setattr(reminders, "SessionLocal", lambda: _FakeSession())
         reminders.budget_check(None)
         assert len(closed) == 1
+
+
+# ---------- تجانس فترات /report و /export ----------
+
+
+class TestReportExportPeriods:
+    def test_resolve_period_aliases(self):
+        import bot.handlers as handlers
+
+        assert handlers.resolve_period_arg("week") == "week"
+        assert handlers.resolve_period_arg("weekly") == "week"
+        assert handlers.resolve_period_arg("month") == "month"
+        assert handlers.resolve_period_arg("monthly") == "month"
+        assert handlers.resolve_period_arg("today") == "today"
+        assert handlers.resolve_period_arg("all") == "all"
+        assert handlers.resolve_period_arg("") == "all"
+        assert handlers.resolve_period_arg(None) == "all"
+        assert handlers.resolve_period_arg("quarterly") is None
+
+    def _run(self, coro):
+        import asyncio
+
+        return asyncio.run(coro)
+
+    def _assert_warns_on_unknown(self, command):
+        from types import SimpleNamespace
+
+        replies = []
+
+        class _Msg:
+            async def reply_text(self, text, **kwargs):
+                replies.append(text)
+
+        update = SimpleNamespace(
+            message=_Msg(), effective_user=SimpleNamespace(id=USER_A)
+        )
+        ctx = SimpleNamespace(args=["quarterly"], user_data={})
+        self._run(command(update, ctx))
+        assert replies and "لم أفهم الفترة" in replies[0]
+
+    def test_report_unknown_period_replies_warning(self):
+        import bot.handlers as handlers
+
+        self._assert_warns_on_unknown(handlers.report_command)
+
+    def test_export_unknown_period_replies_warning(self):
+        import bot.handlers as handlers
+
+        self._assert_warns_on_unknown(handlers.export_command)

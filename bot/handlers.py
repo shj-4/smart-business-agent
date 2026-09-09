@@ -18,6 +18,26 @@ from app.exchange import CURRENCY_NAMES, convert
 logger = logging.getLogger(__name__)
 
 
+PERIOD_KEYS = {
+    "today": "today",
+    "day": "today",
+    "week": "week",
+    "weekly": "week",
+    "month": "month",
+    "monthly": "month",
+    "all": "all",
+}
+PERIOD_HINT = "الإستخدام: today | week/weekly | month/monthly | all"
+
+
+def resolve_period_arg(raw: str) -> str | None:
+    """يمرر وسيط الفترة إلى مفتاح موحّد (today/week/month/all) بين /report و/export.
+
+    يعيد None إن لم يُفهم الوسيط حتى لا يسقط صامتًا إلى "all" (كان يربك المستخدم).
+    """
+    return PERIOD_KEYS.get((raw or "all").lower())
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from bot.menus import send_main_menu
 
@@ -176,16 +196,20 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from bot.exporters import generate_tasks_excel, generate_transactions_excel
 
     arg = (context.args[0] if context.args else "all").lower()
+    period = resolve_period_arg(arg)
+    if period is None:
+        await update.message.reply_text(f"لم أفهم الفترة \"{arg}\".\n{PERIOD_HINT}")
+        return
 
     local_now = now_local()
     start = None
     file_label = None
 
-    if arg == "today":
+    if period == "today":
         local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "اليوم"
-    elif arg == "week":
+    elif period == "week":
         from app.timeutil import first_day_of_week
 
         fd = first_day_of_week()
@@ -194,7 +218,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         local = local.replace(hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "الأسبوع"
-    elif arg == "month":
+    elif period == "month":
         local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "الشهر"
@@ -235,22 +259,27 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from bot.exporters import generate_export_excel
 
     arg = (context.args[0] if context.args else "all").lower()
+    period = resolve_period_arg(arg)
+    if period is None:
+        await update.message.reply_text(f"لم أفهم الفترة \"{arg}\".\n{PERIOD_HINT}")
+        return
+
     local_now = now_local()
     start = None
     file_label = "all"
 
-    if arg == "today":
+    if period == "today":
         local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "today"
-    elif arg in ("week", "weekly"):
+    elif period == "week":
         fd = first_day_of_week()
         weekday = local_now.weekday()
         local = local_now - timedelta(days=(weekday - fd) % 7)
         local = local.replace(hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "week"
-    elif arg in ("month", "monthly"):
+    elif period == "month":
         local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         start = to_utc_naive(local)
         file_label = "month"
