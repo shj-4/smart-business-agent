@@ -86,6 +86,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/invoices — الفواتير الآجلة\n"
         "/orders — الطلبيات وحالتها\n"
         "/credit — الحدود الائتمانية للأشخاص\n"
+        "/stats — إحصائيات استخدامك\n"
+        "/health — فحص صحة النظام\n"
         "/lang — تبديل لغة الواجهة عربي/English\n"
         "/cancel — إلغاء أي عملية معلّقة\n\n"
         "📸 صوّر أي فاتورة وأرسلها، وسأستخرج تفاصيلها تلقائيًا.\n"
@@ -657,6 +659,33 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_credit_limits(payload))
 
 
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /health — فحص صحة النظام (قاعدة، هجرات، إعدادات، إصدارات)."""
+    from bot.diagnostics import run_health_checks
+    from bot.formatters import format_health_report
+
+    db = SessionLocal()
+    try:
+        checks = run_health_checks(db)
+    finally:
+        db.close()
+    await update.message.reply_text(format_health_report(checks))
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر /stats — إحصائيات استخدام البوت حسب مساحة عملك."""
+    from app.database.crud import user_stats
+    from bot.formatters import format_user_stats
+
+    telegraph_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        stats = user_stats(db, telegraph_id)
+    finally:
+        db.close()
+    await update.message.reply_text(format_user_stats(stats))
+
+
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر مخفي /admin_stats — إحصائيات عامة للمسؤول (لا يكشف بيانات فردية)."""
     from app.admin import build_admin_stats
@@ -884,6 +913,8 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("invoices", invoices_command))
     app.add_handler(CommandHandler("orders", orders_command))
     app.add_handler(CommandHandler("credit", credit_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("health", health_command))
 
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation

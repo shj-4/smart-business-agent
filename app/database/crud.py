@@ -2238,3 +2238,126 @@ def mark_correction_reviewed(db: Session, feedback_id: int) -> bool:
 
     clear_admin_cache()
     return True
+
+
+# ---------- إحصائيات الاستخدام للمستخدم (/stats) ----------
+
+
+def db_size_bytes() -> int | None:
+    """حجم ملف قاعدة البيانات (بايت) لـ SQLite، أو None لغيره/تعذّر القراءة."""
+    import os
+
+    from app.database.db import DATABASE_URL
+
+    if not DATABASE_URL.startswith("sqlite"):
+        return None
+    path = DATABASE_URL.replace("sqlite:///", "", 1)
+    if not path or path == ":memory:":
+        return None
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def user_stats(db: Session, telegram_user_id: int) -> dict:
+    """إحصائيات مخطط الاستخدام حسب مساحة عمل المستخدم — بلا أي شبكة."""
+    from app.timeutil import now_utc, to_local_naive
+
+    uids = accessible_user_ids(db, telegram_user_id)
+    empty_uids = uids if uids else {-1}
+
+    def _counts(model, **filters) -> int:
+        q = db.query(model).filter(model.telegram_user_id.in_(empty_uids))
+        for col, value in filters.items():
+            q = q.filter(getattr(model, col) == value)
+        return q.count()
+
+    tx_base = db.query(Transaction).filter(
+        Transaction.telegram_user_id.in_(empty_uids),
+        Transaction.deleted_at.is_(None),
+    )
+    expense_count = tx_base.filter(Transaction.type == "expense").count()
+    total_tx = tx_base.count()
+    income_count = total_tx - expense_count
+
+    def _sum(rows) -> dict:
+        agg = {}
+        for amount, currency in rows:
+            cur = currency or "غير محددة"
+            agg[cur] = agg.get(cur, Decimal("0")) + Decimal(str(amount or 0))
+        return agg
+
+    expenses_rows = [
+        r
+        for r in db.query(Transaction.amount, Transaction.currency)
+        .filter(
+            Transaction.telegram_user_id.in_(empty_uids),
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "expense",
+        )
+        .all()
+    ]
+    incomes_rows = [
+        r
+        for r in db.query(Transaction.amount, Transaction.currency)
+        .filter(
+            Transaction.telegram_user_id.in_(empty_uids),
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "income",
+        )
+        .all()
+    ]
+
+    # ساعة الذروة خلال آخر 90 يومًا (بالتوقيت المحلي)
+    cutoff = now_utc() - timedelta(days=90)
+    hour_clock = {}
+    for (created_at,) in (
+        db.query(Transaction.created_at)
+        .filter(
+            Transaction.telegram_user_id.in_(empty_uids),
+            Transaction.deleted_at.is_(None),
+            Transaction.created_at >= cutoff,
+        )
+        .all()
+    ):
+        local_dt = to_local_naive(created_at)
+        if local_dt is not None:
+            h = local_dt.hour
+            hour_clock[h] = hour_clock.get(h, 0) + 1
+    peak_hour = max(hour_clock, key=hour_clock.get) if hour_clock else None
+
+    month_entries = monthly_totals(db, telegram_user_id, months=1, include_stored=True)
+    current_month = month_entries[-1] if month_entries else {}
+
+    return {
+        "workspace_size": len(uids),
+        "transactions": {
+            "total": total_tx,
+            "expense": expense_count,
+            "income": income_count,
+        },
+        "expenses_by_currency": _sum(expenses_rows),
+        "incomes_by_currency": _sum(incomes_rows),
+        "orders": {
+            "open": _counts(Note, note_type="order", status="open", deleted_at=None),
+            "done": _counts(Note, note_type="order", status="done", deleted_at=None),
+        },
+        "notes": _counts(Note, deleted_at=None),
+        "invoices": {
+            "total": _counts(Invoice),
+            "pending": _counts(Invoice, status="pending"),
+            "paid": _counts(Invoice, status="paid"),
+            "overdue": _counts(Invoice, status="overdue"),
+        },
+        "tasks": {
+            "pending": _counts(Task, status="pending", deleted_at=None),
+            "done": _counts(Task, status="done", deleted_at=None),
+        },
+        "budgets": _counts(Budget),
+        "credit_limits": _counts(CreditLimit),
+        "current_month": current_month,
+        "peak_hour_local": peak_hour,
+        "peak_activity": hour_clock.get(peak_hour, 0) if peak_hour is not None else 0,
+        "db_size_bytes": db_size_bytes(),
+    }

@@ -42,3 +42,39 @@ def test_migration_chain_is_linked():
     assert set(down_refs) <= set(revisions), "سلسلة migrations مقطوعة"
     # down_revision فريدة (شجرة واحدة بلا تفرع/تعارض)
     assert len(down_refs) == len(set(down_refs)), "اندماج غير متوقّع في سلسلة migrations"
+
+
+# ---------- سكربت إعادة التطبيق (#28) ----------
+
+
+def test_reapply_migrations_builds_fresh_db(tmp_path):
+    """إعادة التطبيق على قاعدة SQLite فارغة تبنيها وتثبّت head في alembic_version."""
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.database.migration_replay import reapply_migrations
+
+    url = "sqlite:///" + str(tmp_path / "recovery.db").replace("\\", "/")
+    steps = reapply_migrations(db_url=url, drop_existing=False)
+    assert any("نجاح" in s for s in steps)
+
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    assert "transactions" in inspector.get_table_names()
+    assert "invoices" in inspector.get_table_names()
+    assert "credit_limits" in inspector.get_table_names()
+    with engine.connect() as conn:
+        versions = [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))]
+    assert versions and len(versions) == 1
+    engine.dispose()
+
+
+def test_reapply_refuses_existing_without_consent(tmp_path):
+    """قاعدة موجودة لا تُحذف إلا بموافقة صريحة (drop_existing=True)."""
+    import pytest
+
+    from app.database.migration_replay import reapply_migrations
+
+    url = "sqlite:///" + str(tmp_path / "guard.db").replace("\\", "/")
+    reapply_migrations(db_url=url)  # تُنشئ القاعدة أولًا
+    with pytest.raises(RuntimeError):
+        reapply_migrations(db_url=url)  # بلا موافقة → رفض

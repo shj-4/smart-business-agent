@@ -28,6 +28,11 @@ def setup_audit_log() -> None:
         return
     _configured = True
 
+    # إعادة تمكين دائمًا: مكتبات مثل alembic قد تعطّل اللوغرز غير المسجّلة في
+    # ملفات إعداداتها (fileConfig بلا existing loggers) — لا يجب أن يُصبح السجل
+    # أخرسًا بعد ذلك. أزل أي معالجات قديمة ونظّف الحالة.
+    audit_logger.disabled = False
+    audit_logger.handlers.clear()
     audit_logger.propagate = False
     audit_logger.setLevel(logging.INFO)
 

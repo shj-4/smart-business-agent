@@ -15,6 +15,7 @@ from app.cache import start_sweeper
 from app.config import TELEGRAM_BOT_TOKEN, ensure_env_or_exit
 from app.logging_config import configure_logging
 from app.sentry import install_sentry
+from bot.diagnostics import startup_diagnostics
 from bot.handlers import register_handlers
 from bot.ratelimit import start_cleanup, stop_cleanup
 
@@ -32,6 +33,7 @@ async def _post_init(application) -> None:
 
 def main():
     ensure_env_or_exit()
+    startup_diagnostics()
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
     register_handlers(app)
 

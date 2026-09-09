@@ -486,3 +486,76 @@ def format_credit_limits(payload: list[dict]) -> str:
             f"({u['percent']}%) — {status}"
         )
     return "\n".join(lines)
+
+
+# ---------- إحصائيات الاستخدام (/stats) ----------
+
+
+def _size_label(size_bytes: int | None) -> str:
+    if not size_bytes:
+        return "غير متاح"
+    value = float(size_bytes)
+    for unit in ("بايت", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return "غير متاح"
+
+
+def format_user_stats(stats: dict) -> str:
+    """يعرض ملخص استخدام البوت حسب مساحة عمل المستخدم."""
+    tx = stats["transactions"]
+    exp_lines = _totals_line(stats["expenses_by_currency"]) if stats["expenses_by_currency"] else "—"
+    inc_lines = _totals_line(stats["incomes_by_currency"]) if stats["incomes_by_currency"] else "—"
+
+    month = stats["current_month"] or {}
+    month_label = month.get("label", "")
+    month_totals = month.get("by_currency", {}) if month else {}
+    month_line = _totals_line(month_totals) if month_totals else "—"
+    unified = None
+    if month:
+        unified = _unified_amount(month_totals, stored=month.get("stored"))
+
+    peak = stats["peak_hour_local"]
+    if peak is None:
+        peak_line = "لا توجد عمليات خلال آخر 90 يومًا"
+    else:
+        peak_line = f"{peak:02d}:00 ({stats['peak_activity']} عملية)"
+
+    lines = [
+        "📊 إحصائيات استخدامك:\n",
+        f"👥 حجم مساحة العمل: {stats['workspace_size']} حساب",
+        f"💳 العمليات الكلية: {tx['total']} (مصروف {tx['expense']} · إيراد {tx['income']})",
+        f"📉 المصاريف: {exp_lines}",
+        f"📈 الإيرادات: {inc_lines}",
+        f"🗓️ الشهر الحالي ({month_label}): مصاريف {month_line}",
+    ]
+    if unified is not None:
+        lines.append(f"   الموحّد (أسعار مثبّتة): {_fmt_amount(unified)} {stats['current_month'].get('stored_base') or ''}".rstrip())
+    lines += [
+        f"🛒 الطلبيات: مفتوحة {stats['orders']['open']} · منجزة {stats['orders']['done']}",
+        f"🧾 الفواتير: معلّقة {stats['invoices']['pending']} · مسددة {stats['invoices']['paid']} · متأخرة {stats['invoices']['overdue']}",
+        f"📋 المهام: معلّقة {stats['tasks']['pending']} · منجزة {stats['tasks']['done']}",
+        f"🎯 الميزانيات: {stats['budgets']} · الحدود الائتمانية: {stats['credit_limits']}",
+        f"⏰ ذروة نشاطك: {peak_line}",
+        f"🗄️ حجم قاعدة البيانات: {_size_label(stats.get('db_size_bytes'))}",
+    ]
+    return "\n".join(lines)
+
+
+# ---------- الفحص الصحي (/health) ----------
+
+
+def format_health_report(checks: list[dict]) -> str:
+    """يهيّئ نص تقرير الفحص الصحي من قائمة {ok, label, detail}."""
+    if not checks:
+        return "لا توجد فحوصات."
+    lines = ["🩺 الفحص الصحي للنظام:\n"]
+    for c in checks:
+        mark = "✅" if c.get("ok") else ("⚠️" if c.get("warn") else "❌")
+        detail = c.get("detail") or ""
+        line = f"{mark} {c.get('label', '')}"
+        if detail:
+            line += f" — {detail}"
+        lines.append(line)
+    return "\n".join(lines)
