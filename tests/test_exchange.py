@@ -71,6 +71,44 @@ class TestGetRate:
         assert "JOD" in exchange.CURRENCY_NAMES
 
 
+class TestConvertTotalsToBaseStored:
+    """convert_totals_to_base مع مبالغ مثبّتة بعملة الأساس وقت التسجيل (#25)."""
+
+    @patch("app.exchange.get_rate")
+    def test_stored_amounts_replace_live_rate(self, mock_rate):
+        """العملة المتاحة في stored تُحسب من المبلغ المخزّن بلا سعر اليوم."""
+        totals = {"USD": Decimal("100"), "JOD": Decimal("50")}
+        stored = {"USD": Decimal("370.00")}  # سعر مثبّت لحظة التسجيل (370 شيكل/دولار)
+        mock_rate.side_effect = lambda frm, to: Decimal("5.0000")  # JOD→ILS حي
+
+        conv = exchange.convert_totals_to_base(totals, "ILS", stored=stored)
+        assert conv["total"] == Decimal("620.00")
+        assert conv["rates"]["USD"] == Decimal("1.0000")
+        assert conv["partial"] is False
+
+    def test_without_stored_falls_back_to_live(self):
+        """بلا stored (سجلات قديمة) يبقى السلوك السابق: سعر اليوم."""
+        with patch("app.exchange.get_rate") as mock_rate:
+            mock_rate.return_value = Decimal("3.7500")
+            conv = exchange.convert_totals_to_base(
+                {"USD": Decimal("100")}, "ILS", stored=None
+            )
+        assert conv["total"] == Decimal("375.00")
+
+    def test_stored_currency_same_as_base_is_ignored(self):
+        """عملة أساس في stored لا تُطبق مرتين — المجموع الأصلي يُستخدم مباشرة."""
+        conv = exchange.convert_totals_to_base(
+            {"ILS": Decimal("200")}, "ILS", stored={"ILS": Decimal("999")}
+        )
+        assert conv["total"] == Decimal("200.00")
+
+    def test_stored_only_currency_counts(self):
+        """عملة بمبلغ مخزَّن فقط (بلا مقابل في totals) تُضاف من قيمتها المثبَّتة."""
+        conv = exchange.convert_totals_to_base({}, "ILS", stored={"USD": Decimal("370.00")})
+        assert conv["total"] == Decimal("370.00")
+        assert conv["partial"] is False
+
+
 class TestCircuitBreaker:
     def test_hits_stop_after_threshold_failures(self):
         """بعد 3 فشل متتالٍ تُفتح الدائرة ولا تُجرَّب الشبكة مجددًا."""

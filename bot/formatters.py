@@ -156,7 +156,7 @@ def format_query_result(query_result: dict) -> str:
         lines = [title]
         for currency, total in result.items():
             lines.append(f"• {total} {currency}")
-        lines.append(_unified_total_line(result, metric))
+        lines.append(_unified_total_line(result, metric, query_result.get("unified_total")))
         return "\n".join(lines)
 
     # رصيد مستحق مع شخص
@@ -215,8 +215,11 @@ def _totals_line(totals: dict) -> str:
     return " + ".join(parts)
 
 
-def _unified_amount(totals: dict):
-    """المجموع موحّدًا بالعملة الأساسية (Decimal) أو None عند الفشل."""
+def _unified_amount(totals: dict, stored: dict | None = None):
+    """المجموع موحّدًا بالعملة الأساسية (Decimal) أو None عند الفشل.
+
+    stored (اختياري): مبالغ بعملة الأساس مثبّتة وقت التسجيل — تُفضّل للدقة التاريخية.
+    """
     from decimal import Decimal
 
     from app.config import settings
@@ -232,7 +235,7 @@ def _unified_amount(totals: dict):
         except Exception:
             normalized[c] = Decimal("0")
     try:
-        conv = convert_totals_to_base(normalized, base)
+        conv = convert_totals_to_base(normalized, base, stored=stored)
     except Exception:
         return None
     return conv.get("total")
@@ -291,13 +294,27 @@ def _format_comparison(query_result: dict) -> str:
     return "\n".join(lines)
 
 
-def _unified_total_line(result: dict, metric: str) -> str:
-    """يضيف المجموع الموحّد بالعملة الأساسية (تقريبي) إن أمكن."""
+def _unified_total_line(result: dict, metric: str, unified: dict | None = None) -> str:
+    """يضيف المجموع الموحّد بالعملة الأساسية.
+
+    unified (اختياري): مجموع محسوب مسبقًا في crud بدقة تاريخية — يفضّل مبالغ
+    سعر الصرف المثبَّت وقت التسجيل ويُظهر ذلك صراحةً؛ عند غيابه (نتائج قديمة/
+    مخزنة) يُحسب هنا بأسعار اليوم.
+    """
     from decimal import Decimal
 
     from app.config import settings
     from app.database.crud import normalize_currency
     from app.exchange import convert_totals_to_base
+
+    if unified is not None and unified.get("total") is not None:
+        base = unified.get("base") or settings.base_currency
+        hint = ""
+        if unified.get("from_stored") and len(result) > 1:
+            hint = " (بأسعار مثبّتة لحظة التسجيل)"
+        elif len(result) > 1:
+            hint = " (تقريبًا)"
+        return f"\nالمجموع الموحّد{hint}: {unified['total']} {base}"
 
     base = settings.base_currency
     totals = {}

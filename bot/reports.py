@@ -102,17 +102,48 @@ def _totals_line(totals: dict) -> str:
     return " + ".join(f"{_fmt_amount(total)} {currency}" for currency, total in totals.items())
 
 
-def _unified_line(totals: dict) -> str | None:
+def _unified_line(totals: dict, stored: dict | None = None) -> str | None:
     from app.config import settings
     from bot.formatters import _unified_amount
 
     base = settings.base_currency
-    total = _unified_amount(totals)
+    total = _unified_amount(totals, stored=stored)
     if total is None:
         return None
     if len(totals) > 1:
-        return f"المجموع الموحّد (تقريبًا): {_fmt_amount(total)} {base}"
+        hint = " (بأسعار مثبّتة لحظة التسجيل)" if stored else " (تقريبًا)"
+        return f"المجموع الموحّد{hint}: {_fmt_amount(total)} {base}"
     return f"المجموع الموحّد: {_fmt_amount(total)} {base}"
+
+
+def _stored_totals_between(db: Session, user_id: int, lo, hi, tx_type: str) -> dict:
+    """مبالغ نوع معيّن بين حدود زمنية محوَّلة ومثبّتة بعملة الأساس عند التسجيل.
+
+    يُفضَّل في التقارير التاريخية على تحويل أسعار اليوم (لأنها توثّق سعر
+    لحظة العملية الفعلية). العملات بلا سعر مخزَّن تُستبعد فتُحسب حيّة.
+    """
+    from decimal import Decimal
+
+    from app.config import settings
+
+    base = (settings.base_currency or "").upper().strip()
+    q = db.query(Transaction).filter(
+        Transaction.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+        Transaction.deleted_at.is_(None),
+        Transaction.type == tx_type,
+        Transaction.created_at >= lo,
+        Transaction.created_at < hi,
+    )
+    stored: dict = {}
+    for r in q.all():
+        if (
+            r.base_currency_at_creation == base
+            and r.amount_in_base_currency is not None
+            and r.currency
+        ):
+            c = r.currency
+            stored[c] = stored.get(c, Decimal("0")) + Decimal(str(r.amount_in_base_currency))
+    return stored
 
 
 def build_periodic_summary(
@@ -138,6 +169,8 @@ def build_periodic_summary(
 
     expenses = _totals_between(db, telegram_user_id, lo, hi, "expense")
     incomes = _totals_between(db, telegram_user_id, lo, hi, "income")
+    stored_expenses = _stored_totals_between(db, telegram_user_id, lo, hi, "expense")
+    stored_incomes = _stored_totals_between(db, telegram_user_id, lo, hi, "income")
     overdue_count, overdue_top = _overdue_info(db, telegram_user_id)
     pending_count = (
         db.query(Task)
@@ -153,14 +186,14 @@ def build_periodic_summary(
 
     lines.append(f"💸 المصاريف ({display_label}): {_totals_line(expenses)}")
     if expenses:
-        unified = _unified_line(expenses)
+        unified = _unified_line(expenses, stored=stored_expenses)
         if unified:
             lines.append(unified)
 
     lines.append("")
     lines.append(f"💰 الإيرادات ({display_label}): {_totals_line(incomes)}")
     if incomes:
-        unified = _unified_line(incomes)
+        unified = _unified_line(incomes, stored=stored_incomes)
         if unified:
             lines.append(unified)
 

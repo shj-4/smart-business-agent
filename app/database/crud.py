@@ -661,6 +661,29 @@ def parse_date_local(date_str: str) -> datetime | None:
     return to_utc_naive(parsed)
 
 
+def _best_effort_base_amount(amount, currency: str | None):
+    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None).
+
+    دقة تاريخية: نقوم بمحاولة تحويل واحدة لحظة الإنشاء؛ إن فشلت (لا إنترنت/
+    عملة غير معرفة) تُترك القيم None، وفي كل تقرير لاحق تُعاد العملية للباقي
+    بأسعار اليوم عبر convert_totals_to_base(stored=...).
+    """
+    from app.config import settings
+    from app.exchange import convert
+
+    base = (settings.base_currency or "").upper().strip()
+    if amount is None or not currency or not base or currency.upper() == base:
+        return None, None
+    try:
+        conv = convert(amount, currency, base)
+    except Exception:
+        return None, None
+    result = conv.get("result")
+    if result is None:
+        return None, None
+    return Decimal(str(result)), base
+
+
 def create_transaction(
     db: Session,
     telegram_user_id: int,
@@ -671,16 +694,22 @@ def create_transaction(
     if _is_duplicate_message(db, Transaction, telegram_user_id, telegram_message_id):
         return None
 
+    amount = _to_decimal(data.get("amount"))
+    currency = normalize_currency(data.get("currency"))
+    base_amount, base_at = _best_effort_base_amount(amount, currency)
+
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
         telegram_message_id=telegram_message_id,
         type=data.get("type"),
-        amount=_to_decimal(data.get("amount")),
-        currency=normalize_currency(data.get("currency")),
+        amount=amount,
+        currency=currency,
         person=_clean_person(data.get("person")),
         category=_clean_text(data.get("category")),
         description=_clean_text(data.get("description")),
         raw_message=raw_message,
+        amount_in_base_currency=base_amount,
+        base_currency_at_creation=base_at,
     )
     db.add(transaction)
     try:
@@ -825,6 +854,45 @@ def _sum_amounts_by_currency(rows) -> dict:
     return total
 
 
+def _split_stored_base(rows, base_currency: str) -> tuple[dict, dict]:
+    """يقسّم صفوف المعاملات إلى (مبالغ محوَّلة بعملة الأساس وقت التسجيل، مبالغ حيّة).
+
+    العائد: (stored: {currency: Decimal}, live: {currency: Decimal}).
+    المبالغ المحوَّلة موثّقة أن base_currency_at_creation == base أي أن قيمها فعلًا
+    بعملة الأساس؛ ما عداها يحتاج سعر اليوم لحظة التقارير.
+    """
+    stored: dict = {}
+    live: dict = {}
+    for r in rows:
+        amt = r.amount
+        if amt is None:
+            continue
+        c = r.currency or "غير محددة"
+        if r.base_currency_at_creation == base_currency and r.amount_in_base_currency is not None:
+            stored[c] = stored.get(c, Decimal("0")) + Decimal(str(r.amount_in_base_currency))
+        else:
+            live[c] = live.get(c, Decimal("0")) + amt
+    return stored, live
+
+
+def _unified_totals_for_rows(rows, base_currency: str) -> dict:
+    """مجموع موحّد بدقة تاريخية: يفضّل مبالغ سعر الصرف المثبَّت وقت التسجيل.
+
+    يعيد: {"base", "total": Decimal|None, "partial": bool, "from_stored": bool}
+    يُرفق كحقل فرعي في نتيجة run_query ويقرؤه تنسيق العرض مباشرة.
+    """
+    from app.exchange import convert_totals_to_base
+
+    stored, live = _split_stored_base(rows, base_currency)
+    conv = convert_totals_to_base(live, base_currency, stored=stored)
+    return {
+        "base": base_currency,
+        "total": conv.get("total"),
+        "partial": conv.get("partial", False),
+        "from_stored": bool(stored),
+    }
+
+
 def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     """تنفيذ استعلام مع تخزين مؤقت قصير (TTL) للاستعلامات التجميعية المتكررة.
 
@@ -894,12 +962,30 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         q = q.filter(Transaction.person.like(f"%{person}%"))
 
     if metric == "total_expenses":
-        total = _sum_amounts_by_currency(q.filter(Transaction.type == "expense").all())
-        return {"metric": metric, "period": period, "person": person, "result": total}
+        expense_rows = q.filter(Transaction.type == "expense").all()
+        total = _sum_amounts_by_currency(expense_rows)
+        from app.config import settings
+
+        return {
+            "metric": metric,
+            "period": period,
+            "person": person,
+            "result": total,
+            "unified_total": _unified_totals_for_rows(expense_rows, settings.base_currency),
+        }
 
     elif metric == "total_income":
-        total = _sum_amounts_by_currency(q.filter(Transaction.type == "income").all())
-        return {"metric": metric, "period": period, "person": person, "result": total}
+        income_rows = q.filter(Transaction.type == "income").all()
+        total = _sum_amounts_by_currency(income_rows)
+        from app.config import settings
+
+        return {
+            "metric": metric,
+            "period": period,
+            "person": person,
+            "result": total,
+            "unified_total": _unified_totals_for_rows(income_rows, settings.base_currency),
+        }
 
     elif metric == "count_transactions":
         count = q.count()
@@ -1621,12 +1707,19 @@ def mark_report_sent(db: Session, pref: ReportPref) -> None:
 # ---------- إحصاءات الرسوم البيانية ----------
 
 
-def monthly_totals(db: Session, telegram_user_id: int, months: int = 6) -> list[dict]:
+def monthly_totals(
+    db: Session, telegram_user_id: int, months: int = 6, include_stored: bool = False
+) -> list[dict]:
     """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي).
 
     يعيد قائمة مرتبة زمنيًا: [{year, month, label, expense: Decimal, income: Decimal, key: "YYYY-MM"}]
     القيم الخام بعملاتها الأصلية (تُوحَّد عند الرسم).
+
+    include_stored=True يضيف لكل شهر stored: {currency: {expense, income}} بمقدار
+    المبالغ المحوَّلة بعملة الأساس لحظة التسجيل (struct الدقة التاريخية)، مع
+    stored_base: العملة الأساس المعتمدة — تُستخدم في الرسم إن طابقت العملة المطلوبة.
     """
+    from app.config import settings
     from app.timeutil import now_local, to_local_naive, to_utc_naive
 
     months = max(1, int(months))
@@ -1655,9 +1748,18 @@ def monthly_totals(db: Session, telegram_user_id: int, months: int = 6) -> list[
         )
     )
 
+    base_at_call = (settings.base_currency or "").upper().strip()
+    cols = [
+        Transaction.type,
+        Transaction.currency,
+        Transaction.created_at,
+        Transaction.amount,
+        Transaction.amount_in_base_currency,
+        Transaction.base_currency_at_creation,
+    ]
     # نجلب الصفوف ونجمّعها في Python بالتوقيت المحلي (لأن SQLite بلا منطقة زمنية)
     rows = (
-        db.query(Transaction.type, Transaction.currency, Transaction.created_at, Transaction.amount)
+        db.query(*cols)
         .filter(
             Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
             Transaction.deleted_at.is_(None),
@@ -1668,27 +1770,47 @@ def monthly_totals(db: Session, telegram_user_id: int, months: int = 6) -> list[
 
     # تجميع (شهر، عملة) لكل نوع
     agg = {}  # month_key -> {currency: {expense: Decimal, income: Decimal}}
-    for tx_type, currency, created_at, amount in rows:
+    stored_agg = {}  # month_key -> {currency: {expense/income بعملة الأساس}}
+    for (
+        tx_type,
+        currency,
+        created_at,
+        amount,
+        amount_in_base,
+        base_at_creation,
+    ) in rows:
         local_dt = to_local_naive(created_at)
         key = local_dt.strftime("%Y-%m")
-        if key not in agg:
-            agg[key] = {}
-        per_cur = agg[key].setdefault(
-            currency or "غير محددة", {"expense": Decimal("0"), "income": Decimal("0")}
-        )
+        cur_name = currency or "غير محددة"
+        per_cur = agg.setdefault(
+            key, {}
+        ).setdefault(cur_name, {"expense": Decimal("0"), "income": Decimal("0")})
         per_cur[tx_type] = per_cur.get(tx_type, Decimal("0")) + (amount or Decimal("0"))
+        if (
+            include_stored
+            and base_at_creation == base_at_call
+            and amount_in_base is not None
+        ):
+            stored_cur = stored_agg.setdefault(
+                key, {}
+            ).setdefault(cur_name, {"expense": Decimal("0"), "income": Decimal("0")})
+            stored_cur[tx_type] = stored_cur.get(tx_type, Decimal("0")) + Decimal(
+                str(amount_in_base)
+            )
 
     out = []
     for y_local, m_local in months_labels:
         key = f"{y_local:04d}-{m_local:02d}"
         cur_data = agg.get(key, {})
-        out.append(
-            {
-                "month_key": key,
-                "label": f"{m_local:02d}/{y_local}",
-                "by_currency": cur_data or {},
-            }
-        )
+        entry = {
+            "month_key": key,
+            "label": f"{m_local:02d}/{y_local}",
+            "by_currency": cur_data or {},
+        }
+        if include_stored:
+            entry["stored"] = stored_agg.get(key, {})
+            entry["stored_base"] = base_at_call
+        out.append(entry)
     return out
 
 

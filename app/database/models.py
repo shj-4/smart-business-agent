@@ -60,6 +60,12 @@ class Transaction(Base):
     description = Column(EncryptedString(), nullable=True)  # مشفر
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 
+    # سعر الصرف مثبَّت وقت التسجيل (للدقة التاريخية للتقارير الموحّدة):
+    # amount_in_base_currency = المبلغ محوّلًا لعملة الأساس وقت إنشاء العملية، و
+    # base_currency_at_creation يوثّق العملة الأساس التي استُخدمت (أو None إن فشل التحويل)
+    amount_in_base_currency = Column(EncryptedNumeric(), nullable=True)
+    base_currency_at_creation = Column(String(16), nullable=True)
+
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True)

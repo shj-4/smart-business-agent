@@ -159,27 +159,46 @@ CURRENCY_NAMES = {
 }
 
 
-def convert_totals_to_base(totals: dict, base_currency: str) -> dict:
+def convert_totals_to_base(
+    totals: dict, base_currency: str, stored: dict | None = None
+) -> dict:
     """يحوّل مجموعًا بعدة عملات إلى عملة أساسية.
 
     totals: {currency: amount (Decimal)}.
+    stored: {currency: amount} مبالغ محوَّلة مسبقًا (بعملة الأساس) وقت تسجيل
+            العملية — تُفضَّل على سعر اليوم للدقة التاريخية (يُسمّى بالـ
+            exchange_rate fixed-at-creation). تُستخدم الأسعار الحية فقط للعملات
+            التي لا يوجد لها مبلغ مخزَّن.
     يعيد: {"base": base_currency, "total": Decimal|None, "partial": bool, "rates": {...}}
 
     - `total` None إذا فشل كل التحويل (مشكلة شبكة).
     - `partial` True إذا نجحت بعض العملات فقط (لا يمكن عرض مجموع كامل).
     """
     base_currency = base_currency.upper().strip()
-    if not totals:
+    stored = stored or {}
+    if not totals and not stored:
         return {"base": base_currency, "total": Decimal("0.00"), "partial": False, "rates": {}}
 
     total = Decimal("0")
     partial = False
     rates = {}
-
-    for currency, amount in totals.items():
+    # combos تضم العملات من المجموع والمبالغ المخزّنة معًا — عملة مخزّنة فقط
+    # (لا قيمة حيّة متناظرة) تحسب من مبلغها المثبَّت، والعملة الحية فقط تُحوَّل
+    # بسعر اليوم.
+    for currency in dict.fromkeys([*totals, *stored]):
+        amount = totals.get(currency)
         if currency == base_currency:
+            if amount is None:
+                continue
             rates[currency] = Decimal("1.0000")
             total += amount
+            continue
+        if currency in stored and stored[currency] is not None:
+            # مبلغ محوَّل ومثبَّت لحظة التسجيل — لا حاجة لسعر اليوم
+            total += Decimal(str(stored[currency]))
+            rates[currency] = Decimal("1.0000")
+            continue
+        if amount is None:
             continue
         try:
             rate = get_rate(currency, base_currency)

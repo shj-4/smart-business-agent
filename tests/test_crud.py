@@ -13,6 +13,7 @@ from app.database.crud import (
     create_transaction,
     list_pending_tasks,
     mark_overdue_tasks,
+    monthly_totals,
     restore_last_deleted,
     run_query,
     search_records,
@@ -469,6 +470,78 @@ class TestSearchRecordsWindow:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0]["model"] == "Transaction"
+
+
+# ---------- سعر الصرف المثبَّت وقت التسجيل (#25) ----------
+
+
+class TestStoredBaseAmount:
+    def test_create_transaction_stores_fixed_base_amount(self, db_session, monkeypatch):
+        """عملية بعملة غير الأساس تُحفَظ بمقدارها بعملة الأساس وقت التسجيل."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal("750.00")},
+        )
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "description": "مواد"},
+            raw_message="دفعة",
+        )
+        assert tx.amount_in_base_currency == Decimal("750.00")
+        assert tx.base_currency_at_creation == "ILS"
+
+    def test_same_currency_not_stored(self, db_session, monkeypatch):
+        """عملية بعملة الأساس نفسها لا تُحوَّل (لا داعي) وتُترك فارغة."""
+        monkeypatch.setattr("app.exchange.convert", lambda *a, **k: {"result": Decimal("999")})
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {"type": "income", "amount": 100, "currency": "ILS", "description": "قبض"},
+            raw_message="استلام",
+        )
+        assert tx.amount_in_base_currency is None
+        assert tx.base_currency_at_creation is None
+
+    def test_run_query_unified_total_uses_stored(self, db_session, monkeypatch):
+        """unified_total في run_query يجمع المبالغ المخزّنة ولا يلمس الشبكة."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("7.50")},
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "description": "مشتريات"},
+            raw_message="د1",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 50, "currency": "USD", "description": "نقل"},
+            raw_message="د2",
+        )
+        res = run_query(db_session, USER_A, {"metric": "total_expenses", "period": "all_time"})
+        assert res["unified_total"]["total"] == Decimal("1125.00")
+        assert res["unified_total"]["from_stored"] is True
+        assert res["result"] == {"USD": Decimal("150.00")}
+
+    def test_monthly_totals_include_stored(self, db_session, monkeypatch):
+        """monthly_totals(include_stored=True) يحمل المبالغ المثبّتة للرسم الدقيق."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("3.70")},
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "income", "amount": 200, "currency": "USD", "description": "بيع"},
+            raw_message="ر1",
+        )
+        months = monthly_totals(db_session, USER_A, months=1, include_stored=True)
+        entry = months[-1]
+        assert entry["stored_base"] == "ILS"
+        assert entry["stored"]["USD"]["income"] == Decimal("740.00")
 
 
 # ---------- أولويات وتكرار المهام ----------

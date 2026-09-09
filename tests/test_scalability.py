@@ -73,7 +73,23 @@ def test_run_query_cache_keyed_per_user(db_session, monkeypatch):
 
 
 def test_admin_stats_cached(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
     from app.admin import build_admin_stats
+    from app.database.db import Base
+
+    # جلسة مستقلة في الذاكرة (لا تعتمد على قاعدة البيانات الفعلية — قد تكون
+    # بسكيمة أقدم) حتى نحصل على كل جدول بأحدث الأعمدة.
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = SessionLocal()
 
     calls = {"n": 0}
     real = crud._sum_amounts_by_currency
@@ -84,11 +100,6 @@ def test_admin_stats_cached(monkeypatch):
 
     monkeypatch.setattr(crud, "_sum_amounts_by_currency", counting)
 
-    # build_admin_stats لا يعتمد على جلسة معيّنة في الاختبار إن أعدنا الجداول فارغة
-    from app.database.db import SessionLocal
-
-    db = SessionLocal()
-
     s1 = build_admin_stats(db)
     s2 = build_admin_stats(db)
     assert s1 == s2
@@ -96,6 +107,7 @@ def test_admin_stats_cached(monkeypatch):
     before = calls["n"]
     # المكالمة الثانية يجب ألا تعيد القراءة (نفس رقم est. مرة واحدة على الأقل)
     assert calls["n"] == before  # لا زيادة بعد التخزين المؤقت
+    db.close()
 
 
 def test_admin_stats_ai_queue_field_present(db_session):

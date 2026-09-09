@@ -16,10 +16,15 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 
-def _convert_month_currency_groups(by_currency: dict, base_currency: str) -> dict:
+def _convert_month_currency_groups(
+    by_currency: dict, base_currency: str, stored: dict | None = None
+) -> dict:
     """يحوّل مجاميع شهر (by_currency) إلى العملة الأساسية.
 
     by_currency: {currency: {"expense": Decimal, "income": Decimal}}
+    stored (اختياري): {currency: {"expense": Decimal, "income": Decimal}} مبالغ
+      موحّدة بعملة الأساس وقت التسجيل (يبقى الرسم دقيقًا تاريخيًا حتى لو تغيّر
+      سعر الصرف لاحقًا) — يُفضَّل على سعر اليوم لكل عملة متاحة.
     يعيد: {"expense": Decimal, "income": Decimal, "partial": bool}
     """
     from app.database.crud import normalize_currency
@@ -27,13 +32,16 @@ def _convert_month_currency_groups(by_currency: dict, base_currency: str) -> dic
 
     def _to_base(kind: str) -> Decimal | None:
         totals = {}
+        stored_kind = {}
         for currency, info in by_currency.items():
             amount = (info or {}).get(kind)
             if amount is None:
                 continue
             c = normalize_currency(currency) or currency
             totals[c] = Decimal(str(amount))
-        conv = convert_totals_to_base(totals, base_currency)
+            if stored and (stored.get(currency) or {}).get(kind) is not None:
+                stored_kind[c] = Decimal(str(stored[currency][kind]))
+        conv = convert_totals_to_base(totals, base_currency, stored=stored_kind or None)
         return conv.get("total")
 
     expense = _to_base("expense")
@@ -68,7 +76,7 @@ def generate_monthly_chart(
 
     months = months or settings.chart_months
     base = (base_currency or settings.base_currency).upper().strip()
-    raw = monthly_totals(db, telegram_user_id, months)
+    raw = monthly_totals(db, telegram_user_id, months, include_stored=True)
 
     from matplotlib import font_manager
     from matplotlib import pyplot as plt
@@ -84,11 +92,13 @@ def generate_monthly_chart(
         logger.debug("تعذر ضبط خط الرسم، نستخدم الافتراضي.")
     plt.rcParams["axes.unicode_minus"] = False
 
-    # توحيد كل شهر إلى العملة الأساسية
+    # توحيد كل شهر إلى العملة الأساسية (يفضّل المبالغ المثبّتة عند التسجيل إن كانت
+    # بنفس العملة الأساسية المطلوبة)
     converted = []
     all_zero = True
     for month in raw:
-        res = _convert_month_currency_groups(month["by_currency"], base)
+        stored = month.get("stored") if month.get("stored_base") == base else None
+        res = _convert_month_currency_groups(month["by_currency"], base, stored=stored)
         converted.append((month["label"], res))
         if (res["expense"] or Decimal("0")) != 0 or (res["income"] or Decimal("0")) != 0:
             all_zero = False
