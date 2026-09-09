@@ -1256,7 +1256,12 @@ def update_task(db: Session, row: Task, fields: dict) -> Task:
     for key in ("description", "person", "due_date", "priority"):
         if key in fields and fields[key] is not None:
             if key == "due_date":
-                row.due_date = parse_date_local(fields[key])
+                due_value = fields[key]
+                row.due_date = (
+                    due_value
+                    if isinstance(due_value, datetime)
+                    else parse_date_local(due_value)
+                )
             elif key == "person":
                 row.person = _clean_person(fields[key])
             elif key == "description":

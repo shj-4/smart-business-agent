@@ -129,6 +129,17 @@ class TestUpdateTask:
         updated = update_task(db_session, task, {"due_date": "2026-09-15 18:00"})
         assert updated.due_date is not None
 
+    def test_updates_due_date_with_datetime_object(self, db_session):
+        """يحاكي مسار bot/conversation.py::_normalize_edit_value الذي يمرر datetime جاهزًا —
+        يجب ألا يتعثر update_task بـ .strip() على datetime."""
+        from datetime import datetime
+
+        _, task, _ = _seed_all(db_session)
+        parsed = datetime.fromisoformat("2026-10-01 09:00")
+        updated = update_task(db_session, task, {"due_date": parsed})
+        assert updated.due_date == parsed
+        assert updated.updated_at is not None
+
     def test_empty_description_kept(self, db_session):
         _, task, _ = _seed_all(db_session)
         updated = update_task(db_session, task, {"description": "   "})
