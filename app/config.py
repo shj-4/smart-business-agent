@@ -87,6 +87,15 @@ class Settings(BaseSettings):
         description="DSN من Sentry — تُفعَّل مراقبة الأخطاء تلقائيًا عند تعبئته. "
         "إن تُرك فارغًا لا يُحمَّل أي كود Sentry (صفر تكلفة في التطوير).",
     )
+    dashboard_username: str = Field(
+        default="admin",
+        description="اسم مستخدم لوحة التحكم وواجهات /api/* (Basic Auth).",
+    )
+    dashboard_password: str = Field(
+        default="",
+        description="كلمة مرور لوحة التحكم و /api/* — إن تُركت فارغة تُولَّد كلمة "
+        "مرور مؤقتة عند كل إقلاع وتُطبع في سجل التشغيل.",
+    )
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod

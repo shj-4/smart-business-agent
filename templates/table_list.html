@@ -78,10 +78,24 @@
         {% if rows %}
         <table>
             <thead>
-                <tr>{{ headers|safe }}</tr>
+                <tr>
+                    {% for col in columns %}
+                    <th {% if col.cls %}class="{{ col.cls }}"{% endif %}>{{ col.label }}</th>
+                    {% endfor %}
+                </tr>
             </thead>
             <tbody>
-                {{ body|safe }}
+                {% for row in rows %}
+                <tr>
+                    {% for col in columns %}
+                    {% if col.badge %}
+                    <td><span class="badge {{ row[col.badge] }}">{{ row[col.key] }}</span></td>
+                    {% else %}
+                    <td {% if col.cls %}class="{{ col.cls }}"{% endif %}>{{ row[col.key] }}</td>
+                    {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
             </tbody>
         </table>
         {% else %}
