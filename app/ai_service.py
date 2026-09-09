@@ -267,6 +267,60 @@ def analyze_message(text: str) -> dict:
     return normalize_analysis(parsed)
 
 
+DATE_SYSTEM_PROMPT = """
+أنت مساعد يحوّل نص موعد (عربي / لهجات فلسطينية) إلى تاريخ بصيغة ISO.
+أرجِع JSON فقط بدون أي شرح أو علامات markdown، بهذا الشكل:
+{"date": "YYYY-MM-DD HH:MM" | null}
+
+- استخدم "التاريخ المرجعي" الحالي لحساب التواريخ النسبية: "غدًا / بكرة / بكره"
+  → اليوم التالي، "بعد يومين" → بعده بيومين، "الأسبوع القادم / الجاي" → الأسبوع التالي.
+- عاملا الأسبوع (جمعة/سبت/...) تُحسب من التاريخ المرجعي نفسه.
+- إن لم يتضمن النص موعدًا إطلاقًا، أرجِع {"date": null} — لا تخترع موعدًا.
+- حدد ساعة افتراضية 09:00 إذا ذكر النص يومًا دون وقت، وإلا استخدم الوقت المذكور.
+"""
+
+
+def interpret_arabic_date(text: str, *, now=None) -> str | None:
+    """يحوّل نص موعد عربي/لهجوي (مثل "بكرة الساعة 10") إلى ISO "YYYY-MM-DD HH:MM".
+
+    يُستدعى عند تحرير حقل الموعد في شاشة التأكيد عندما لا يفهمه parse_date_local
+    — يعتمد نفس مسار الذكاء الاصطناعي الذي يحسب التواريخ النسبية عند الإدخال.
+    يعيد None إذا تعذّر الفهم أو فشل Gemini.
+    """
+    from app.database.crud import parse_date_local
+    from app.timeutil import now_local, to_local_naive
+
+    ref = now or now_local()
+    contents = (
+        f"التاريخ المرجعي اليوم (بالتوقيت المحلي): {ref.strftime('%Y-%m-%d %H:%M')}\n"
+        f"نص الموعد: {text or ''}"
+    )
+    try:
+        response = retry(
+            stop=_RETRY_STOP,
+            wait=_RETRY_WAIT,
+            retry=_RETRY_RETRY,
+        )(
+            lambda: _call_gemini(
+                contents=contents,
+                config={"safety_settings": [], "system_instruction": DATE_SYSTEM_PROMPT},
+            )
+        )()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("فشل تفسير الموعد عبر Gemini: %s", exc)
+        return None
+
+    parsed = _parse_json(response.text or "")
+    if not isinstance(parsed, dict):
+        return None
+    raw_date = str(parsed.get("date") or "").strip()
+    dt = parse_date_local(raw_date)
+    if dt is None:
+        return None
+    # الرجوع بالتوقيت المحلي (naive) حتى يعيد create_* تحليله دون إزاحة زمنية
+    return to_local_naive(dt).strftime("%Y-%m-%d %H:%M")
+
+
 RECEIPT_SYSTEM_PROMPT = """
 أنت مساعد يقرأ صور الفواتير والإيصالات والفواتير التجارية.
 مهمتك: استخراج بيانات الدفع الأساسية من الصورة فقط (لا تخترع بيانات غير ظاهرة).

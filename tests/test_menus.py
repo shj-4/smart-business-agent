@@ -193,6 +193,36 @@ class TestConfirmEditHelpers:
         result, err = apply_confirm_edit({"type": "note"}, "description", "  ")
         assert err is not None
 
+    def test_date_structured_iso_kept_raw(self, monkeypatch):
+        import app.ai_service as ai_service
+
+        calls = []
+        monkeypatch.setattr(ai_service, "interpret_arabic_date", lambda v: calls.append(v) or "x")
+        result, err = apply_confirm_edit({"type": "task"}, "date", "2026-09-10 10:00")
+        assert err is None
+        assert result["date"] == "2026-09-10 10:00"
+        assert calls == []  # الصيغة الصريحة لا تستدعي الذكاء الاصطناعي
+
+    def test_date_natural_language_falls_back_to_ai(self, monkeypatch):
+        import app.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "interpret_arabic_date", lambda v: "2026-09-11 09:00")
+        result, err = apply_confirm_edit({"type": "task"}, "date", "بكرة الساعة 10")
+        assert err is None
+        assert result["date"] == "2026-09-11 09:00"
+
+    def test_date_ai_failure_returns_error_not_silent_loss(self, monkeypatch):
+        import app.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "interpret_arabic_date", lambda v: None)
+        result, err = apply_confirm_edit({"type": "task"}, "date", "ما فهمت هالموعد")
+        assert err is not None
+        assert "date" not in result
+
+    def test_empty_date_rejected(self):
+        result, err = apply_confirm_edit({"type": "task"}, "date", "  ")
+        assert err is not None
+
 
 class TestMenuTaskActions:
     def test_delete_task_by_id(self, db_session):

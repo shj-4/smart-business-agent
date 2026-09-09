@@ -113,3 +113,31 @@ class TestSharedWorkspace:
 
         # عضو بلا مساحة → None دون كسر
         assert list_workspace(db_session, 999) is None
+
+    def test_write_invalidates_cache_for_all_members(self, db_session):
+        """كتابة أي عضو تمسح كاش run_query لكل الأعضاء في المساحة، لا الكاتب فقط."""
+        from app.cache import _UNSET, get
+        from app.cache import set as cache_set
+
+        owner, partner = 70, 80
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, partner)
+
+        for uid in (owner, partner):
+            cache_set(f"run_query:{uid}:total_expenses:this_month:None", {"ILS": 1.0})
+
+        # العضو يضيف معاملة → يجب أن يُبطل كاش الطرفين
+        _add_tx(db_session, partner, 150)
+
+        assert get(f"run_query:{owner}:total_expenses:this_month:None") is _UNSET
+        assert get(f"run_query:{partner}:total_expenses:this_month:None") is _UNSET
+
+    def test_write_invalidates_only_affected_cache_namespaces_individually(self, db_session):
+        """كدقة جانبية: فرد بلا مساحة يُبطل كاش نفسه فقط ولا يمس غيره."""
+        from app.cache import get
+        from app.cache import set as cache_set
+
+        cache_set("run_query:90:total_expenses:this_month:None", {"ILS": 5.0})
+        cache_set("run_query:91:total_expenses:this_month:None", {"ILS": 6.0})
+        _add_tx(db_session, 90, 50)
+        assert get("run_query:91:total_expenses:this_month:None") == {"ILS": 6.0}

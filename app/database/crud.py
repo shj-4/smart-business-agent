@@ -155,9 +155,15 @@ def list_workspace(db: Session, telegram_user_id: int) -> dict | None:
     }
 
 
-def _invalidate_caches(telegram_user_id: int) -> None:
-    """يُستدعى بعد أي كتابة: يمسح نتائج الاستعلام المؤقتة للمستخدم وإحصائيات الأدمن."""
-    clear_cache(f"run_query:{telegram_user_id}")
+def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
+    """يُستدعى بعد أي كتابة: يمسح الاستعلامات المؤقتة لكل من يرى بيانات هذا المستخدم.
+
+    في مساحة مشتركة تُبنى مفاتيح run_query على accessible_user_ids (كل الأعضاء)،
+    لذا يجب إبطال كاش كل الأعضاء لا الكاتب فقط — وإلا بقي عضو آخر يرى إجماليات
+    قديمة حتى انتهاء TTL.
+    """
+    for uid in accessible_user_ids(db, telegram_user_id):
+        clear_cache(f"run_query:{uid}")
     from app.admin import clear_admin_cache
 
     clear_admin_cache()
@@ -351,7 +357,7 @@ def create_task(
         db.rollback()
         return None
     db.refresh(task)
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return task
 
 
@@ -466,7 +472,7 @@ def delete_task_by_id(db: Session, telegram_user_id: int, task_id: int) -> Task 
         db.commit()
         db.refresh(task)
         log_audit(telegram_user_id, "delete_task", f"task:{task_id}", (task.description or "")[:80])
-        _invalidate_caches(telegram_user_id)
+        _invalidate_caches(db, telegram_user_id)
         return task
     return None
 
@@ -517,7 +523,7 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
             f"task:{task_id}",
             detail=(task.description or "")[:80],
         )
-        _invalidate_caches(telegram_user_id)
+        _invalidate_caches(db, telegram_user_id)
         _respawn_recurring_task(db, telegram_user_id, task)
         return task
     return None
@@ -575,7 +581,7 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
     except IntegrityError:
         db.rollback()
         return
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
 
 
 def parse_date_local(date_str: str) -> datetime | None:
@@ -641,7 +647,7 @@ def create_transaction(
         db.rollback()
         return None
     db.refresh(transaction)
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return transaction
 
 
@@ -673,7 +679,7 @@ def create_note(
         db.rollback()
         return None
     db.refresh(note)
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return note
 
 
@@ -1007,7 +1013,7 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
     log_audit(
         telegram_user_id, "soft_delete", f"{model.__name__}:{row.id}", detail=(label or "")[:80]
     )
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return {"kind": kind, "label": label}
 
 
@@ -1117,7 +1123,7 @@ def delete_record_by_id(
         f"{model_name}:{record_id}",
         detail=str(label)[:80],
     )
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return str(label)
 
 
@@ -1251,7 +1257,7 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
         if getattr(row, k, None) != old[k]
     }
     log_audit(row.telegram_user_id, "update", f"transaction:{row.id}", detail=f"changes={changes}")
-    _invalidate_caches(row.telegram_user_id)
+    _invalidate_caches(db, row.telegram_user_id)
     return row
 
 
@@ -1287,7 +1293,7 @@ def update_task(db: Session, row: Task, fields: dict) -> Task:
         if str(getattr(row, k, None)) != str(old[k])
     }
     log_audit(row.telegram_user_id, "update", f"task:{row.id}", detail=f"changes={changes}")
-    _invalidate_caches(row.telegram_user_id)
+    _invalidate_caches(db, row.telegram_user_id)
     return row
 
 
@@ -1314,7 +1320,7 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
         if str(getattr(row, k, None)) != str(old[k])
     }
     log_audit(row.telegram_user_id, "update", f"note:{row.id}", detail=f"changes={changes}")
-    _invalidate_caches(row.telegram_user_id)
+    _invalidate_caches(db, row.telegram_user_id)
     return row
 
 
@@ -1365,7 +1371,7 @@ def create_budget(
         db.rollback()
         return None
     db.refresh(budget)
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return budget
 
 
@@ -1399,7 +1405,7 @@ def delete_budget(db: Session, telegram_user_id: int, budget_id: int) -> bool:
     db.delete(budget)
     db.commit()
     log_audit(telegram_user_id, "delete_budget", f"budget:{budget_id}", detail=detail)
-    _invalidate_caches(telegram_user_id)
+    _invalidate_caches(db, telegram_user_id)
     return True
 
 

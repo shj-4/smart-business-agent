@@ -126,6 +126,25 @@ def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | 
             value, value.lower() if value.lower() in ("high", "normal", "low") else "normal"
         )
         return result, None
+    if field == "date":
+        from app.database.crud import parse_date_local
+
+        if not value:
+            return result, FIELD_LABELS.get("date", "الموعد") + " لا يمكن أن يكون فارغًا."
+        parsed = parse_date_local(value)
+        if parsed is not None:
+            result["date"] = value
+            return result, None
+        # نص حر (غدًا/بكرة/بعد يومين...) — يُفسَّر بالذكاء الاصطناعي مثل مسار
+        # الإدخال الأصلي بدل إضاعته صامتًا (كان create_* يستدعي parse_date_local
+        # مباشرة على النص الخام فتضيع قيمة الموعد بلا تنبيه).
+        import app.ai_service as ai_service
+
+        interpreted = ai_service.interpret_arabic_date(value)
+        if interpreted:
+            result["date"] = interpreted
+            return result, None
+        return result, "لم أتعرف على الموعد. جرّب مثلًا: 2026-09-10 10:00"
     if not value:
         return result, f"{FIELD_LABELS.get(field, field)} لا يمكن أن يكون فارغًا."
     result[field] = value
