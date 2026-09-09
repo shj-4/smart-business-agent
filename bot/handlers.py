@@ -437,12 +437,14 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target = args[2].strip()
             limit_str = args[3]
 
-            if scope_txt in ("عملة", "عملة"):
+            if scope_txt.lower() in ("عملة", "currency"):
                 scope = "currency"
-            elif scope_txt in ("شخص", "شخص"):
+            elif scope_txt.lower() in ("شخص", "person"):
                 scope = "person"
             else:
-                await update.message.reply_text("النطاق غير معروف. استخدم: عملة أو شخص")
+                await update.message.reply_text(
+                    "النطاق غير معروف. استخدم: عملة|currency أو شخص|person"
+                )
                 return
 
             budget = create_budget(db, telegram_user_id, scope, target, limit_str)

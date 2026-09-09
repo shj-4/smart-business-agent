@@ -527,3 +527,44 @@ class TestReportExportPeriods:
         import bot.handlers as handlers
 
         self._assert_warns_on_unknown(handlers.export_command)
+
+
+# ---------- نطاق /budget: عملة|currency / شخص|person ----------
+
+
+class TestBudgetCommandScope:
+    def _run(self, args, db_session, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+
+        import bot.handlers as handlers
+
+        monkeypatch.setattr(handlers, "SessionLocal", lambda: db_session)
+        replies = []
+
+        class _Msg:
+            async def reply_text(self, text, **kwargs):
+                replies.append(text)
+
+        update = SimpleNamespace(
+            message=_Msg(), effective_user=SimpleNamespace(id=USER_A)
+        )
+        ctx = SimpleNamespace(args=args, user_data={})
+        asyncio.run(handlers.budget_command(update, ctx))
+        return replies
+
+    def test_scope_currency_english(self, db_session, monkeypatch):
+        replies = self._run(["add", "currency", "ILS", "2000"], db_session, monkeypatch)
+        assert replies and "تم إنشاء ميزانية" in replies[0]
+
+    def test_scope_person_english(self, db_session, monkeypatch):
+        replies = self._run(["add", "person", "محمد", "1500"], db_session, monkeypatch)
+        assert replies and "تم إنشاء ميزانية" in replies[0]
+
+    def test_scope_arabic_still_accepted(self, db_session, monkeypatch):
+        replies = self._run(["add", "شخص", "محمد", "1500"], db_session, monkeypatch)
+        assert replies and "تم إنشاء ميزانية" in replies[0]
+
+    def test_unknown_scope_rejected_with_clear_message(self, db_session, monkeypatch):
+        replies = self._run(["add", "supplier", "محمد", "1500"], db_session, monkeypatch)
+        assert replies and "النطاق غير معروف" in replies[0]
