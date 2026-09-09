@@ -1,0 +1,369 @@
+"""
+Unit tests لميزات المرحلة الرابعة (بلا شبكة):
+
+- مقارنة الفترات (compare_periods) في run_query و format_query_result
+- حدود الفترات get_comparison_ranges
+- تفضيلات التقارير الدورية (ReportPref) وCRUD الخاصة بها
+- منطق الاستحقاق _report_due وجدولة الإرسال periodic_report_job
+- بناء نص التقرير الدوري build_periodic_summary
+- التصدير الموحد generate_export_excel
+- إجماليات الأشهر monthly_totals والرسم البياني generate_monthly_chart
+"""
+
+from datetime import datetime, timedelta
+from decimal import Decimal
+from io import BytesIO
+from unittest.mock import MagicMock
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+import bot.reminders as reminders_mod
+from app.database.crud import (
+    get_comparison_ranges,
+    get_report_pref,
+    list_report_prefs,
+    mark_report_sent,
+    monthly_totals,
+    run_query,
+    set_report_frequency,
+)
+from app.database.models import Transaction
+from app.timeutil import now_local, now_utc, to_local_naive, to_utc_naive
+
+USER_A = 111
+USER_B = 222
+
+
+@pytest.fixture
+def db_env(monkeypatch):
+    """بيئة db في الذاكرة مع SessionLocal معمّق في bot.reminders."""
+    from app.database.db import Base
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionMaker = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    monkeypatch.setattr(reminders_mod, "SessionLocal", SessionMaker)
+
+    yield SessionMaker
+
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _add_transaction(db, user_id, *, tx_type, amount, dt_utc, currency="ILS"):
+    tx = Transaction(
+        telegram_user_id=user_id,
+        type=tx_type,
+        amount=Decimal(str(amount)),
+        currency=currency,
+        description=f"{tx_type}-{amount}",
+        raw_message="raw",
+        created_at=dt_utc,
+    )
+    db.add(tx)
+    db.commit()
+    return tx
+
+
+def _freeze_now(monkeypatch, dt_local):
+    """تثبيت الساعة المحلية عند dt (بالتوقيت المحلي) — لا اعتماد على الساعة الحقيقية."""
+    import app.timeutil as tu
+
+    monkeypatch.setattr(tu, "now_local", lambda: dt_local)
+
+
+# ---------- get_comparison_ranges ----------
+
+
+class TestComparisonRanges:
+    def test_today_bounds(self):
+        ranges = get_comparison_ranges("today")
+        cur_lo, cur_hi = ranges["current"]
+        prev_lo, prev_hi = ranges["previous"]
+        local_now = now_local()
+        today_start = to_utc_naive(local_now.replace(hour=0, minute=0, second=0, microsecond=0))
+        assert cur_lo == today_start
+        assert prev_hi == today_start
+        assert prev_lo < cur_lo
+
+    def test_this_month_starts_first_day(self):
+        ranges = get_comparison_ranges("this_month")
+        cur_lo, _ = ranges["current"]
+        local_now = now_local()
+        expected = to_utc_naive(local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+        assert cur_lo == expected
+        prev_lo, prev_hi = ranges["previous"]
+        assert prev_hi == expected
+
+    def test_all_time_returns_none(self):
+        assert get_comparison_ranges("all_time") is None
+
+
+# ---------- compare_periods metric ----------
+
+
+class TestComparePeriods:
+    def test_compares_current_vs_previous_month(self, db_session, monkeypatch):
+        # تثبيت الساعة عند 2026-09-15 12:00 محليًا → "this_month" = [01/09, 15/09] UTC محول
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        cur_lo, _ = get_comparison_ranges("this_month")["current"]
+        # معاملة هذا الشهر
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=300, dt_utc=cur_lo + timedelta(hours=1)
+        )
+        # معاملة الشهر الماضي (قبل بداية هذا الشهر)
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=100, dt_utc=cur_lo - timedelta(days=1)
+        )
+        _add_transaction(
+            db_session, USER_A, tx_type="income", amount=50, dt_utc=cur_lo - timedelta(days=1)
+        )
+
+        result = run_query(
+            db_session,
+            USER_A,
+            {"metric": "compare_periods", "period": "this_month", "person": None},
+        )
+        assert result["metric"] == "compare_periods"
+        assert result["kind"] == "comparison"
+        cur = result["result"]["current"]
+        prev = result["result"]["previous"]
+        assert float(cur["expense"]["ILS"]) == 300.0
+        assert float(prev["expense"]["ILS"]) == 100.0
+        assert float(prev["income"]["ILS"]) == 50.0
+
+    def test_unsupported_period(self, db_session):
+        result = run_query(
+            db_session,
+            USER_A,
+            {"metric": "compare_periods", "period": "all_time", "person": None},
+        )
+        assert result["error"] == "unsupported_period"
+
+
+class TestComparisonFormatting:
+    def test_format_comparison_mentions_lists(self, db_session, monkeypatch):
+        from bot.formatters import format_query_result
+
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        cur_lo, _ = get_comparison_ranges("this_month")["current"]
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=300, dt_utc=cur_lo + timedelta(hours=1)
+        )
+        result = run_query(
+            db_session,
+            USER_A,
+            {"metric": "compare_periods", "period": "this_month", "person": None},
+        )
+        text = format_query_result(result)
+        assert "مقارنة" in text
+        assert "هذا الشهر" in text
+        assert "الشهر الماضي" in text
+
+
+# ---------- ReportPref CRUD ----------
+
+
+class TestReportPrefCrud:
+    def test_create_and_get_pref(self, db_session):
+        pref = set_report_frequency(db_session, USER_A, "daily")
+        assert pref.frequency == "daily"
+        assert get_report_pref(db_session, USER_A) is pref
+
+    def test_default_off_absent(self, db_session):
+        assert get_report_pref(db_session, USER_A) is None
+        assert list_report_prefs(db_session) == []
+
+    def test_update_frequency_and_deliver_time(self, db_session):
+        set_report_frequency(db_session, USER_A, "weekly", deliver_time="09:30")
+        pref = set_report_frequency(db_session, USER_A, "monthly")
+        assert pref.frequency == "monthly"
+        assert pref.deliver_time == "09:30"
+
+    def test_off_excludes_from_list(self, db_session):
+        set_report_frequency(db_session, USER_A, "daily")
+        set_report_frequency(db_session, USER_B, "off")
+        active = list_report_prefs(db_session)
+        assert [p.telegram_user_id for p in active] == [USER_A]
+
+    def test_mark_report_sent(self, db_session):
+        pref = set_report_frequency(db_session, USER_A, "daily")
+        assert pref.last_sent_at is None
+        mark_report_sent(db_session, pref)
+        assert pref.last_sent_at is not None
+
+
+# ---------- _report_due logic ----------
+
+
+class _FakePref:
+    def __init__(self, frequency, last_sent_at=None, deliver_time=None):
+        self.frequency = frequency
+        self.last_sent_at = last_sent_at
+        self.deliver_time = deliver_time
+
+
+class TestReportDue:
+    def test_before_deliver_time_not_due(self):
+        pref = _FakePref("daily", last_sent_at=None, deliver_time="23:59")
+        assert not reminders_mod._report_due(pref, now_local())
+
+    def test_daily_due_when_after_time_and_never_sent(self):
+        pref = _FakePref("daily", last_sent_at=None, deliver_time="00:00")
+        assert reminders_mod._report_due(pref, now_local())
+
+    def test_daily_no_duplicate_same_day(self):
+        pref = _FakePref("daily", last_sent_at=now_utc(), deliver_time="00:00")
+        assert not reminders_mod._report_due(pref, now_local())
+
+    def test_weekly_requires_first_day_of_week(self):
+        from app.timeutil import first_day_of_week
+
+        pref = _FakePref("weekly", last_sent_at=None, deliver_time="00:00")
+        fd = first_day_of_week()
+        today_wd = now_local().weekday()
+        if today_wd != fd:
+            assert not reminders_mod._report_due(pref, now_local())
+        else:
+            assert reminders_mod._report_due(pref, now_local())
+
+    def test_monthly_requires_first_day(self):
+        pref = _FakePref("monthly", last_sent_at=None, deliver_time="00:00")
+        if now_local().day == 1:
+            assert reminders_mod._report_due(pref, now_local())
+        else:
+            assert not reminders_mod._report_due(pref, now_local())
+
+    def test_off_never_due(self):
+        pref = _FakePref("off", last_sent_at=None, deliver_time="00:00")
+        assert not reminders_mod._report_due(pref, now_local())
+
+
+# ---------- periodic_report_job ----------
+
+
+class TestPeriodicReportJob:
+    def test_sends_report_and_marks_sent(self, db_env):
+        SessionMaker = db_env
+        db = SessionMaker()
+        # أُرسل آخر مرة أمس → مستحق اليوم (مع وقت تسليم 00:00)
+        pref = set_report_frequency(db, USER_A, "daily", deliver_time="00:00")
+        mark_report_sent(db, pref)
+        pref.last_sent_at = now_utc() - timedelta(days=1)
+        db.commit()
+        db.close()
+
+        context = MagicMock()
+        context.bot.send_message = MagicMock()
+        reminders_mod.periodic_report_job(context)
+        context.bot.send_message.assert_called_once()
+
+        db = SessionMaker()
+        sent_pref = get_report_pref(db, USER_A)
+        assert sent_pref.last_sent_at is not None
+        last_date = to_local_naive(sent_pref.last_sent_at).date()
+        assert last_date == now_local().date()
+        db.close()
+
+    def test_sends_nothing_when_no_prefs(self, db_env):
+        context = MagicMock()
+        context.bot.send_message = MagicMock()
+        reminders_mod.periodic_report_job(context)
+        context.bot.send_message.assert_not_called()
+
+
+# ---------- build_periodic_summary ----------
+
+
+class TestPeriodicSummary:
+    def test_contains_expenses_incomes_and_tasks(self, db_session, monkeypatch):
+        from app.timeutil import to_utc_naive
+        from bot.reports import build_periodic_summary
+
+        # تثبيت الساعة المحلية عند 10:00 → "today" = [00:00, 10:00] (بالتوقيت المحلي)
+        _freeze_now(monkeypatch, datetime(2026, 9, 7, 10, 0))
+        lo = to_utc_naive(datetime(2026, 9, 7, 0, 0))
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=250, dt_utc=lo + timedelta(hours=2)
+        )
+
+        text = build_periodic_summary(db_session, USER_A, "daily")
+        assert "المصاريف" in text
+        assert "250" in text
+        assert "الإيرادات" in text
+        assert "قيد الانتظار" in text
+
+    def test_unknown_frequency_falls_back_to_daily(self, db_session):
+        from bot.reports import build_periodic_summary
+
+        text = build_periodic_summary(db_session, USER_A, "nonsense")
+        assert "اليومي" in text
+
+
+# ---------- generate_export_excel ----------
+
+
+class TestExportExcel:
+    def test_three_sheets_with_period_filter(self, db_session, monkeypatch):
+        from openpyxl import load_workbook
+
+        from app.database.crud import create_task
+        from bot.exporters import generate_export_excel
+
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        cur_lo, _ = get_comparison_ranges("this_month")["current"]
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=50, dt_utc=cur_lo + timedelta(hours=2)
+        )
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=999, dt_utc=cur_lo - timedelta(days=20)
+        )
+        create_task(db_session, USER_A, {"description": "مهمة للتصدير"}, raw_message="مهمة للتصدير")
+
+        buf = generate_export_excel(db_session, USER_A, start_utc=cur_lo)
+        assert isinstance(buf, BytesIO)
+        buf.seek(0)
+        wb = load_workbook(buf)
+        assert wb.sheetnames == ["المعاملات المالية", "المهام", "الطلبيات والملاحظات"]
+
+        ws = wb["المعاملات المالية"]
+        values = [row for row in ws.iter_rows(values_only=True)]
+        joined = "\n".join("|".join(str(c) if c is not None else "" for c in row) for row in values)
+        # معاملة هذا الشهر ظاهرة، ومعاملة الشهر السابق (999) غير ظاهرة
+        assert "50" in joined
+        assert "999" not in joined
+
+
+# ---------- monthly_totals و generate_monthly_chart ----------
+
+
+class TestMonthlyTotals:
+    def test_returns_ordered_month_labels(self, db_session):
+        months = monthly_totals(db_session, USER_A, months=3)
+        assert len(months) == 3
+        assert months[0]["label"] <= months[1]["label"] <= months[2]["label"]
+        assert all(m["by_currency"] == {} for m in months)
+
+    def test_aggregates_current_month(self, db_session, monkeypatch):
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        cur_lo, _ = get_comparison_ranges("this_month")["current"]
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=120, dt_utc=cur_lo + timedelta(hours=1)
+        )
+        months = monthly_totals(db_session, USER_A, months=1)
+        assert len(months) == 1
+        assert float(months[0]["by_currency"]["ILS"]["expense"]) == 120.0
+
+
+class TestChart:
+    def test_returns_none_without_data(self, db_session):
+        from app.charts import generate_monthly_chart
+
+        assert generate_monthly_chart(db_session, USER_A) is None

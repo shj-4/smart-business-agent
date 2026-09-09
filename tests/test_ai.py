@@ -1,46 +1,50 @@
 """
-اختبارات عملية لـ analyze_message من app.ai_service (single source of truth).
+اختبارات تكاملية لـ analyze_message من app.ai_service (تُشغَّل يدويًا فقط).
 
-لا نُعيد تعريف SYSTEM_PROMPT أو الموديل هنا — بل نعتمد على analyze_message
-من ai_service.py فقط، لتجنّب أي ازدواجية/تباين في السلوك (كما كان في ai_test.py القديم).
+هذه الاختبارات تستدعي Gemini فعليًا (تحتاج اتصال + مفتاح API صالح):
+  pytest -m integration            # ويحتاج متغيرات البيئة (ملف .env)
+  python -m tests.test_ai          # تشغيل يدوي سريع / smoke
 
-ملاحظة: هذه الاختبارات تستدعي Gemini فعليًا (تحتاج اتصال + مفتاح API)، لذا
-تُشغَّل يدويًا (python -m tests.test_ai) وليست جزءًا من تشغيل البوت.
+لأنها معلمة بـ @pytest.mark.integration وحاصلة على التهيئة في pytest.ini
+(addopts = -m "not integration")، لن تُشغَّل مع `pytest` العادي أبدًا (منفصلة عن CI).
 """
 
-import unittest
 import json
+
+import pytest
 
 from app.ai_service import analyze_message
 
+pytestmark = pytest.mark.integration
 
-class TestAnalyzeMessage(unittest.TestCase):
+
+class TestAnalyzeMessage:
     def test_returns_parsed_json_dict(self):
         result = analyze_message("دفعت 300 شيكل للمورد محمد")
-        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)
 
     def test_record_expense_includes_amount_and_currency(self):
         result = analyze_message("دفعت 300 شيكل للمورد محمد")
-        self.assertEqual(result.get("intent"), "record")
-        self.assertEqual(result.get("type"), "expense")
-        self.assertEqual(result.get("amount"), 300)
-        self.assertEqual(result.get("currency"), "شيكل")
+        assert result.get("intent") == "record"
+        assert result.get("type") == "expense"
+        assert result.get("amount") == 300
+        assert result.get("currency") == "شيكل"
 
     def test_task_creation_with_date(self):
         result = analyze_message("ذكرني أتصل بسامر غدا الساعة 10")
-        self.assertEqual(result.get("intent"), "record")
-        self.assertEqual(result.get("type"), "task")
+        assert result.get("intent") == "record"
+        assert result.get("type") == "task"
 
     def test_query_total_expenses_has_query_details(self):
         result = analyze_message("كم صرفت هذا الشهر؟")
-        self.assertEqual(result.get("intent"), "query")
+        assert result.get("intent") == "query"
         qd = result.get("query_details") or {}
-        self.assertEqual(qd.get("metric"), "total_expenses")
-        self.assertEqual(qd.get("period"), "this_month")
+        assert qd.get("metric") == "total_expenses"
+        assert qd.get("period") == "this_month"
 
 
 def run_smoke_test():
-    """تشغيل يدوي سريع (مثل ai_test.py القديم) ولكن عبر analyze_message الموحّد."""
+    """تشغيل يدوي سريع عبر analyze_message الموحّد."""
     test_messages = [
         "دفعت 300 شيكل للمورد محمد مقابل شراء مواد",
         "استلمنا 1000 دولار من العميل أحمد",

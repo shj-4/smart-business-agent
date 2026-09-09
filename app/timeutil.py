@@ -11,18 +11,18 @@
 يمكن تغييرها عبر متغير البيئة TIMEZONE في ملف .env (مثل "Asia/Gaza" أو "Asia/Jerusalem").
 """
 
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-# المنطقة الزمنية المحلية (قابلة للتكوين عبر متغير البيئة TIMEZONE)
-_LOCAL_TZ_NAME = os.getenv("TIMEZONE", "Asia/Gaza")
-LOCAL_TZ = ZoneInfo(_LOCAL_TZ_NAME)
+from app.config import settings
 
-# أوّل يوم في الأسبوع (قابل للتكوين عبر متغير البيئة FIRST_DAY_OF_WEEK).
+# المنطقة الزمنية المحلية (من Pydantic Settings / .env)
+LOCAL_TZ = ZoneInfo(settings.timezone)
+
+# أوّل يوم في الأسبوع (من Pydantic Settings / .env)
 # القيمة بصيغة weekday() الخاصة بـ Python حيث الاثنين=0 ... الأحد=6.
 # الافتراضي 6 (الأحد) لأن الأسبوع في فلسطين/السياق العربي يبدأ غالبًا من الأحد.
-DEFAULT_FIRST_DAY = int(os.getenv("FIRST_DAY_OF_WEEK", "6"))
+DEFAULT_FIRST_DAY = int(settings.first_day_of_week)
 
 
 def first_day_of_week() -> int:
@@ -33,7 +33,7 @@ def first_day_of_week() -> int:
 
 def now_utc() -> datetime:
     """الآن بصيغة UTC (naive) — نفس صيغة التخزين في قاعدة البيانات."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def now_local() -> datetime:
@@ -46,7 +46,7 @@ def to_local_naive(utc_naive: datetime) -> datetime:
     if utc_naive is None:
         return None
     if utc_naive.tzinfo is None:
-        utc_naive = utc_naive.replace(tzinfo=timezone.utc)
+        utc_naive = utc_naive.replace(tzinfo=UTC)
     return utc_naive.astimezone(LOCAL_TZ).replace(tzinfo=None)
 
 
@@ -57,4 +57,4 @@ def to_utc_naive(local_dt: datetime) -> datetime:
     if local_dt.tzinfo is None:
         # تعامل مع القيمة الـ naive كمحلية
         local_dt = local_dt.replace(tzinfo=LOCAL_TZ)
-    return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return local_dt.astimezone(UTC).replace(tzinfo=None)

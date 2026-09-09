@@ -8,8 +8,8 @@
 - التنسيق يتضمن الطابع الزمني والمنسّق ومستوى السجل، مع دعم النصوص العربية.
 """
 
-import os
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 
 # مجلد السجلات داخل جذر المشروع (موجود افتراضيًا)
@@ -21,7 +21,7 @@ MAIN_LOG = os.path.join(LOGS_DIR, "app.log")
 
 # التكوين الافتراضي للتدوير
 MAX_BYTES = 5 * 1024 * 1024  # 5MB
-BACKUP_COUNT = 5              # يحتفظ بـ 5 ملفات قديمة (app.log.1 .. app.log.5)
+BACKUP_COUNT = 5  # يحتفظ بـ 5 ملفات قديمة (app.log.1 .. app.log.5)
 
 
 def configure_logging(level: int = logging.INFO, service: str = "") -> None:
@@ -36,7 +36,9 @@ def configure_logging(level: int = logging.INFO, service: str = "") -> None:
     root.setLevel(level)
 
     fmt = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - " + (f"[{service}] " if service else "") + "%(message)s"
+        "%(asctime)s - %(name)s - %(levelname)s - "
+        + (f"[{service}] " if service else "")
+        + "%(message)s"
     )
 
     # تجنّب إضافة معالجات مكررة عند إعادة الاستدعاء

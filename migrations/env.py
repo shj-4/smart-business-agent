@@ -1,20 +1,17 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
-from alembic import context
-
 import os
 import sys
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 # جذر المشروع (حتى نستطيع استيراد app.*)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from app.database.db import Base, DATABASE_URL  # noqa: E402
 from app.database import models  # noqa: E402,F401  # تأكد من تحميل كل الجداول
+from app.database.db import DATABASE_URL, Base  # noqa: E402
 
 config = context.config
 
@@ -51,9 +48,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

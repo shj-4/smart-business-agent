@@ -8,11 +8,11 @@
 """
 
 import re
-from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
-def _to_str_or_none(value) -> Optional[str]:
+def _to_str_or_none(value) -> str | None:
     """يحوّل أي قيمة إلى نص، أو None إذا كانت خالية/غير مناسبة."""
     if value is None:
         return None
@@ -28,7 +28,7 @@ def _to_str_or_none(value) -> Optional[str]:
     return str(value).strip() or None
 
 
-def _coerce_amount(value) -> Optional[float]:
+def _coerce_amount(value) -> float | None:
     """يحوّل المبلغ إلى float أو None (يقبل رقمًا أو نصًا يحتوي رقمًا)."""
     if value is None or isinstance(value, bool):
         return None
@@ -47,7 +47,7 @@ def _coerce_amount(value) -> Optional[float]:
     return None
 
 
-def _coerce_missing_fields(value) -> List[str]:
+def _coerce_missing_fields(value) -> list[str]:
     """يضمن أن missing_fields قائمة من النصوص."""
     if value is None:
         return []
@@ -70,9 +70,9 @@ class QueryDetailsSchema(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    metric: Optional[str] = None
-    period: Optional[str] = None
-    person: Optional[str] = None
+    metric: str | None = None
+    period: str | None = None
+    person: str | None = None
 
     @field_validator("metric", "period", "person", mode="before")
     @classmethod
@@ -85,24 +85,57 @@ class AnalysisResultSchema(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    intent: Optional[str] = None
-    type: Optional[str] = None
-    amount: Optional[float] = None
-    currency: Optional[str] = None
-    person: Optional[str] = None
-    description: Optional[str] = None
-    date: Optional[str] = None
-    missing_fields: List[str] = Field(default_factory=list)
-    query_details: Optional[QueryDetailsSchema] = None
+    intent: str | None = None
+    type: str | None = None
+    amount: float | None = None
+    currency: str | None = None
+    person: str | None = None
+    category: str | None = None
+    description: str | None = None
+    date: str | None = None
+    priority: str | None = None
+    recurrence: str | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    query_details: QueryDetailsSchema | None = None
 
     # حقول داخلية إضافية تحمل معلومات خطأ/خام عند الفشل
-    error: Optional[str] = None
-    raw: Optional[str] = None
+    error: str | None = None
+    raw: str | None = None
 
-    @field_validator("intent", "type", "currency", "person", "description", "date", mode="before")
+    @field_validator(
+        "intent", "type", "currency", "person", "category", "description", "date", mode="before"
+    )
     @classmethod
     def _strs(cls, v):
         return _to_str_or_none(v)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _priority(cls, v):
+        s = _to_str_or_none(v)
+        if not s:
+            return None
+        low = s.strip().lower()
+        if low in ("high", "عالية", "عالي", "عاجل", "مهم", "مستعجل"):
+            return "high"
+        if low in ("low", "منخفضة", "منخفض", "ضعيفة"):
+            return "low"
+        return "normal"
+
+    @field_validator("recurrence", mode="before")
+    @classmethod
+    def _recurrence(cls, v):
+        s = _to_str_or_none(v)
+        if not s:
+            return None
+        low = s.strip().lower()
+        if low in ("daily", "يومي", "يوم", "كل يوم"):
+            return "daily"
+        if low in ("weekly", "اسبوعي", "أسبوعي", "اسبوع", "كل اسبوع", "كل أسبوع"):
+            return "weekly"
+        if low in ("monthly", "شهري", "شهر", "كل شهر"):
+            return "monthly"
+        return None
 
     @field_validator("amount", mode="before")
     @classmethod

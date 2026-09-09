@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>الميزانيات — لوحة التحكم</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background: #f0f2f5;
+            color: #1a1a1a;
+            padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { margin-bottom: 20px; font-size: 24px; }
+        .nav-links { margin-bottom: 20px; }
+        .nav-links a {
+            margin-left: 15px;
+            color: #2563eb;
+            text-decoration: none;
+        }
+        .panel {
+            background: #fff;
+            border-radius: 10px;
+            padding: 18px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .budget-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .budget-card .target { font-weight: 600; font-size: 15px; margin-bottom: 8px; }
+        .progress {
+            background: #e5e7eb;
+            border-radius: 20px;
+            height: 12px;
+            margin: 8px 0;
+            overflow: hidden;
+        }
+        .progress .fill {
+            height: 100%;
+            border-radius: 20px;
+            background: #2563eb;
+            transition: width 0.3s;
+        }
+        .progress .fill.warn { background: #f59e0b; }
+        .progress .fill.over { background: #ef4444; }
+        .meta { color: #64748b; font-size: 13px; }
+        .status {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .status.ok { background: #dcfce7; color: #15803d; }
+        .status.warn { background: #fef9c3; color: #a16207; }
+        .status.over { background: #fee2e2; color: #b91c1c; }
+        .empty { color: #888; padding: 15px; text-align: center; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>الميزانيات الشهرية</h1>
+    <div class="nav-links">
+        <a href="/dashboard">الرئيسية</a>
+        <a href="/dashboard/transactions">المعاملات</a>
+        <a href="/dashboard/tasks">المهام</a>
+        <a href="/dashboard/notes">الملاحظات</a>
+        <a href="/dashboard/budgets">الميزانيات</a>
+    </div>
+
+    <div class="panel">
+        {% if budgets %}
+            {% for b in budgets %}
+            <div class="budget-card">
+                <div class="target">{{ b.target }}</div>
+                <div class="progress">
+                    <div class="fill {{ 'over' if b.over else ('warn' if b.percent >= 80 else '') }}"
+                         style="width: {{ [b.percent, 100]|min }}%"></div>
+                </div>
+                <div class="meta">
+                    المصروف: {{ b.spent }} من {{ b.limit }} ({{ b.percent }}%)
+                    {% if b.over %}
+                        <span class="status over">تجاوزت</span>
+                    {% elif b.percent >= 80 %}
+                        <span class="status warn">قريب من السقف</span>
+                    {% else %}
+                        <span class="status ok">ضمن الحدود</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+        <div class="empty">لا توجد ميزانيات بعد. أنشئها عبر البوت بالأمر: /budget إضافة عملة ILS 2000</div>
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>

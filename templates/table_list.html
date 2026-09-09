@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} — لوحة التحكم</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background: #f0f2f5;
+            color: #1a1a1a;
+            padding: 20px;
+        }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 { margin-bottom: 20px; font-size: 24px; }
+        .nav-links { margin-bottom: 20px; }
+        .nav-links a {
+            margin-left: 15px;
+            color: #2563eb;
+            text-decoration: none;
+        }
+        .panel {
+            background: #fff;
+            border-radius: 10px;
+            padding: 18px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #eee; }
+        th { background: #f8fafc; color: #475569; font-weight: 600; }
+        .badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .badge.expense { background: #fee2e2; color: #b91c1c; }
+        .badge.income { background: #dcfce7; color: #15803d; }
+        .badge.pending { background: #fef9c3; color: #a16207; }
+        .badge.overdue { background: #fee2e2; color: #b91c1c; }
+        .badge.done { background: #dcfce7; color: #15803d; }
+        .time { color: #8b8b8b; font-size: 12px; }
+        .empty { color: #888; padding: 15px; text-align: center; }
+        .filters { margin-bottom: 15px; }
+        .filters a {
+            display: inline-block;
+            padding: 4px 12px;
+            margin-left: 8px;
+            background: #e2e8f0;
+            border-radius: 12px;
+            color: #334155;
+            text-decoration: none;
+            font-size: 12px;
+        }
+        .filters a.active { background: #2563eb; color: #fff; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>{{ title }}</h1>
+    <div class="nav-links">
+        <a href="/dashboard">الرئيسية</a>
+        <a href="/dashboard/transactions">المعاملات</a>
+        <a href="/dashboard/tasks">المهام</a>
+        <a href="/dashboard/notes">الملاحظات</a>
+    </div>
+
+    {% if period %}
+    <div class="filters">
+        {% for p in ["all_time", "this_month", "this_week", "today"] %}
+        <a href="?period={{ p }}" class="{{ 'active' if period == p }}">{{ periods[p] }}</a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="panel">
+        {% if rows %}
+        <table>
+            <thead>
+                <tr>{{ headers|safe }}</tr>
+            </thead>
+            <tbody>
+                {{ body|safe }}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">لا توجد بيانات في هذا القسم.</div>
+        {% endif %}
+    </div>
+</div>
+</body>
+</html>

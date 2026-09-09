@@ -8,32 +8,34 @@ Revision ID: d5e6f7a8b9c0
 Revises: c3d4e5f6a7b8
 Create Date: 2026-09-06 19:20:00.000000
 """
-from typing import Sequence, Union
+
+from collections.abc import Sequence
+
 from alembic import op
 
-revision: str = 'd5e6f7a8b9c0'
-down_revision: Union[str, Sequence[str], None] = 'c3d4e5f6a7b8'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+revision: str = "d5e6f7a8b9c0"
+down_revision: str | Sequence[str] | None = "c3d4e5f6a7b8"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
     for table in ("transactions", "notes", "tasks"):
-        op.drop_index(f'ix_{table}_telegram_message_id', table_name=table)
+        op.drop_index(f"ix_{table}_telegram_message_id", table_name=table)
         op.create_index(
-            f'ix_{table}_user_message_id',
+            f"ix_{table}_user_message_id",
             table,
-            ['telegram_user_id', 'telegram_message_id'],
+            ["telegram_user_id", "telegram_message_id"],
             unique=True,
         )
 
 
 def downgrade() -> None:
     for table in ("transactions", "notes", "tasks"):
-        op.drop_index(f'ix_{table}_user_message_id', table_name=table)
+        op.drop_index(f"ix_{table}_user_message_id", table_name=table)
         op.create_index(
-            f'ix_{table}_telegram_message_id',
+            f"ix_{table}_telegram_message_id",
             table,
-            ['telegram_message_id'],
+            ["telegram_message_id"],
             unique=True,
         )

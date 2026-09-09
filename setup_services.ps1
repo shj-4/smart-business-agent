@@ -46,6 +46,20 @@ Write-Host "== Creating API service: SmartBotAPI =="
 & $NSSM set SmartBotAPI ObjectName LocalSystem
 Write-Host "  Created SmartBotAPI"
 
+Write-Host "== Creating daily backup task: SmartBotBackup =="
+$backupTask = 'SmartBotBackup'
+$existingTask = Get-ScheduledTask -TaskName $backupTask -ErrorAction SilentlyContinue
+if ($existingTask) {
+    Write-Host "  Removing old task: $backupTask"
+    Unregister-ScheduledTask -TaskName $backupTask -Confirm:$false
+}
+
+$action = New-ScheduledTaskAction -Execute "$ROOT\backup_db.cmd" -WorkingDirectory $ROOT
+$trigger = New-ScheduledTaskTrigger -Daily -At "03:00AM"
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName $backupTask -Action $action -Trigger $trigger -Settings $settings -Description "Smart Business Agent - daily SQLite backup" | Out-Null
+Write-Host "  Created: $backupTask (daily at 03:00 AM)"
+
 Write-Host "== Starting services =="
 & $NSSM start SmartBot | Out-Null
 & $NSSM start SmartBotAPI | Out-Null
@@ -53,4 +67,5 @@ Write-Host "== Starting services =="
 Write-Host "== Final status =="
 Start-Sleep -Seconds 2
 Get-Service -Name SmartBot, SmartBotAPI | Select-Object Name, Status, StartType | Format-Table -AutoSize
+Get-ScheduledTask -TaskName $backupTask | Select-Object TaskName, State, @{N='NextRun';E={$_.Triggers[0].StartBoundary}} | Format-Table -AutoSize
 Write-Host "Setup completed successfully."

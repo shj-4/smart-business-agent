@@ -10,10 +10,9 @@
 """
 
 import os
-import sys
 
-from alembic.config import Config
 from alembic import command
+from alembic.config import Config
 
 # جذر المشروع — لأن alembic.ini و migrations/ في الجذر
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
