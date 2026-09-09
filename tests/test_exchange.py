@@ -3,7 +3,7 @@
 """
 
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,12 +13,14 @@ from app.exchange import convert, get_rate
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """يمسح التخزين المؤقت للأسعار بين كل اختبار (لا يعتمد الاختبار على ترتيب)."""
+    """يمسح التخزين المؤقت للأسعار وحالة قاطع الدائرة بين كل اختبار."""
     exchange._cache.clear()
     exchange._last_rates.clear()
+    exchange.reset_breaker()
     yield
     exchange._cache.clear()
     exchange._last_rates.clear()
+    exchange.reset_breaker()
 
 
 class TestConvert:
@@ -67,3 +69,50 @@ class TestGetRate:
         assert "ILS" in exchange.CURRENCY_NAMES
         assert "USD" in exchange.CURRENCY_NAMES
         assert "JOD" in exchange.CURRENCY_NAMES
+
+
+class TestCircuitBreaker:
+    def test_hits_stop_after_threshold_failures(self):
+        """بعد 3 فشل متتالٍ تُفتح الدائرة ولا تُجرَّب الشبكة مجددًا."""
+        fake = MagicMock(return_value=None)
+        with patch("app.exchange._fetch_rates", fake), patch.object(
+            exchange, "_CB_THRESHOLD", 3
+        ), patch.object(exchange, "_CB_COOLDOWN", 120):
+            for _ in range(3):
+                convert("100", "USD", "ILS")  # كل مرة فشل → عدّاد++
+            assert exchange.breaker_open() is True
+            calls_after_open = fake.call_count
+            convert("100", "USD", "ILS")  # الدائرة مفتوحة → لا استدعاء شبكة
+            assert fake.call_count == calls_after_open
+
+    def test_success_resets_counter(self):
+        """نجاح وسيط يعيد العدّاد للصفر فلا تُفتح الدائرة هكذا."""
+        responses = [None, None, {"USD": 1.0, "ILS": 3.75}]
+        fake = MagicMock(side_effect=lambda base: responses.pop(0))
+        with patch("app.exchange._fetch_rates", fake), patch.object(
+            exchange, "_CB_THRESHOLD", 3
+        ):
+            convert("100", "USD", "ILS")
+            convert("100", "USD", "ILS")
+            convert("100", "USD", "ILS")  # نجاح يعيد العدّاد
+            assert exchange._BREAKER["failures"] == 0
+            assert exchange.breaker_open() is False
+
+    def test_stale_rates_still_used_while_open(self):
+        """الدائرة المفتوحة تمنع الشبكة لكنها لا تمنع آخر سعر مخزّن (fallback صامت)."""
+        _t = __import__("time")
+        exchange._last_rates["USD"] = ({"USD": 1.0, "ILS": 3.75}, _t.time() - 7200)  # أقدم من TTL
+        exchange._BREAKER["failures"] = 5
+        exchange._BREAKER["open_until"] = _t.time() + 300
+
+        mock_fetch = MagicMock()
+        with patch("app.exchange._fetch_rates", mock_fetch):
+            assert get_rate("USD", "ILS") == Decimal("3.7500")
+            mock_fetch.assert_not_called()
+
+    def test_reset_breaker(self):
+        exchange._BREAKER["failures"] = 9
+        exchange._BREAKER["open_until"] = 10**12
+        exchange.reset_breaker()
+        assert exchange._BREAKER["failures"] == 0
+        assert exchange.breaker_open() is False

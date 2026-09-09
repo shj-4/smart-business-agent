@@ -6,6 +6,7 @@
 شاشة التأكيد تعيد بدء المحادثة (allow_reentry) مع مسح الحالة القديمة.
 """
 
+import asyncio
 import logging
 import re
 from decimal import Decimal
@@ -591,7 +592,7 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
         return None
 
-    result = analyze_message(user_text)
+    result = await asyncio.to_thread(analyze_message, user_text)
     logger.info("نتيجة التحليل: %s", result)
 
     if seed and result.get("intent") == "record":
@@ -621,7 +622,7 @@ async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _clear_all_pending(context)
         return None
 
-    reply_result = analyze_message(update.message.text)
+    reply_result = await asyncio.to_thread(analyze_message, update.message.text)
 
     missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
     field = missing[0]

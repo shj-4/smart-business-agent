@@ -62,6 +62,71 @@ class TestAnalyzeMessageRetry:
         assert result["type"] == "expense"
         assert mock_gen.call_count == 2
 
+    @patch("app.ai_service.client.models.generate_content")
+    def test_client_4xx_errors_are_not_retried(self, mock_gen):
+        """أخطاء عميل دائمة (4xx عدا 429) لا تُعاد محاولتها — تُفشل فورًا."""
+        from app.ai_service import _is_retryable
+
+        class ClientBadRequest(Exception):
+            code = 400
+
+        mock_gen.side_effect = ClientBadRequest("invalid argument")
+        assert _is_retryable(ClientBadRequest("x")) is False
+        result = analyze_message("دفعت 300 شيكل")
+        assert result["intent"] == "unknown"
+        assert mock_gen.call_count == 1
+
+    @patch("app.ai_service.client.models.generate_content")
+    def test_rate_limit_429_is_retried_and_waits_respecting_retry_after(self, mock_gen):
+        """429 يُعاد مع احترام Retry-After (لا انتظار تصاعدي أعمى)."""
+        from app.ai_service import _extract_retry_after
+
+        class RateLimited(Exception):
+            code = 429
+            retry_after = 1
+
+        assert _extract_retry_after(RateLimited("limit")) == 1.0
+        good_response = MagicMock()
+        good_response.text = json.dumps(
+            {
+                "intent": "record",
+                "type": "expense",
+                "amount": 100,
+                "currency": "شيكل",
+                "person": None,
+                "description": "دفعة",
+                "date": None,
+                "missing_fields": [],
+                "query_details": None,
+            }
+        )
+        mock_gen.side_effect = [RateLimited("quota"), good_response]
+        result = analyze_message("دفعت 100 شيكل")
+        assert result["intent"] == "record"
+        assert mock_gen.call_count == 2
+
+    def test_retry_wait_honors_retry_after_and_caps(self):
+        """الانتظار خلف 429 = قيمة Retry-After (محدودة بسقف)، وبدونه تصاعدي."""
+        from tenacity import RetryCallState
+
+        from app.ai_service import _extract_retry_after, _retry_wait
+
+        class HitLimit(Exception):
+            code = 429
+            retry_after = 9999
+
+        state = RetryCallState(retry_object=None, fn=MagicMock(), args=(), kwargs={})
+        state.outcome = MagicMock()
+        state.outcome.exception.return_value = HitLimit("limit")
+        assert _extract_retry_after(HitLimit("limit")) == 60  # السقف 60 ثانية
+        assert _retry_wait(state) == 60
+
+        state2 = RetryCallState(retry_object=None, fn=MagicMock(), args=(), kwargs={})
+        state2.outcome = MagicMock()
+        state2.outcome.exception.return_value = ConnectionError("net")
+        state2.attempt_number = 1
+        assert _retry_wait(state2) == 1.0  # تصاعدي: 2^0
+
 
 class TestTranscribeAudioRetry:
     """اختبار retry في transcribe_audio عند فشل generate_content."""

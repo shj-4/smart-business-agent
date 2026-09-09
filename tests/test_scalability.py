@@ -100,10 +100,15 @@ def test_admin_stats_cached(monkeypatch):
 
 def test_admin_stats_ai_queue_field_present(db_session):
     from app.admin import _build_admin_stats_uncached
+    from app.ai_queue import aiq
 
     stats = _build_admin_stats_uncached(db_session)
     assert "ai_queue" in stats
-    assert stats["ai_queue"]["enabled"] is False
+    # الحقل يعكس إعداد الطابور الحالي (مفعّل افتراضيًا كإعداد الإنتاج) وليس قيمة ثابتة
+    assert stats["ai_queue"]["enabled"] is bool(aiq.enabled)
+    assert isinstance(stats["ai_queue"]["pending"], int)
+    assert isinstance(stats["ai_queue"]["processed"], int)
+    assert isinstance(stats["ai_queue"]["failed"], int)
 
 
 def test_build_database_url_helpers():

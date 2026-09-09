@@ -54,3 +54,48 @@ def test_run_backup_skips_non_sqlite(monkeypatch, tmp_path):
     monkeypatch.setattr(backup, "BACKUP_DIR", str(tmp_path / "backups"))
     monkeypatch.setattr(backup, "LOG_FILE", str(tmp_path / "backup.log"))
     assert backup.run_backup() is False
+
+
+def test_verify_backup_accepts_clean_copy(monkeypatch, tmp_path):
+    """النسخة المنتجة عبر run_backup تمر فحص PRAGMA integrity_check."""
+    src = tmp_path / "src.db"
+    conn = sqlite3.connect(str(src))
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO t (name) VALUES ('x')")
+    conn.commit()
+    conn.close()
+
+    bdir = tmp_path / "backups"
+    monkeypatch.setattr(backup, "DB_PATH", str(src))
+    monkeypatch.setattr(backup, "BACKUP_DIR", str(bdir))
+    monkeypatch.setattr(backup, "KEEP_COUNT", 3)
+    monkeypatch.setattr(backup, "LOG_FILE", str(tmp_path / "backup.log"))
+
+    assert backup.run_backup() is True
+    made = backup._list_backups()
+    assert len(made) == 1
+    assert backup._verify_backup(str(bdir / made[0])) is True
+
+
+def test_verify_backup_rejects_corrupted_file(tmp_path):
+    """ملف تالف (ليس قاعدة صالحة) يفشل الفحص ولا يعتمد كنسخة سليمة."""
+    bad = tmp_path / "corrupt.db"
+    bad.write_bytes(b"\x00\x01\x02 not a sqlite file at all \xff\xfe")
+    assert backup._verify_backup(str(bad)) is False
+
+
+def test_run_backup_removes_failed_verification(monkeypatch, tmp_path):
+    """إذا فشل فحص السلامة تُحذف النسخة ولا تُحسب ضمن المحتفظ بها."""
+    src = tmp_path / "src.db"
+    conn = sqlite3.connect(str(src))
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    bdir = tmp_path / "backups"
+    monkeypatch.setattr(backup, "DB_PATH", str(src))
+    monkeypatch.setattr(backup, "BACKUP_DIR", str(bdir))
+    monkeypatch.setattr(backup, "LOG_FILE", str(tmp_path / "backup.log"))
+    monkeypatch.setattr(backup, "_verify_backup", lambda path: False)
+
+    assert backup.run_backup() is False
+    assert backup._list_backups() == []

@@ -58,8 +58,8 @@ class Settings(BaseSettings):
         description="فترة بقاء ذاكرة التخزين المؤقت للاستعلامات المتكررة (بالثواني)",
     )
     ai_queue_enabled: bool = Field(
-        default=False,
-        description="تفعيل طابور المعالجة خلف تحليل الـ AI بدل الطلب المتزامن المباشر",
+        default=True,
+        description="تفعيل طابور المعالجة خلف تحليل الـ AI (مُوصى به للإنتاج — يحمي حلقة الأحداث)",
     )
     ai_queue_maxsize: int = Field(
         default=64,

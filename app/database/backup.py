@@ -55,6 +55,17 @@ def _rotate_backups() -> None:
             logger.warning("فشل حذف نسخة قديمة %s: %s", old, exc)
 
 
+def _verify_backup(backup_path: str) -> bool:
+    """يفحص سلامة نسخة SQLite عبر PRAGMA integrity_check. يعيد True إن كانت سليمة."""
+    try:
+        with sqlite3.connect(backup_path) as check:
+            rows = check.execute("PRAGMA integrity_check").fetchall()
+        return bool(rows) and rows[0][0] == "ok"
+    except sqlite3.Error as exc:
+        logger.warning("تعذّر فحص سلامة النسخة %s: %s", backup_path, exc)
+        return False
+
+
 def run_backup() -> bool:
     """ينفّذ نسخة احتياطية واحدة من قاعدة SQLite. يعيد True عند النجاح."""
     if not DB_PATH or not os.path.exists(DB_PATH):
@@ -71,11 +82,20 @@ def run_backup() -> bool:
         src.backup(dst)
         dst.close()
         src.close()
-        _log(f"تم النسخ الاحتياطي: {backup_path}")
     except Exception as exc:  # noqa: BLE001 — أي خطأ في النسخ لا يُسقط البوت
         _log(f"خطأ في النسخ الاحتياطي: {exc}")
         return False
 
+    # تحقق من سلامة النسخة قبل اعتمادها — نسخة صامتة تالفة أسوأ من عدم وجودها
+    if not _verify_backup(backup_path):
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        _log(f"فشل فحص سلامة النسخة {backup_path} — حُذفت النسخة غير السليمة")
+        return False
+
+    _log(f"تم النسخ الاحتياطي وسلامته موثّقة: {backup_path}")
     _rotate_backups()
     _log(f"النسخ المحتفظ بها: {len(_list_backups())}")
     return True

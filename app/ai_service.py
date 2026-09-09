@@ -2,8 +2,10 @@
 خدمة Gemini AI مع retry تلقائي عند انقطاع الشبكة أو أخطاء الخادم.
 
 تستخدم tenacity (موجودة بالفعل في requirements) لإعادة المحاولة تلقائيًا
-بمدة انتظار تصاعدية (exponential backoff) عند أي استثناء — شبكة، خادم، أو
-أخطاء rate limit. هذا يمنع سقوط البوت بصمت عندما ينقطع الاتصال مؤقتًا.
+بمدة انتظار تصاعدية (exponential backoff) على الفشل العابر (شبكة/مهلة/5xx)،
+وتميّز أخطاء الحصة: 429 تُعاد مع احترام Retry-After، بينما أخطاء العميل
+الدائمة (4xx عدا 429) لا تُعاد. هذا يمنع سقوط البوت بصمت دون إغراق Gemini
+بمحاولات متكررة عند استنفاد الحصة.
 """
 
 import json
@@ -14,9 +16,8 @@ from google.genai import types
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
-    wait_exponential,
 )
 
 from app.config import GEMINI_API_KEY
@@ -68,10 +69,62 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # نموذج Gemini المستخدم للتحليل ونسخ الصوت
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 
-# إعدادات retry:最多 3 محاولات، انتظار تصاعدي 1→2→4 ثوانٍ
+# إعدادات retry:最多 3 محاولات، انتظار تصاعدي، مع تمييز أخطاء الفترة (quota) عن
+# أخطاء الشبكة العابرة: نعيد المحاولة فقط على (شبكة/مهلة/5xx/429) ونحترم
+# Retry-After إن وُجد — بدل تكرار كل استثناء أعمى (كان ذلك يضاعف ضغط الحصة).
 _RETRY_STOP = stop_after_attempt(3)
-_RETRY_WAIT = wait_exponential(multiplier=1, min=1, max=10)
-_RETRY_RETRY = retry_if_exception_type(Exception)  # كل الاستثناءات (شبكة، خادم، rate limit)
+_RETRY_AFTER_CAP = 60  # حد أقصى ثوانٍ للانتظار خلف 429
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    for attr in ("code", "status_code", "status"):
+        raw = getattr(exc, attr, None)
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.isdigit():
+            return int(raw)
+    return None
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """يُعيد المحاولة فقط للفشل العابر — ويتوقف فورًا أمام أخطاء العميل الدائمة."""
+    status = _extract_status_code(exc)
+    if status is not None:
+        # 429 (rate limit/quota) يُعاد مع احترام Retry-After؛ أخطاء 4xx أخرى دائمة
+        return status >= 500 or status == 429
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    # استثناء غير مصنّف — نعتبره عابرًا (توافق مع السلوك السابق)
+    return True
+
+
+def _extract_retry_after(exc: Exception) -> float | None:
+    raw = getattr(exc, "retry_after", None)
+    if raw is None:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            raw = (getattr(resp, "headers", None) or {}).get("retry-after")
+    if raw is None:
+        return None
+    try:
+        val = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if val <= 0:
+        return None
+    return min(_RETRY_AFTER_CAP, val)
+
+
+def _retry_wait(retry_state) -> float:
+    exc = retry_state.outcome.exception()
+    retry_after = _extract_retry_after(exc)
+    if retry_after is not None:
+        return retry_after
+    return min(10.0, float(2 ** (retry_state.attempt_number - 1)))
+
+
+_RETRY_WAIT = _retry_wait
+_RETRY_RETRY = retry_if_exception(_is_retryable)
 
 STT_PROMPT = """
 أعد كتابة الكلام في هذا الملف الصوتي كنص مكتوب حرفيًا (نص فقط، بدون أي شرح أو مقدمة أو علامات اقتباس).

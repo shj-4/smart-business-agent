@@ -23,9 +23,42 @@ _last_rates: dict[str, tuple[dict, float]] = {}
 
 API_BASE = "https://open.er-api.com/v6/latest"
 
+# ---------- قاطع الدائرة (Circuit Breaker) للخدمة الخارجية ----------
+# بعد عدة فشل متتالٍ يتوقف الاتصال بالكامل لفترة (لا يُبطئ كل تقرير/فحص),
+# مع محاولة استكشاف (half-open) بعد انتهاء فترة التهدئة. لا تحاول العملية
+# إصلاح الشبكة — السياق عملي: عند تعطّل الخدمة، يتجنّب البوت انتظار 10 ثوانٍ
+# كل مرة ويعتمد بدلًا على آخر أسعار مخزّنة أو يعلن النقص صراحةً.
+_CB_THRESHOLD = 3  # عدد الفشل المتتالي لفتح الدائرة
+_CB_COOLDOWN = 120  # ثوانٍ قبل السماح بمحاولة استكشاف واحدة
+_BREAKER: dict = {"failures": 0, "open_until": 0.0}
+
+
+def breaker_open() -> bool:
+    return time.time() < _BREAKER["open_until"]
+
+
+def reset_breaker() -> None:
+    """إعادة ضبط قاطع الدائرة (للاختبارات والمراقبة اليدوية)."""
+    _BREAKER["failures"] = 0
+    _BREAKER["open_until"] = 0.0
+
+
+def _record_fetch_result(success: bool) -> None:
+    if success:
+        _BREAKER["failures"] = 0
+        return
+    _BREAKER["failures"] += 1
+    if _BREAKER["failures"] >= _CB_THRESHOLD:
+        _BREAKER["open_until"] = time.time() + _CB_COOLDOWN
+        logger.error(
+            "قاطع الدائرة لأسعار الصرف مفتوح بعد %d فشل متتالٍ حتى %s",
+            _BREAKER["failures"],
+            _BREAKER["open_until"],
+        )
+
 
 def _fetch_rates(base: str) -> dict[str, float] | None:
-    """يجلب أسعار الصرف لعملة أساسية من API المجاني."""
+    """يجلب أسعار الصرف لعملة أساسية من API المجاني (بدون منطق قاطع الدائرة)."""
     url = f"{API_BASE}/{base}"
     try:
         with httpx.Client(timeout=10) as client:
@@ -34,7 +67,7 @@ def _fetch_rates(base: str) -> dict[str, float] | None:
             data = resp.json()
             if data.get("result") == "success":
                 return data.get("rates", {})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — أي فشل شبكة يُعاد None ويعالجه المستدعي
         logger.warning("فشل جلب أسعار الصرف من %s: %s", url, exc)
     return None
 
@@ -57,15 +90,25 @@ def get_rate(from_cur: str, to_cur: str) -> Decimal | None:
 
     rates = _last_rates.get(from_cur)
     if not rates or (now - rates[1]) >= _CACHE_TTL:
-        raw = _fetch_rates(from_cur)
-        if raw is None:
+        raw = None
+        attempted = False
+        if breaker_open():
+            logger.warning("أسعار الصرف: الدائرة مفتوحة — نعتمد آخر سعر مخزّن (%s)", from_cur)
+        else:
+            attempted = True
+            raw = _fetch_rates(from_cur)
+        if raw is not None:
+            _record_fetch_result(True)
+            _last_rates[from_cur] = (raw, now)
+        else:
+            if attempted:
+                _record_fetch_result(False)
             # محاولة آخر سعر مخزّن
             if from_cur in _last_rates:
                 r = _last_rates[from_cur][0].get(to_cur)
                 if r is not None:
                     return Decimal(str(r)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
             return None
-        _last_rates[from_cur] = (raw, now)
 
     rates_dict = _last_rates[from_cur][0]
     rate_val = rates_dict.get(to_cur)
