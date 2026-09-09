@@ -411,3 +411,70 @@ class TestReportOnMessage:
         text = self._run("daily", db_session, monkeypatch)
         assert "التقرير اليومي" in text
         assert "كل يوم" in text
+
+
+# ---------- budget_check: لا تسريب جلسات ----------
+
+
+class TestBudgetCheckSessionCleanup:
+    """كل جلسة قاعدة بيانات تُغلق — الجلسة الخارجية أيضًا وليس فقط الجلسات الداخلية."""
+
+    def test_every_session_closed_on_success(self, monkeypatch):
+        import bot.reminders as reminders
+
+        created, closed = [], []
+        user_ids = [(111,), (222,)]
+
+        class _Q:
+            def distinct(self):
+                return self
+
+            def all(self):
+                return user_ids
+
+        class _FakeSession:
+            def __init__(self):
+                self.closed = False
+                created.append(self)
+
+            def query(self, *a, **k):
+                return _Q()
+
+            def close(self):
+                self.closed = True
+                closed.append(self)
+
+        monkeypatch.setattr(reminders, "SessionLocal", lambda: _FakeSession())
+
+        import app.database.crud as crud
+
+        monkeypatch.setattr(crud, "list_budgets", lambda db, uid: [])
+        reminders.budget_check(None)
+
+        # جلسة واحدة خارجية + جلسة داخلية لكل مستخدم — وكلها مغلقة
+        assert len(created) == 1 + len(user_ids)
+        assert len(closed) == len(created)
+        assert all(s.closed for s in created)
+
+    def test_outer_session_closed_on_query_error(self, monkeypatch):
+        import bot.reminders as reminders
+
+        closed = []
+
+        class _Q:
+            def distinct(self):
+                return self
+
+            def all(self):
+                raise RuntimeError("db down")
+
+        class _FakeSession:
+            def query(self, *a, **k):
+                return _Q()
+
+            def close(self):
+                closed.append(self)
+
+        monkeypatch.setattr(reminders, "SessionLocal", lambda: _FakeSession())
+        reminders.budget_check(None)
+        assert len(closed) == 1

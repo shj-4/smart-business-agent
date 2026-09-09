@@ -141,6 +141,7 @@ def budget_check(context) -> None:
         logger.exception("خطأ في جلب المستخدمين للميزانيات")
         db.close()
         return
+    db.close()
 
     for (uid,) in user_ids:
         db = SessionLocal()
