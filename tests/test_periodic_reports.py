@@ -367,3 +367,47 @@ class TestChart:
         from app.charts import generate_monthly_chart
 
         assert generate_monthly_chart(db_session, USER_A) is None
+
+
+# ---------- رسالة تأكيد /report_on ----------
+
+
+class TestReportOnMessage:
+    """الرسالة يجب أن تعكس التردد الفعلي لا «يوميًا» الثابت قديمًا."""
+
+    def _run(self, arg, db_session, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+
+        import bot.handlers as handlers
+
+        monkeypatch.setattr(handlers, "SessionLocal", lambda: db_session)
+        replies = []
+
+        class _Msg:
+            async def reply_text(self, message, **kwargs):
+                replies.append(message)
+
+        update = SimpleNamespace(
+            message=_Msg(), effective_user=SimpleNamespace(id=USER_A)
+        )
+        ctx = SimpleNamespace(args=[arg], user_data={})
+        asyncio.run(handlers.report_on_command(update, ctx))
+        return replies[0]
+
+    def test_monthly_confirmation_is_consistent(self, db_session, monkeypatch):
+        text = self._run("monthly", db_session, monkeypatch)
+        assert "التقرير الشهري" in text
+        assert "في أول كل شهر" in text
+        assert "يوميًا" not in text
+
+    def test_weekly_confirmation_is_consistent(self, db_session, monkeypatch):
+        text = self._run("weekly", db_session, monkeypatch)
+        assert "التقرير الأسبوعي" in text
+        assert "في أول كل أسبوع" in text
+        assert "يوميًا" not in text
+
+    def test_daily_confirmation_is_consistent(self, db_session, monkeypatch):
+        text = self._run("daily", db_session, monkeypatch)
+        assert "التقرير اليومي" in text
+        assert "كل يوم" in text

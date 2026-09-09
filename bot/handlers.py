@@ -338,9 +338,10 @@ async def report_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
     freq_name = {"daily": "اليومي", "weekly": "الأسبوعي", "monthly": "الشهري"}[freq]
+    freq_interval = {"daily": "كل يوم", "weekly": "في أول كل أسبوع", "monthly": "في أول كل شهر"}[freq]
     await update.message.reply_text(
         f"تم تفعيل التقرير {freq_name}.\n"
-        f"سأرسله لك يوميًا من الآن عند الساعة {deliver} (بتوقيتك المحلي).\n"
+        f"سأرسله لك {freq_interval} من الآن عند الساعة {deliver} (بتوقيتك المحلي).\n"
         "لإيقافه أرسل /report_off"
     )
 
