@@ -2,10 +2,13 @@
 Unit tests للتذكيرات التلقائية (bot/reminders) — بلا شبكة.
 
 يستخدم mock لجلسة قاعدة البيانات (في الذاكرة) وmock لـ context.bot.
+الدوال المُنفَّذة عبر job_queue يجب أن تكون async (await callback) — تُختبر
+عبر asyncio.run مثل مسار Job.run الحقيقي.
 """
 
+import asyncio
 from datetime import timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,15 +20,23 @@ from app.database import models  # noqa: F401
 from app.database.crud import create_invoice, create_task
 from app.timeutil import now_utc
 from bot.reminders import (
+    budget_check,
     credit_check,
+    daily_backup_job,
+    deviation_check,
     invoice_check,
     overdue_check,
+    periodic_report_job,
     setup_credit_check,
     setup_invoice_check,
     setup_overdue_reminder,
 )
 
 USER_A = 111
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 @pytest.fixture
@@ -50,14 +61,14 @@ def db_env(monkeypatch):
 
 def _make_context():
     context = MagicMock()
-    context.bot.send_message = MagicMock()
+    context.bot.send_message = AsyncMock()
     return context
 
 
 class TestOverdueCheck:
     def test_sends_nothing_when_no_tasks(self, db_env):
         context = _make_context()
-        overdue_check(context)
+        _run(overdue_check(context))
         context.bot.send_message.assert_not_called()
 
     def test_no_notification_for_pending_future_task(self, db_env):
@@ -72,7 +83,7 @@ class TestOverdueCheck:
         db.close()
 
         context = _make_context()
-        overdue_check(context)
+        _run(overdue_check(context))
         context.bot.send_message.assert_not_called()
 
     def test_notifies_for_overdue_task_once(self, db_env):
@@ -88,14 +99,14 @@ class TestOverdueCheck:
         db.close()
 
         context = _make_context()
-        overdue_check(context)
+        _run(overdue_check(context))
         assert context.bot.send_message.call_count == 1
         sent_text = context.bot.send_message.call_args.kwargs["text"]
         assert "متأخرة" in sent_text
 
         # الفحص الثاني لا يرسل مجددًا (reminder_sent=True)
         context2 = _make_context()
-        overdue_check(context2)
+        _run(overdue_check(context2))
         context2.bot.send_message.assert_not_called()
 
     def test_no_reminder_for_done_task(self, db_env):
@@ -113,7 +124,7 @@ class TestOverdueCheck:
         db.close()
 
         context = _make_context()
-        overdue_check(context)
+        _run(overdue_check(context))
         context.bot.send_message.assert_not_called()
 
 
@@ -141,12 +152,12 @@ class TestInvoiceCheck:
         db.close()
 
         context = _make_context()
-        invoice_check(context)
+        _run(invoice_check(context))
         assert context.bot.send_message.called
 
         # التكرار الثاني لا يرسل مجددًا (alerted=True)
         context2 = _make_context()
-        invoice_check(context2)
+        _run(invoice_check(context2))
         context2.bot.send_message.assert_not_called()
 
         db = db_env()
@@ -159,7 +170,7 @@ class TestInvoiceCheck:
         create_invoice(db, USER_A, {"person": "مورّد", "amount": 700, "currency": "ILS", "due_date": future}, "فاتورة")
         db.close()
         context = _make_context()
-        invoice_check(context)
+        _run(invoice_check(context))
         context.bot.send_message.assert_not_called()
 
 
@@ -175,11 +186,11 @@ class TestCreditCheck:
         db.close()
 
         context = _make_context()
-        credit_check(context)
+        _run(credit_check(context))
         assert context.bot.send_message.called
 
         context2 = _make_context()
-        credit_check(context2)
+        _run(credit_check(context2))
         context2.bot.send_message.assert_not_called()
 
         db = db_env()
@@ -191,7 +202,7 @@ class TestCreditCheck:
         db = db_env()
         db.close()
         context = _make_context()
-        credit_check(context)
+        _run(credit_check(context))
         context.bot.send_message.assert_not_called()
 
 
@@ -208,3 +219,30 @@ class TestSetupReminderB3:
             app = MagicMock()
             app.job_queue = None
             setup(app)  # لا استثناء
+
+
+class TestJobCallbacksAreCoroutines:
+    """JobQueue في PTB v20+ ينفّذ `await callback(context)` — أي callback
+    sync يُرجع None فيفشل بـ TypeError في كل تشغيل. جميع الجوبات يجب أن تكون
+    async (تضمن عدم عودة الخلل بصمت)."""
+
+    def test_all_callbacks_are_coroutine_functions(self):
+        import inspect
+
+        callbacks = [
+            overdue_check,
+            budget_check,
+            invoice_check,
+            credit_check,
+            periodic_report_job,
+            deviation_check,
+            daily_backup_job,
+        ]
+        for cb in callbacks:
+            assert inspect.iscoroutinefunction(cb), f"{cb.__name__} ليست async"
+
+    def test_callback_executes_via_await(self, db_env):
+        """المسار الحقيقي: await callback(context) يعمل وينفّذ body الدالة."""
+        context = _make_context()
+        _run(overdue_check(context))
+        context.bot.send_message.assert_not_called()

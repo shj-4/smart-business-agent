@@ -275,7 +275,9 @@ async def convert_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from app.exchange import CURRENCY_NAMES, convert
 
-    result = convert(parsed["amount"], parsed["from"], parsed["to"])
+    result = await asyncio.to_thread(
+        convert, parsed["amount"], parsed["from"], parsed["to"]
+    )
     if "error" in result:
         await update.message.reply_text(result["error"], reply_markup=MAIN_HOME_KEYBOARD)
         return None
@@ -560,7 +562,7 @@ async def _handle_record_result(
 
 
 async def _handle_query(update: Update, result: dict) -> int:
-    reply = handle_query_intent(result, update.effective_user.id)
+    reply = await asyncio.to_thread(handle_query_intent, result, update.effective_user.id)
     await safe_reply(update.message, reply)
     return None
 

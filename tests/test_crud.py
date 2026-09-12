@@ -17,6 +17,7 @@ from app.database.crud import (
     list_credit_limits,
     list_invoices,
     list_orders,
+    list_overdue_tasks,
     list_pending_tasks,
     mark_invoice_paid,
     mark_overdue_invoices,
@@ -482,6 +483,67 @@ class TestSearchRecordsWindow:
         assert len(result) == 1
         assert result[0]["model"] == "Transaction"
 
+    def test_matches_person_via_sql_pushdown(self, db_session):
+        # person نص عادي: المطابقة تُنجز في SQL (LIKE) دون لمس الوصف المشفّر
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "مورد الألمنيوم"},
+            raw_message="دفعة عادية",
+        )
+        hits, _ = search_records(db_session, USER_A, "ألمنيوم", return_meta=True)
+        assert len(hits) == 1
+        assert hits[0]["person"] == "مورد الألمنيوم"
+
+    def test_matches_category_via_sql_pushdown(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 50, "currency": "ILS", "category": "مشتريات"},
+            raw_message="دفعة",
+        )
+        hits, _ = search_records(db_session, USER_A, "مشتر", return_meta=True)
+        assert len(hits) == 1
+        assert hits[0]["model"] == "Transaction"
+
+    def test_type_label_matches_in_sql(self, db_session):
+        # البحث عن تسمية النوع ("مصروف") يعتمد على عمود type الصريح في SQL
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 90, "currency": "ILS", "description": "وقود"},
+            raw_message="وقود للمركبة",
+        )
+        hits, _ = search_records(db_session, USER_A, "مصروف", return_meta=True)
+        assert len(hits) == 1
+        assert hits[0]["kind"] == "expense"
+
+    def test_person_hits_reach_limit_flag_partial(self, db_session):
+        # بلوغ الحد عبر النص العادي يوقف مسح الوصف المشفّر ويُعلن البحث جزئيًا
+        for i in range(35):
+            create_transaction(
+                db_session,
+                USER_A,
+                {"type": "expense", "amount": 1, "currency": "ILS", "person": f"شخص {i}"},
+                raw_message="دفعة",
+            )
+        hits, meta = search_records(db_session, USER_A, "شخص", return_meta=True, limit=30)
+        assert len(hits) == 30
+        assert meta["saturated"] is True
+
+    def test_like_wildcards_treated_literally(self, db_session):
+        # % و _ في مصطلح البحث لا تتصرف كمحارف بدل داخل LIKE (تهريب)
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 30, "currency": "ILS", "category": "خصم"},
+            raw_message="خصم 50% للمورد",
+        )
+        hits, _ = search_records(db_session, USER_A, "50%", return_meta=True)
+        assert len(hits) == 1
+        hits2, _ = search_records(db_session, USER_A, "خ_صم", return_meta=True)
+        assert hits2 == []
+
 
 # ---------- الفواتير الآجلة (#22) ----------
 
@@ -890,6 +952,50 @@ class TestTaskPriorityRecurrence:
         )
         ids = [t.id for t in list_pending_tasks(db_session, USER_A)]
         assert ids == [h.id, n.id, low.id]
+
+    def test_list_pending_bounded_fetch_keeps_high_priority(self, db_session):
+        # أكثر من حد الجلب (500) — مهمة عاجلة قديمة يجب ألا تضيع بسبب LIMIT في SQL.
+        # ترتيب SQL يطابق مقارنة _priority_sort، لذا تبقى النتيجة مطابقة للجلب الكامل.
+        old_high = create_task(
+            db_session,
+            USER_A,
+            {"description": "عاجلة قديمة", "priority": "high", "date": "2025-01-01 09:00"},
+            raw_message="عاجلة قديمة",
+        )
+        for i in range(520):
+            create_task(db_session, USER_A, {"description": f"مهمة {i}"}, raw_message=f"م{i}")
+        tasks = list_pending_tasks(db_session, USER_A, limit=10)
+        ids = [t.id for t in tasks]
+        assert len(tasks) == 10
+        assert ids[0] == old_high.id
+        assert len(set(ids)) == 10
+
+    def test_list_pending_honors_priority_then_due_then_recent(self, db_session):
+        # لا تاريخ موعد → يأتي بعد المهام ذات الموعد داخل نفس الأولوية
+        a = create_task(db_session, USER_A, {"description": "بدون موعد"}, raw_message="أ")
+        b = create_task(
+            db_session, USER_A, {"description": "بموعد أقرب", "date": "2026-09-01 10:00"},
+            raw_message="ب",
+        )
+        c = create_task(
+            db_session, USER_A, {"description": "بموعد أبعد", "date": "2026-09-05 10:00"},
+            raw_message="ج",
+        )
+        db_session.flush()
+        # استرداد straight من SQL: nulls يجب أن يكون أخيرًا داخل نفس الأولوية
+        ids = [t.id for t in list_pending_tasks(db_session, USER_A)]
+        assert ids.index(b.id) < ids.index(c.id) < ids.index(a.id)
+
+    def test_list_overdue_bounded_and_sorted(self, db_session):
+        for i in range(520):
+            create_task(db_session, USER_A, {"description": f"مهمة {i}"}, raw_message=f"م{i}")
+        db_session.query(Task).filter(Task.telegram_user_id == USER_A).update(
+            {Task.status: "overdue"}, synchronize_session=False
+        )
+        db_session.commit()
+        tasks = list_overdue_tasks(db_session, USER_A, limit=10)
+        assert len(tasks) == 10
+        assert len({t.id for t in tasks}) == 10
 
     def test_complete_task_respawns_recurring(self, db_session):
         task = create_task(

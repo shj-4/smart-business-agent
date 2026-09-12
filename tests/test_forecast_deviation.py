@@ -4,7 +4,7 @@ Unit tests للتنبؤات (/forecast) وانحراف الإنفاق (/deviatio
 
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -197,7 +197,10 @@ class TestDeviationCheck:
         db.close()
 
         context = MagicMock()
-        deviation_check(context)
+        context.bot.send_message = AsyncMock()
+        import asyncio
+
+        asyncio.run(deviation_check(context))
         context.bot.send_message.assert_not_called()
 
     def test_sends_once_when_significant(self, db_env):
@@ -210,12 +213,17 @@ class TestDeviationCheck:
         db.close()
 
         context = MagicMock()
-        deviation_check(context)
+        context.bot.send_message = AsyncMock()
+        import asyncio
+
+        asyncio.run(deviation_check(context))
         assert context.bot.send_message.called
         sent = [call.kwargs.get("text") or call.args[1] for call in context.bot.send_message.call_args_list]
         assert any("/deviation" in s for s in sent)
 
         # الحارس اليومي يمنع التكرار في نفس اليوم
         context.bot.send_message.reset_mock()
-        deviation_check(context)
+        import asyncio
+
+        asyncio.run(deviation_check(context))
         context.bot.send_message.assert_not_called()

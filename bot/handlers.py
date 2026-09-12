@@ -5,6 +5,7 @@
 bot.conversation عبر ConversationHandler — هنا فقط الأوامر المستقلة.
 """
 
+import asyncio
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -204,7 +205,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"المبلغ غير صالح: {amount_str}")
         return
 
-    result = convert(amount, from_cur, to_cur)
+    result = await asyncio.to_thread(convert, amount, from_cur, to_cur)
     if "error" in result:
         await update.message.reply_text(result["error"])
         return
@@ -397,15 +398,20 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from app.database.db import SessionLocal as _S
 
     telegram_user_id = update.effective_user.id
-    db = _S()
+
+    def _gen_chart():
+        db = _S()
+        try:
+            return generate_monthly_chart(db, telegram_user_id)
+        finally:
+            db.close()
+
     try:
-        buf = generate_monthly_chart(db, telegram_user_id)
+        buf = await asyncio.to_thread(_gen_chart)
     except Exception:
         logger.exception("خطأ في توليد الرسم البياني")
         await update.message.reply_text("حدث خطأ أثناء توليد الرسم البياني، حاول لاحقًا.")
         return
-    finally:
-        db.close()
 
     if buf is None:
         await update.message.reply_text(

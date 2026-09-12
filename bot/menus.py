@@ -14,6 +14,7 @@ ConversationHandlers الخاصة بها (record_flow / edit_flow) — يقع ا
 نهاية سلسلة المعالجات كي لا يعترض ما تديره المحادثات.
 """
 
+import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -406,15 +407,19 @@ async def _handle_report(query, context, parts: list):
     if parts[0] == "m" and len(parts) > 2:
         metric, period = parts[1], parts[2]
         uid = query.from_user.id
-        db = SessionLocal()
-        try:
-            result = run_query(db, uid, {"metric": metric, "period": period})
-        finally:
-            db.close()
         metric_label = METRIC_LABELS.get(metric, metric)
         header = f"📊 {metric_label} — {PERIOD_LABELS.get(period, period)}:\n"
+
+        def _report_payload() -> str:
+            db = SessionLocal()
+            try:
+                result = run_query(db, uid, {"metric": metric, "period": period})
+            finally:
+                db.close()
+            return header + format_query_result(result)
+
         await query.edit_message_text(
-            header + format_query_result(result),
+            await asyncio.to_thread(_report_payload),
             reply_markup=_home_keyboard([("⬅️ فترة أخرى", "rpt:period")]),
         )
         return
@@ -488,11 +493,15 @@ def _budget_list_payload(db, telegram_user_id: int) -> tuple[list[str], list]:
 
 async def _handle_budget_list(query, context):
     uid = query.from_user.id
-    db = SessionLocal()
-    try:
-        lines, budgets = _budget_list_payload(db, uid)
-    finally:
-        db.close()
+
+    def _payload():
+        db = SessionLocal()
+        try:
+            return _budget_list_payload(db, uid)
+        finally:
+            db.close()
+
+    lines, budgets = await asyncio.to_thread(_payload)
 
     rows = [
         [("➕ إضافة (عملة)", "bg:add:currency"), ("➕ إضافة (شخص)", "bg:add:person")],
@@ -670,15 +679,20 @@ async def _handle_tool_chart(query, context):
     from app.charts import generate_monthly_chart
 
     uid = query.from_user.id
-    db = SessionLocal()
+
+    def _gen_chart():
+        db = SessionLocal()
+        try:
+            return generate_monthly_chart(db, uid)
+        finally:
+            db.close()
+
     try:
-        buf = generate_monthly_chart(db, uid)
+        buf = await asyncio.to_thread(_gen_chart)
     except Exception:
         logger.exception("خطأ في توليد الرسم البياني")
         await query.edit_message_text("حدث خطأ أثناء توليد الرسم البياني، حاول لاحقًا.")
         return
-    finally:
-        db.close()
 
     if buf is None:
         await query.edit_message_text(

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -262,8 +262,10 @@ class TestPeriodicReportJob:
         db.close()
 
         context = MagicMock()
-        context.bot.send_message = MagicMock()
-        reminders_mod.periodic_report_job(context)
+        context.bot.send_message = AsyncMock()
+        import asyncio
+
+        asyncio.run(reminders_mod.periodic_report_job(context))
         context.bot.send_message.assert_called_once()
 
         db = SessionMaker()
@@ -275,8 +277,10 @@ class TestPeriodicReportJob:
 
     def test_sends_nothing_when_no_prefs(self, db_env):
         context = MagicMock()
-        context.bot.send_message = MagicMock()
-        reminders_mod.periodic_report_job(context)
+        context.bot.send_message = AsyncMock()
+        import asyncio
+
+        asyncio.run(reminders_mod.periodic_report_job(context))
         context.bot.send_message.assert_not_called()
 
 
@@ -462,7 +466,9 @@ class TestBudgetCheckSessionCleanup:
         import app.database.crud as crud
 
         monkeypatch.setattr(crud, "list_budgets", lambda db, uid: [])
-        reminders.budget_check(None)
+        import asyncio
+
+        asyncio.run(reminders.budget_check(None))
 
         # جلسة واحدة خارجية + جلسة داخلية لكل مستخدم — وكلها مغلقة
         assert len(created) == 1 + len(user_ids)
@@ -489,7 +495,9 @@ class TestBudgetCheckSessionCleanup:
                 closed.append(self)
 
         monkeypatch.setattr(reminders, "SessionLocal", lambda: _FakeSession())
-        reminders.budget_check(None)
+        import asyncio
+
+        asyncio.run(reminders.budget_check(None))
         assert len(closed) == 1
 
 
@@ -605,12 +613,14 @@ class TestBudgetAlertBroadcast:
         sent = []
 
         class _FakeBot:
-            def send_message(self, chat_id, text, parse_mode=None):
+            async def send_message(self, chat_id, text, parse_mode=None):
                 sent.append(chat_id)
 
         context = SimpleNamespace(bot=_FakeBot())
         usage = {"limit": "100", "spent": "150", "percent": 150, "over": True}
-        reminders._notify_budget(context, db_session, budget, usage)
+        import asyncio
+
+        asyncio.run(reminders._notify_budget(context, db_session, budget, usage))
 
         assert set(sent) == {owner, partner}
         assert budget.alerted_status == 2

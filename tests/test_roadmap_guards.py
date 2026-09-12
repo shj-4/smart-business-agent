@@ -66,6 +66,42 @@ class TestPromptLoader:
         assert "صوتي" in ai_service.STT_PROMPT
         assert "أمان" in ai_service.SYSTEM_PROMPT
 
+    def test_loaded_prompts_equal_md_files(self):
+        from app import ai_service, prompt_loader
+
+        cases = [
+            (ai_service.SYSTEM_PROMPT, "system_general.md"),
+            (ai_service.STT_PROMPT, "stt.md"),
+            (ai_service.RECEIPT_SYSTEM_PROMPT, "receipt_system.md"),
+            (ai_service.REPAIR_PROMPT, "repair_json.md"),
+        ]
+        for loaded, name in cases:
+            path = prompt_loader.PROMPTS_DIR / name
+            assert path.exists(), f"ملف برومبت مفقود: {name}"
+            assert loaded == path.read_text(encoding="utf-8").strip()
+
+    def test_no_duplicate_full_prompt_text_in_module(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parent.parent / "app" / "ai_service.py"
+        ).read_text(encoding="utf-8")
+        markers = [
+            "قواعد تحديد intent",
+            "أعد كتابة الكلام في هذا الملف الصوتي",
+            "أنت مساعد يقرأ صور الفواتير",
+            "النص التالي كان من المفترض أن يكون JSON",
+        ]
+        for marker in markers:
+            assert marker not in source
+
+    def test_fallback_is_short_warning(self):
+        from app.ai_service import _prompt_fallback
+
+        fb = _prompt_fallback("system_general.md")
+        assert "تعذر تحميل البرومبت" in fb
+        assert len(fb) < 300
+
 
 class TestJsonLogging:
     def test_formatter_picks_json_when_env_set(self, monkeypatch):

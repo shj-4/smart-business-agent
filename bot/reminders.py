@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 CHECK_INTERVAL_MINUTES = 15
 
 
-def overdue_check(context) -> None:
+async def overdue_check(context) -> None:
     """الدالة الرئيسية التي تُنفَّذ كل 15 دقيقة.
 
     1. تجلب جميع المستخدمين الذين لديهم مهام pending.
@@ -29,6 +29,10 @@ def overdue_check(context) -> None:
     3. تبحث عن مهام متأخرة جديدة (reminder_sent=False).
     4. تُرسل إشعارًا تيليجرام لكل مهمة.
     5. تُحدّث reminder_sent=True.
+
+    يجب أن تكون دالة async: JobQueue في python-telegram-bot v20+ ينفّذ
+    callbacks عبر `await callback(context)` — أي دالة sync تُرجع None
+    فتفشل بـ TypeError في كل تشغيل.
     """
     db = SessionLocal()
     try:
@@ -79,7 +83,7 @@ def overdue_check(context) -> None:
 
             # الإرسال عبر context.bot
             try:
-                context.bot.send_message(
+                await context.bot.send_message(
                     chat_id=uid,
                     text=message,
                     parse_mode="Markdown",
@@ -123,7 +127,7 @@ def setup_overdue_reminder(app) -> None:
 WARNING_THRESHOLD = 0.8  # تنبيه اقتراب عند تجاوز 80%
 
 
-def budget_check(context) -> None:
+async def budget_check(context) -> None:
     """يفحص كل الميزانيات الشهرية ويرسل تنبيهات (اقتراب/تجاوز).
 
     يُنفَّذ مع بقية المهام الدورية. لكل ميزانية:
@@ -150,14 +154,14 @@ def budget_check(context) -> None:
             for budget in budgets:
                 budget_monthly_reset(db, budget)
                 usage = budget_usage(db, budget)
-                _notify_budget(context, db, budget, usage)
+                await _notify_budget(context, db, budget, usage)
         except Exception:
             logger.exception("خطأ في فحص ميزانية المستخدم %s", uid)
         finally:
             db.close()
 
 
-def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
+async def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
     """يرسل تنبيه ميزانية لكل أعضاء المساحة المشتركة (لا المُنشئ فقط).
 
     budget_usage يحسب الاستهلاك عبر accessible_user_ids (كل الأعضاء)، لذا كل من
@@ -168,7 +172,7 @@ def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
     sent_any = False
     for uid in accessible_user_ids(db, budget.telegram_user_id):
         try:
-            context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
+            await context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
             sent_any = True
         except Exception as exc:
             logger.error("فشل إرسال تنبيه ميزانية %s للمستخدم %s: %s", budget.id, uid, exc)
@@ -179,7 +183,7 @@ def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
         logger.info("تنبيه ميزانية %s أُرسل بنجاح (status=%s)", budget.id, status)
 
 
-def _notify_budget(context, db, budget, usage) -> None:
+async def _notify_budget(context, db, budget, usage) -> None:
     """يرسل تنبيه اقتراب/تجاوز لميزانية واحدة إذا استحق (مرة واحدة كل شهر).
 
     الإرسال موحَّد لكل أعضاء المساحة المشتركة عبر _broadcast_budget_alert.
@@ -208,7 +212,7 @@ def _notify_budget(context, db, budget, usage) -> None:
             f"السقف: {limit}",
             f"الاستهلاك: {percent}%",
         ]
-        _broadcast_budget_alert(context, db, budget, lines, status=2)
+        await _broadcast_budget_alert(context, db, budget, lines, status=2)
         return
 
     if percent >= WARNING_THRESHOLD * 100 and budget.alerted_status < 1:
@@ -217,7 +221,7 @@ def _notify_budget(context, db, budget, usage) -> None:
             f"المصروف: {spent} {budget.currency or ''} من أصل {limit}",
             f"الاستهلاك: {percent}%",
         ]
-        _broadcast_budget_alert(context, db, budget, lines, status=1)
+        await _broadcast_budget_alert(context, db, budget, lines, status=1)
 
 
 def setup_budget_check(app) -> None:
@@ -237,7 +241,7 @@ def setup_budget_check(app) -> None:
 # ---------- تنبيهات الفواتير الآجلة (#22) ----------
 
 
-def invoice_check(context) -> None:
+async def invoice_check(context) -> None:
     """يعلّم الفواتير المعلّقة المتأخرة ويرسل تنبيهًا (مرة واحدة) لكل أصحابها.
 
     يُشار إلى الفواتير التي لا تزال pending مع تاريخ استحقاق ماضٍ على أنها
@@ -271,7 +275,7 @@ def invoice_check(context) -> None:
             sent_any = False
             for uid in accessible_user_ids(db, owner):
                 try:
-                    context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
+                    await context.bot.send_message(chat_id=uid, text="\n".join(lines), parse_mode="Markdown")
                     sent_any = True
                 except Exception as exc:
                     logger.error("فشل إرسال تنبيه فاتورة %s للمستخدم %s: %s", inv.id, uid, exc)
@@ -303,7 +307,7 @@ def setup_invoice_check(app) -> None:
 # ---------- تنبيهات الحدود الائتمانية (#26) ----------
 
 
-def credit_check(context) -> None:
+async def credit_check(context) -> None:
     """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى)."""
     from app.database.crud import credit_usage, list_credit_limits
     from app.database.models import CreditLimit
@@ -325,14 +329,14 @@ def credit_check(context) -> None:
                 usage = credit_usage(db, lim)
                 if usage["outstanding"] <= 0 or usage["limit"] <= 0:
                     continue
-                _notify_credit(context, db, lim, usage)
+                await _notify_credit(context, db, lim, usage)
         except Exception:
             logger.exception("خطأ في فحص حد ائتماني للمستخدم %s", uid)
         finally:
             db.close()
 
 
-def _notify_credit(context, db, limit_row, usage) -> None:
+async def _notify_credit(context, db, limit_row, usage) -> None:
     """ينبّه على اقتراب/تجاوز حد ائتماني واحد إن استحق (مرة لكل مستوى)."""
     from app.database.crud import accessible_user_ids
 
@@ -357,7 +361,7 @@ def _notify_credit(context, db, limit_row, usage) -> None:
     sent_any = False
     for uid in accessible_user_ids(db, limit_row.telegram_user_id):
         try:
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=uid, text=f"{name_line}\n{detail}", parse_mode="Markdown"
             )
             sent_any = True
@@ -438,7 +442,7 @@ def _report_due(pref, now_local_dt) -> bool:
     return False
 
 
-def periodic_report_job(context) -> None:
+async def periodic_report_job(context) -> None:
     """يرسل التقارير الدورية للمستخدمين الذين فعّلوها (عند استحقاق الموعد)."""
     from app.database.crud import list_report_prefs, mark_report_sent
     from app.timeutil import now_local
@@ -460,7 +464,7 @@ def periodic_report_job(context) -> None:
             message = build_periodic_summary(
                 db, pref.telegram_user_id, pref.frequency, now_dt=now_dt
             )
-            context.bot.send_message(chat_id=pref.telegram_user_id, text=message)
+            await context.bot.send_message(chat_id=pref.telegram_user_id, text=message)
             mark_report_sent(db, pref)
             logger.info("أُرسل التقرير %s للمستخدم %s", pref.frequency, pref.telegram_user_id)
         except Exception as exc:
@@ -487,7 +491,7 @@ def setup_periodic_reports(app) -> None:
 _LAST_DEVIATION_SENT: dict[int, str] = {}
 
 
-def deviation_check(context) -> None:
+async def deviation_check(context) -> None:
     """يرسل تنبيهًا يوميًا واحدًا لكل مساحة عمل عند انحراف شهرٍ فوق حدٍّ.
 
     الحارس في الذاكرة (date لكل مستخدم) — يُعاد التنبيه في اليوم التالي فقط.
@@ -514,7 +518,7 @@ def deviation_check(context) -> None:
                 )
                 for member in accessible_user_ids(db, uid):
                     try:
-                        context.bot.send_message(chat_id=member, text=msg)
+                        await context.bot.send_message(chat_id=member, text=msg)
                     except Exception:  # noqa: BLE001
                         logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
                 _LAST_DEVIATION_SENT[uid] = today
@@ -543,7 +547,7 @@ def setup_deviation_check(app) -> None:
 BACKUP_INTERVAL_HOURS = 24
 
 
-def daily_backup_job(context) -> None:
+async def daily_backup_job(context) -> None:
     """نسخة احتياطية يومية من قاعدة SQLite عبر خدمة app.database.backup."""
     from app.database.backup import run_backup
 
