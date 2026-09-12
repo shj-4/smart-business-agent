@@ -1662,7 +1662,24 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         q = q.filter(Transaction.person.like(f"%{budget.person}%"))
 
     spent_rows = q.all()
-    spent = sum((r.amount for r in spent_rows if r.amount is not None), Decimal("0"))
+
+    if budget.scope == "currency":
+        # الميزانية مُقوَّمة بعملتها: مبالغ العملة نفسها تُجمع مباشرة.
+        spent = sum((r.amount for r in spent_rows if r.amount is not None), Decimal("0"))
+    else:
+        # شخص/تصنيف بلا عملة: مبالغ العملات المتعددة تُحوَّل لعملة الأساس
+        # (بالمبالغ المثبَّتة وقت التسجيل إن توفرت — الدقة التاريخية) بدل
+        # جمع شيكل مع دولار في رقم واحد.
+        from app.config import settings
+
+        unified = _unified_totals_for_rows(spent_rows, settings.base_currency)
+        spent = unified["total"]
+        if spent is None:
+            # تعذّر تحويل كل المبالغ (لا شبكة/أسعار) — مجموع خام كتقدير أخير
+            # حتى لا تُحتسب الميزانية 0% رغم وجود مصاريف (فلا يُنبه بالتجاوز).
+            spent = sum(
+                (r.amount for r in spent_rows if r.amount is not None), Decimal("0")
+            )
     spent = spent.quantize(Decimal("0.01"))
     limit = (budget.monthly_limit or Decimal("0")).quantize(Decimal("0.01"))
 

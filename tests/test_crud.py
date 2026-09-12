@@ -740,6 +740,55 @@ class TestBudgetCategoryScope:
         assert create_budget(db_session, USER_A, "category", "   ", "2000") is None
 
 
+# ---------- ميزانية الشخص: لا تُخلط العملات معًا ----------
+
+
+class TestBudgetPersonScopeCurrency:
+    def test_person_spent_converted_to_base_currency(self, db_session, monkeypatch):
+        """مصاريف شخص بعدة عملات تُجمع بعملة الأساس (لا شيكل+دولار في رقم خام)."""
+        from app.database.crud import budget_usage, create_budget
+
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal("750.00")},
+        )
+        budget = create_budget(db_session, USER_A, "person", "خالد", "1000")
+        assert budget is not None
+
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد"},
+            "دفعة شيقل",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "person": "خالد"},
+            "دفعة دولار",
+        )
+        usage = budget_usage(db_session, budget)
+        # 100 ILS مباشرة + 100 USD مثبَّت وقت التسجيل = 750 ILS → الإجمالي 850
+        assert usage["spent"] == Decimal("850.00")
+        assert usage["percent"] == 85.0
+        assert usage["over"] is False
+
+    def test_person_spent_stays_in_single_currency(self, db_session):
+        """مصروف واحد بعملة الأساس يُحتسب كما هو (نفس سلوك النطاق بالعملة)."""
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "person", "سارة", "500")
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 200, "currency": "ILS", "person": "سارة"},
+            "دفعة",
+        )
+        usage = budget_usage(db_session, budget)
+        assert usage["spent"] == Decimal("200.00")
+        assert usage["percent"] == 40.0
+
+
 # ---------- سعر الصرف المثبَّت وقت التسجيل (#25) ----------
 
 
