@@ -2,10 +2,16 @@
 حدود الائتمان واستهلاكها.
 """
 from decimal import Decimal, InvalidOperation
+
 from sqlalchemy.orm import Session
+
 from app.database.models import (
-    CreditLimit, Transaction,
+    CreditLimit,
+    Transaction,
 )
+from app.timeutil import now_utc
+
+
 def set_credit_limit(
     db: Session, telegram_user_id: int, person: str, limit_amount,
 ) -> CreditLimit | None:
@@ -35,7 +41,6 @@ def set_credit_limit(
         db.add(row)
     else:
         row.limit_amount = limit
-    from app.timeutil import now_utc
 
     row.alerted_status = 0  # إعادة تنبيه بحدود جديدة
     row.updated_at = now_utc()

@@ -2,9 +2,13 @@
 ملاحظات تصحيح الذكاء الاصطناعي ومراجعتها.
 """
 from sqlalchemy.orm import Session
+
 from app.database.models import (
     CorrectionFeedback,
 )
+from app.events import emit
+
+
 def record_correction_feedback(
     db: Session,
     telegram_user_id: int,
@@ -28,9 +32,7 @@ def record_correction_feedback(
     db.add(fb)
     db.commit()
     db.refresh(fb)
-    from app.admin import clear_admin_cache
-
-    clear_admin_cache()  # عدد "بانتظار المراجعة" في admin_stats يتغيّر
+    emit("data_written")  # عدد "بانتظار المراجعة" في admin_stats يتغيّر
     return fb
 
 def list_correction_feedback(
@@ -51,7 +53,5 @@ def mark_correction_reviewed(db: Session, feedback_id: int) -> bool:
         return False
     row.reviewed = True
     db.commit()
-    from app.admin import clear_admin_cache
-
-    clear_admin_cache()
+    emit("data_written")
     return True

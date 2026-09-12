@@ -7,8 +7,10 @@
 
 from sqlalchemy.orm import Session
 
+from app import money
 from app.cache import clear as clear_cache
 from app.cache import get_or_set
+from app.events import on
 
 _ADMIN_CACHE_KEY = "admin_stats"
 
@@ -23,11 +25,15 @@ def build_admin_stats(db: Session) -> dict:
 
 
 def clear_admin_cache() -> None:
-    clear_cache(_ADMIN_CACHE_KEY)
+    clear_cache(_ADMIN_CACHE_KEY, exact=True)
+
+
+# مسح كاش الأدمن عبر حدث بدل الاعتماد المباشر على crud — crud ينشر
+# "data_written" بعد أي كتابة، فيستمع هذا المعالِج هنا عند تحميل الوحدة.
+on("data_written", clear_admin_cache)
 
 
 def _build_admin_stats_uncached(db: Session) -> dict:
-    from app.database.crud import _sum_amounts_by_currency
     from app.database.models import (
         Budget,
         CorrectionFeedback,
@@ -58,7 +64,7 @@ def _build_admin_stats_uncached(db: Session) -> dict:
     budget_count = db.query(Budget).count()
     report_prefs_count = db.query(ReportPref).filter(ReportPref.frequency != "off").count()
 
-    # إجماليات مالية (تجمع في Python لأنها مشفّرة)
+    # إجماليات مالية (تجمع في Python لأنها مشفّرة) — عبر money (leaf) لا crud
     expense_rows = (
         db.query(Transaction)
         .filter(
@@ -75,8 +81,8 @@ def _build_admin_stats_uncached(db: Session) -> dict:
         )
         .all()
     )
-    total_expenses = _sum_amounts_by_currency(expense_rows)
-    total_incomes = _sum_amounts_by_currency(income_rows)
+    total_expenses = money._sum_amounts_by_currency(expense_rows)
+    total_incomes = money._sum_amounts_by_currency(income_rows)
 
     stats = {
         "users_count": len(user_ids),

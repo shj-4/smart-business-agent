@@ -30,7 +30,6 @@ def _module_names(py_file: Path) -> tuple[str, list[str]]:
 
 
 def test_crud_module_is_package_not_monolithic_file():
-    from app.database import crud
 
     assert sys.modules["app.database.crud"].__file__.endswith(
         ("crud" + "\\__init__.py", "crud" + "/__init__.py")

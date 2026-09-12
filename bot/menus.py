@@ -15,9 +15,13 @@ ConversationHandlers الخاصة بها (record_flow / edit_flow) — يقع ا
 """
 
 import asyncio
+import io
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from sqlalchemy.orm import Session
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import ContextTypes
 
 from app.database.crud import (
@@ -34,6 +38,7 @@ from app.database.crud import (
     search_records,
 )
 from app.database.db import SessionLocal
+from app.database.models import Budget, Task
 from app.timeutil import to_local_naive
 from bot.conversation import _clear_all_pending
 from bot.formatters import format_query_result
@@ -203,7 +208,9 @@ def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     return build_menu(rows)
 
 
-async def send_main_menu(message, context, text: str = ""):
+async def send_main_menu(
+    message: Message, context: ContextTypes.DEFAULT_TYPE, text: str = ""
+) -> None:
     """يرسل القائمة الرئيسية كرسالة جديدة (لأوامر /start و /menu)."""
     _clear_all_pending(context)
     lang = (
@@ -226,7 +233,9 @@ PAGES = {
 }
 
 
-async def _handle_menu(query, context, parts: list):
+async def _handle_menu(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     lang = user_lang(query.from_user.id)
     target = parts[0] if parts else "main"
     if target == "main":
@@ -241,7 +250,9 @@ async def _handle_menu(query, context, parts: list):
     await query.edit_message_text(title, reply_markup=build_menu(rows))
 
 
-async def _handle_record(query, context, parts: list):
+async def _handle_record(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     rtype = parts[0] if parts else ""
     if rtype not in RECORD_HINTS:
         await query.edit_message_text("اختر نوع العملية:", reply_markup=build_menu(RECORD_MENU))
@@ -262,7 +273,7 @@ TASK_STATUS_TITLES = {
 }
 
 
-def _task_line(task) -> str:
+def _task_line(task: Task) -> str:
     parts = [task.description or "(بدون وصف)"]
     if getattr(task, "person", None):
         parts.append(f"👤 {task.person}")
@@ -280,7 +291,9 @@ def _task_line(task) -> str:
     return " — ".join(parts)
 
 
-def build_task_list(tasks, status: str) -> tuple[str, InlineKeyboardMarkup]:
+def build_task_list(
+    tasks: list[Task], status: str
+) -> tuple[str, InlineKeyboardMarkup]:
     """يبني (نص, لوحة أزرار) لقائمة مهام — كل مهمة بصف أزرار [إنجاز|تعديل|حذف]."""
     if not tasks:
         text = f"لا توجد مهام {TASK_STATUS_TITLES.get(status, '')} 🎉"
@@ -304,7 +317,9 @@ def build_task_list(tasks, status: str) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines) + "\n\n(✅ إنجاز • ✏️ تعديل • 🗑️ حذف)", InlineKeyboardMarkup(rows)
 
 
-async def _handle_task_list(query, context, status: str):
+async def _handle_task_list(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, status: str
+) -> None:
     uid = query.from_user.id
     db = SessionLocal()
     try:
@@ -322,12 +337,19 @@ async def _handle_task_list(query, context, status: str):
     _clear_all_pending(context)
 
 
-async def _task_save_ack(query, context, prefix, task):
+async def _task_save_ack(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    task: Task,
+) -> None:
     text = f"{prefix}{task.description}"
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
-async def _handle_task_done(query, context, task_id: str):
+async def _handle_task_done(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
     uid = query.from_user.id
     db = SessionLocal()
     try:
@@ -342,7 +364,9 @@ async def _handle_task_done(query, context, task_id: str):
         )
 
 
-async def _handle_task_delete(query, context, task_id: str):
+async def _handle_task_delete(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
     uid = query.from_user.id
     db = SessionLocal()
     try:
@@ -355,7 +379,9 @@ async def _handle_task_delete(query, context, task_id: str):
         await query.edit_message_text("لا يمكن حذف هذه المهمة الآن.", reply_markup=_home_keyboard())
 
 
-async def _handle_task_edit(query, context, task_id: str):
+async def _handle_task_edit(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
     uid = query.from_user.id
     db = SessionLocal()
     try:
@@ -373,7 +399,9 @@ async def _handle_task_edit(query, context, task_id: str):
     )
 
 
-async def _handle_task(query, context, parts: list):
+async def _handle_task(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     if not parts:
         await query.edit_message_text(
             "مهامي — اختر الحالة:", reply_markup=build_menu(TASK_STATUS_MENU)
@@ -393,7 +421,9 @@ async def _handle_task(query, context, parts: list):
 # ---------- التقارير: فترة ← نوع ----------
 
 
-async def _handle_report(query, context, parts: list):
+async def _handle_report(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     if not parts or parts[0] == "period":
         await query.edit_message_text(
             "التقارير — اختر الفترة:", reply_markup=build_menu(REPORT_PERIODS)
@@ -428,7 +458,9 @@ async def _handle_report(query, context, parts: list):
     )
 
 
-async def _handle_settings(query, context, parts: list):
+async def _handle_settings(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     key = parts[0] if parts else ""
     if key not in SETTINGS_DOCS:
         await query.edit_message_text("الإعدادات:", reply_markup=build_menu(SETTINGS_MENU))
@@ -460,7 +492,9 @@ def export_period_start(period: str) -> tuple[object | None, str]:
     return None, "all"
 
 
-def _budget_list_payload(db, telegram_user_id: int) -> tuple[list[str], list]:
+def _budget_list_payload(
+    db: Session, telegram_user_id: int
+) -> tuple[list[str], list[Budget]]:
     """سطور ميزانيات المستخدم (مع الاستخدام الشهري الحالي) + كائناتها للزر لكل عنصر."""
     from app.database.crud import budget_monthly_reset, budget_usage, list_budgets
     from app.exchange import CURRENCY_NAMES
@@ -491,10 +525,12 @@ def _budget_list_payload(db, telegram_user_id: int) -> tuple[list[str], list]:
     return lines, budgets
 
 
-async def _handle_budget_list(query, context):
+async def _handle_budget_list(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     uid = query.from_user.id
 
-    def _payload():
+    def _payload() -> tuple[list[str], list[Budget]]:
         db = SessionLocal()
         try:
             return _budget_list_payload(db, uid)
@@ -513,7 +549,9 @@ async def _handle_budget_list(query, context):
     await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
 
 
-async def _handle_budget_add(query, context, scope: str):
+async def _handle_budget_add(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, scope: str
+) -> None:
     context.user_data["pending_budget"] = {"scope": scope}
     if scope == "person":
         prompt = "أرسل اسم الشخص والمبلغ:\nمثال — محمد 1500\n\n(أرسل /cancel للإلغاء)"
@@ -526,7 +564,9 @@ async def _handle_budget_add(query, context, scope: str):
     await query.edit_message_text(prompt, reply_markup=_home_keyboard())
 
 
-async def _handle_budget_delete(query, context, budget_id: str):
+async def _handle_budget_delete(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, budget_id: str
+) -> None:
     from app.database.crud import delete_budget
 
     uid = query.from_user.id
@@ -539,7 +579,9 @@ async def _handle_budget_delete(query, context, budget_id: str):
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
-async def _handle_budget(query, context, parts: list):
+async def _handle_budget(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     act = parts[0] if parts else "list"
     if act == "add" and len(parts) > 1:
         await _handle_budget_add(query, context, parts[1])
@@ -552,7 +594,9 @@ async def _handle_budget(query, context, parts: list):
 # ---------- المساحة المشتركة (Workspace) ----------
 
 
-async def _workspace_status(query, context):
+async def _workspace_status(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     from app.database.crud import list_workspace
 
     uid = query.from_user.id
@@ -587,7 +631,9 @@ async def _workspace_status(query, context):
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
-async def _workspace_members(query, context):
+async def _workspace_members(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     from app.database.crud import list_workspace
 
     uid = query.from_user.id
@@ -611,7 +657,9 @@ async def _workspace_members(query, context):
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
-async def _workspace_create(query, context):
+async def _workspace_create(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     from app.database.crud import create_workspace
 
     uid = query.from_user.id
@@ -624,7 +672,9 @@ async def _workspace_create(query, context):
     await _workspace_status(query, context)
 
 
-async def _workspace_add(query, context):
+async def _workspace_add(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     context.user_data["pending_ws_invite"] = True
     await query.edit_message_text(
         "أرسل المعرّف الرقمي (Telegram ID) للشريك الذي تريد مشاركته:\n"
@@ -633,7 +683,9 @@ async def _workspace_add(query, context):
     )
 
 
-async def _workspace_leave(query, context):
+async def _workspace_leave(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     from app.database.crud import leave_workspace
 
     uid = query.from_user.id
@@ -646,7 +698,9 @@ async def _workspace_leave(query, context):
     await _workspace_status(query, context)
 
 
-async def _workspace_remove(query, context, target: str):
+async def _workspace_remove(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target: str
+) -> None:
     from app.database.crud import remove_from_workspace
 
     uid = query.from_user.id
@@ -659,7 +713,9 @@ async def _workspace_remove(query, context, target: str):
     await _workspace_members(query, context)
 
 
-async def _handle_workspace(query, context, parts: list):
+async def _handle_workspace(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     act = parts[0] if parts else "status"
     if act == "new":
         await _workspace_create(query, context)
@@ -675,12 +731,14 @@ async def _handle_workspace(query, context, parts: list):
         await _workspace_status(query, context)
 
 
-async def _handle_tool_chart(query, context):
+async def _handle_tool_chart(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     from app.charts import generate_monthly_chart
 
     uid = query.from_user.id
 
-    def _gen_chart():
+    def _gen_chart() -> io.BytesIO | None:
         db = SessionLocal()
         try:
             return generate_monthly_chart(db, uid)
@@ -709,7 +767,9 @@ async def _handle_tool_chart(query, context):
     await query.edit_message_text("تم إرسال الرسم البياني ✅", reply_markup=_home_keyboard())
 
 
-async def _handle_tool_convert(query, context):
+async def _handle_tool_convert(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     context.user_data["pending_convert"] = True
     await query.edit_message_text(
         "أرسل التحويل بصيغة:\n"
@@ -719,7 +779,9 @@ async def _handle_tool_convert(query, context):
     )
 
 
-async def _handle_tool(query, context, parts: list):
+async def _handle_tool(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     act = parts[0] if parts else ""
     if act == "chart":
         await _handle_tool_chart(query, context)
@@ -731,7 +793,9 @@ async def _handle_tool(query, context, parts: list):
         await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
 
 
-async def _tool_lists(query, context, which: str):
+async def _tool_lists(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, which: str
+) -> None:
     """يعرض الديون/الفواتير/الطلبيات/الحدود الائتمانية كنصوص + أزرار إجراء."""
     uid = query.from_user.id
     from app.database.crud import (
@@ -780,7 +844,9 @@ async def _tool_lists(query, context, which: str):
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
-async def _handle_invoice_pay(query, context, parts: list):
+async def _handle_invoice_pay(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     from app.database.crud import mark_invoice_paid
 
     uid = query.from_user.id
@@ -800,7 +866,9 @@ async def _handle_invoice_pay(query, context, parts: list):
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
-async def _handle_order_done(query, context, parts: list):
+async def _handle_order_done(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     from app.database.crud import set_order_status
 
     uid = query.from_user.id
@@ -816,7 +884,9 @@ async def _handle_order_done(query, context, parts: list):
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
-async def _handle_export(query, context, parts: list):
+async def _handle_export(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     if not parts or parts[0] not in EXPORT_CAPTIONS:
         await query.edit_message_text(
             "تصدير Excel — اختر الفترة:", reply_markup=build_menu(EXPORT_MENU)
@@ -849,7 +919,12 @@ async def _handle_export(query, context, parts: list):
 # ---------- تعديل السجلات (el / rf) ----------
 
 
-async def _start_record_edit(query, context, model_name: str, record_id: int) -> None:
+async def _start_record_edit(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    model_name: str,
+    record_id: int,
+) -> None:
     """يعرض حقول سجل محدد كأزرار تعديل (يُستخدم لآخر سجل ولملفات التاريخ)."""
     from bot.editing import EDITABLE_FIELDS, FIELD_LABELS_AR, _get_current_value
 
@@ -896,7 +971,11 @@ async def _start_record_edit(query, context, model_name: str, record_id: int) ->
     await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
 
 
-async def _handle_edit_last(query, context, parts: list | None = None):
+async def _handle_edit_last(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    parts: list[str] | None = None,
+) -> None:
     """زر "تعديل آخر سجل": يعرض حقول آخر سجل محفوظ كأزرار تعديل."""
     uid = query.from_user.id
     db = SessionLocal()
@@ -915,7 +994,9 @@ async def _handle_edit_last(query, context, parts: list | None = None):
     await _start_record_edit(query, context, model_name, record_id)
 
 
-async def _handle_record_field(query, context, parts: list):
+async def _handle_record_field(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     """زر حقل تعديل سجل (rf:Model:Field أو rf:end)."""
     from bot.editing import FIELD_LABELS_AR, _get_current_value
 
@@ -984,7 +1065,7 @@ def _records_page_payload(
     return "\n".join(lines), build_menu(rows)
 
 
-def _records_page_number(parts: list) -> int:
+def _records_page_number(parts: list[str]) -> int:
     """يستخرج رقم الصفحة من callback (p:2 أو 2)."""
     if not parts:
         return 1
@@ -992,7 +1073,9 @@ def _records_page_number(parts: list) -> int:
     return int(raw) if raw.isdigit() else 1
 
 
-async def _handle_history(query, context, parts: list):
+async def _handle_history(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     page = _records_page_number(parts)
     uid = query.from_user.id
     db = SessionLocal()
@@ -1004,7 +1087,9 @@ async def _handle_history(query, context, parts: list):
     await query.edit_message_text(text, reply_markup=markup)
 
 
-async def _handle_record_action(query, context, parts: list):
+async def _handle_record_action(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     """أزرار سريعة في صفحات السجلات: rb:e:Model:id (تعديل) / rb:d:Model:id (حذف)."""
     act = parts[0] if parts else ""
     if act == "e" and len(parts) == 3 and parts[2].isdigit():
@@ -1026,7 +1111,9 @@ async def _handle_record_action(query, context, parts: list):
     await _handle_history(query, context, ["p", "1"])
 
 
-async def _handle_search_start(query, context, parts: list):
+async def _handle_search_start(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     _clear_all_pending(context)
     context.user_data["pending_search"] = True
     await query.edit_message_text(
@@ -1042,7 +1129,9 @@ def _search_partial_hint(meta: dict | None) -> str | None:
     return None
 
 
-async def _handle_search_page(query, context, parts: list):
+async def _handle_search_page(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     term = context.user_data.get("pending_search_term")
     if not term:
         await _handle_search_start(query, context, parts)
@@ -1071,12 +1160,14 @@ def _lang_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def send_lang_menu(message, text: str = ""):
+def send_lang_menu(message: Message, text: str = "") -> Coroutine[Any, Any, Message]:
     """يرسل شاشة اختيار اللغة كرسالة جديدة (لأمر /lang)."""
     return message.reply_text(text or "اختر لغة الواجهة:", reply_markup=_lang_keyboard())
 
 
-async def _handle_lang(query, context, parts: list):
+async def _handle_lang(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
     lang = "en" if (parts and parts[0] == "en") else "ar"
     uid = query.from_user.id
     from app.database.crud import set_user_lang
@@ -1117,7 +1208,9 @@ HANDLERS = {
 }
 
 
-async def menu_callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_callback_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """يقفز حسب أول جزء من callback_data (action:target:extra).
 
     ما لا يخص القوائم (confirm:* و edit:* و editfield:*) يمرّ دون اعتراض

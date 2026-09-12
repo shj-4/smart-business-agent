@@ -5,7 +5,13 @@
 bot.conversation و bot.handlers.
 """
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from decimal import Decimal
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from app.database.models import Invoice, Note
+from app.formatting import fmt_amount as _fmt_amount
+from app.formatting import totals_line as _totals_line
 
 TYPE_NAMES = {
     "expense": "مصروف",
@@ -53,7 +59,7 @@ FIELD_LABELS = {
 MAX_MESSAGE_LEN = 4096  # حد تيليجرام لطول الرسالة الواحدة
 
 
-def split_long_message(text: str, limit: int = MAX_MESSAGE_LEN) -> list:
+def split_long_message(text: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
     """يقسّم نصًا طويلًا إلى قطع لا تتجاوز حد تيليجرام (4096 حرفًا).
 
     يحاول القصّ عند أسطر جديدة أولاً، ثم عند مسافات، ثم يقطع قسريًا.
@@ -85,7 +91,7 @@ def split_long_message(text: str, limit: int = MAX_MESSAGE_LEN) -> list:
     return chunks
 
 
-async def safe_reply(message, text: str, **kwargs):
+async def safe_reply(message: Message, text: str, **kwargs) -> None:
     """يرسل نصًا قد يكون طويلًا مقسّمًا على عدة رسائل ضمن حد تيليجرام."""
     parts = split_long_message(text)
     for _i, chunk in enumerate(parts):
@@ -194,28 +200,7 @@ def format_query_result(query_result: dict) -> str:
     return "\n".join(lines)
 
 
-def _fmt_amount(value) -> str:
-    """يُنسّق Decimal/رقم بلا أصفار زائدة."""
-    from decimal import Decimal
-
-    try:
-        d = Decimal(str(value))
-    except Exception:
-        return str(value)
-    if d == d.to_integral_value():
-        return format(d, "f")
-    return format(d.normalize(), "f")
-
-
-def _totals_line(totals: dict) -> str:
-    """يعرض مجموعًا بعملات متعددة: 1500 شيكل + 200 دولار."""
-    if not totals:
-        return ""
-    parts = [f"{_fmt_amount(total)} {currency}" for currency, total in totals.items()]
-    return " + ".join(parts)
-
-
-def _unified_amount(totals: dict, stored: dict | None = None):
+def _unified_amount(totals: dict, stored: dict | None = None) -> Decimal | None:
     """المجموع موحّدًا بالعملة الأساسية (Decimal) أو None عند الفشل.
 
     stored (اختياري): مبالغ بعملة الأساس مثبّتة وقت التسجيل — تُفضّل للدقة التاريخية.
@@ -355,7 +340,7 @@ def _build_confirm_text(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_confirm_keyboard():
+def _build_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
@@ -408,7 +393,7 @@ def format_debts(payload: list[dict]) -> str:
 # ---------- الفواتير الآجلة (#22) ----------
 
 
-def format_invoices(invoices, title: str = "🧾 الفواتير الآجلة:") -> str:
+def format_invoices(invoices: list[Invoice], title: str = "🧾 الفواتير الآجلة:") -> str:
     """يعرض قائمة فواتير (objects) بحالة ومبلغ وميعاد."""
     if not invoices:
         return f"{title}\nلا توجد فواتير."
@@ -443,7 +428,7 @@ def format_invoices(invoices, title: str = "🧾 الفواتير الآجلة:"
 # ---------- الطلبيات (#38) ----------
 
 
-def format_orders(orders, title: str = "🛒 طلبياتك:") -> str:
+def format_orders(orders: list[Note], title: str = "🛒 طلبياتك:") -> str:
     """يعرض الطلبيات (Note note_type=order) بحالتها."""
     if not orders:
         return f"{title}\nلا توجد طلبيات."

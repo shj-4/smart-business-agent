@@ -2,11 +2,15 @@
 تفضيلات اللغة لكل مستخدم (UserPref).
 """
 from datetime import datetime
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
 from app.database.models import (
     UserPref,
 )
+
+
 def get_user_lang(db: Session, telegram_user_id: int) -> str:
     """لغة الواجهة المحفوظة للمستخدم (ar افتراضي)."""
     row = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()

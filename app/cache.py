@@ -105,11 +105,18 @@ def get_or_set(key: str, factory, ttl_seconds: float | None = None) -> Any:
     return copy.deepcopy(value)
 
 
-def clear(namespace: str | None = None) -> None:
-    """يمسح كل الدخول أو فقط نطاق (prefix) معيّن — يُستدعى عند أي كتابة."""
+def clear(namespace: str | None = None, exact: bool = False) -> None:
+    """يمسح كل الدخول أو فقط نطاق (prefix) معيّن — يُستدعى عند أي كتابة.
+
+    exact=True يمسح مفتاحًا دقيقًا بذاته (بلا نقطتين لاحقة) أضافه المتصل مباشرة
+    (مثل "admin_stats") دون بادئة namespace؛ الافتراضي يبقي سلوك البادئة كما هو.
+    """
     with _lock:
         if namespace is None:
             _store.clear()
+            return
+        if exact:
+            _store.pop(namespace, None)
             return
         prefix = namespace.rstrip(":") + ":"
         keys = [k for k in _store if k.startswith(prefix)]

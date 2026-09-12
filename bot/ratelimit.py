@@ -2,6 +2,7 @@
 حدّ معدل الرسائل (rate limiting) مع تنظيف دوري للذاكرة.
 
 - حد أقصى لعدد الرسائل ضمن نافذة زمنية لكل مستخدم (بالذاكرة).
+- تتبّع محاولات الوصول الفاشلة لأوامر الأدمن (استكشاف صلاحيات) مع عتبة تُفعّل إنذارًا.
 - تنظيف دوري عبر threading.Timer (daemon) لحذف إدخالات المستخدمين غير
   النشطين ومنع تسريب الذاكرة في عملية تعمل بشكل مستمر.
 - كل هذا معزول في قفل (lock) لأن threading.Timer وأحداث البوت تعمل معًا.
@@ -14,12 +15,15 @@ RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60.0
 GLOBAL_RATE_LIMIT_MAX = 100  # حد كلي لكل العملية (حماية من إغراق عام)
 GLOBAL_RATE_LIMIT_WINDOW = 60.0
+ADMIN_ATTEMPTS_MAX = 5  # عتبة محاولات الوصول الفاشلة قبل اعتبارها استكشاف صلاحيات
+ADMIN_ATTEMPTS_WINDOW = 300.0
 _RATE_BUCKET_MAX_ENTRIES = 1024  # حد أقصى للإدخالات قبل التنظيف الفوري
 _CLEANUP_INTERVAL = RATE_LIMIT_WINDOW  # دورة التنظيف الدوري
 
 _RATE_LOCK = threading.Lock()
 _rate_buckets: dict = {}
 _global_stamps: list = []
+_admin_denied: dict = {}
 _last_prune: float = 0.0
 _cleanup_timer = None
 
@@ -66,6 +70,44 @@ def is_rate_limited(user_id: int) -> bool:
         stamps.append(now)
         _rate_buckets[user_id] = stamps
         return False
+
+
+def _prune_admin_denied(now: float) -> None:
+    """يحذف تتبّعات محاولات الأدمن الفاشلة الأقدم من نافذة العتبة."""
+    window_start = now - ADMIN_ATTEMPTS_WINDOW
+    expired = [
+        uid
+        for uid, stamps in _admin_denied.items()
+        if not stamps or stamps[-1] <= window_start
+    ]
+    for uid in expired:
+        _admin_denied.pop(uid, None)
+
+
+def register_admin_denied(user_id: int) -> int:
+    """يسجّل محاولة وصول فاشلة لأمر أدمن ويعيد عددها خلال النافذة بعد التسجيل."""
+    with _RATE_LOCK:
+        now = time.monotonic()
+        _prune_admin_denied(now)
+        window_start = now - ADMIN_ATTEMPTS_WINDOW
+        stamps = [t for t in _admin_denied.get(user_id, []) if t > window_start]
+        stamps.append(now)
+        _admin_denied[user_id] = stamps
+        return len(stamps)
+
+
+def admin_denied_count(user_id: int) -> int:
+    """عدد محاولات الوصول الفاشلة لأوامر الأدمن خلال النافذة (بدون تسجيل)."""
+    with _RATE_LOCK:
+        now = time.monotonic()
+        _prune_admin_denied(now)
+        window_start = now - ADMIN_ATTEMPTS_WINDOW
+        return len([t for t in _admin_denied.get(user_id, []) if t > window_start])
+
+
+def is_admin_probing(user_id: int) -> bool:
+    """صحيح إذا تجاوزت المحاولات الفاشلة عتبة استكشاف الصلاحيات."""
+    return admin_denied_count(user_id) >= ADMIN_ATTEMPTS_MAX
 
 
 def _new_cleanup_timer():

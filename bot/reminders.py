@@ -8,11 +8,14 @@
 """
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+
+from sqlalchemy.orm import Session
+from telegram.ext import Application, ContextTypes
 
 from app.database.crud import mark_overdue_tasks
 from app.database.db import SessionLocal
-from app.database.models import Task
+from app.database.models import Budget, CreditLimit, ReportPref, Task
 from app.timeutil import now_utc
 
 logger = logging.getLogger(__name__)
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 CHECK_INTERVAL_MINUTES = 15
 
 
-async def overdue_check(context) -> None:
+async def overdue_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """الدالة الرئيسية التي تُنفَّذ كل 15 دقيقة.
 
     1. تجلب جميع المستخدمين الذين لديهم مهام pending.
@@ -104,7 +107,7 @@ async def overdue_check(context) -> None:
         db.close()
 
 
-def setup_overdue_reminder(app) -> None:
+def setup_overdue_reminder(app: Application) -> None:
     """يُسجّل مهمة متكررة في job_queue لفحص المهام المتأخرة."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — التذكيرات التلقائية لن تعمل.")
@@ -127,7 +130,7 @@ def setup_overdue_reminder(app) -> None:
 WARNING_THRESHOLD = 0.8  # تنبيه اقتراب عند تجاوز 80%
 
 
-async def budget_check(context) -> None:
+async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يفحص كل الميزانيات الشهرية ويرسل تنبيهات (اقتراب/تجاوز).
 
     يُنفَّذ مع بقية المهام الدورية. لكل ميزانية:
@@ -161,7 +164,9 @@ async def budget_check(context) -> None:
             db.close()
 
 
-async def _broadcast_budget_alert(context, db, budget, lines, status: int) -> None:
+async def _broadcast_budget_alert(
+    context: ContextTypes.DEFAULT_TYPE, db: Session, budget: Budget, lines: list[str], status: int
+) -> None:
     """يرسل تنبيه ميزانية لكل أعضاء المساحة المشتركة (لا المُنشئ فقط).
 
     budget_usage يحسب الاستهلاك عبر accessible_user_ids (كل الأعضاء)، لذا كل من
@@ -183,7 +188,9 @@ async def _broadcast_budget_alert(context, db, budget, lines, status: int) -> No
         logger.info("تنبيه ميزانية %s أُرسل بنجاح (status=%s)", budget.id, status)
 
 
-async def _notify_budget(context, db, budget, usage) -> None:
+async def _notify_budget(
+    context: ContextTypes.DEFAULT_TYPE, db: Session, budget: Budget, usage: dict[str, object]
+) -> None:
     """يرسل تنبيه اقتراب/تجاوز لميزانية واحدة إذا استحق (مرة واحدة كل شهر).
 
     الإرسال موحَّد لكل أعضاء المساحة المشتركة عبر _broadcast_budget_alert.
@@ -224,7 +231,7 @@ async def _notify_budget(context, db, budget, usage) -> None:
         await _broadcast_budget_alert(context, db, budget, lines, status=1)
 
 
-def setup_budget_check(app) -> None:
+def setup_budget_check(app: Application) -> None:
     """يُسجّل مهمة متكررة لفحص الميزانيات الشهرية."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — تنبيهات الميزانيات لن تعمل.")
@@ -241,7 +248,7 @@ def setup_budget_check(app) -> None:
 # ---------- تنبيهات الفواتير الآجلة (#22) ----------
 
 
-async def invoice_check(context) -> None:
+async def invoice_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعلّم الفواتير المعلّقة المتأخرة ويرسل تنبيهًا (مرة واحدة) لكل أصحابها.
 
     يُشار إلى الفواتير التي لا تزال pending مع تاريخ استحقاق ماضٍ على أنها
@@ -290,7 +297,7 @@ async def invoice_check(context) -> None:
             db.close()
 
 
-def setup_invoice_check(app) -> None:
+def setup_invoice_check(app: Application) -> None:
     """يُسجّل مهمة متكررة لفحص الفواتير الآجلة المتأخرة."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — تنبيهات الفواتير لن تعمل.")
@@ -307,7 +314,7 @@ def setup_invoice_check(app) -> None:
 # ---------- تنبيهات الحدود الائتمانية (#26) ----------
 
 
-async def credit_check(context) -> None:
+async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى)."""
     from app.database.crud import credit_usage, list_credit_limits
     from app.database.models import CreditLimit
@@ -336,7 +343,9 @@ async def credit_check(context) -> None:
             db.close()
 
 
-async def _notify_credit(context, db, limit_row, usage) -> None:
+async def _notify_credit(
+    context: ContextTypes.DEFAULT_TYPE, db: Session, limit_row: CreditLimit, usage: dict[str, object]
+) -> None:
     """ينبّه على اقتراب/تجاوز حد ائتماني واحد إن استحق (مرة لكل مستوى)."""
     from app.database.crud import accessible_user_ids
 
@@ -374,7 +383,7 @@ async def _notify_credit(context, db, limit_row, usage) -> None:
         logger.info("تنبيه حد ائتماني %s أُرسل (status=%s)", limit_row.id, notify_status)
 
 
-def setup_credit_check(app) -> None:
+def setup_credit_check(app: Application) -> None:
     """يُسجّل مهمة متكررة لفحص الحدود الائتمانية."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — تنبيهات الحدود الائتمانية لن تعمل.")
@@ -395,7 +404,7 @@ REPORT_CHECK_INTERVAL_MINUTES = 30  # نفحص كل 30 دقيقة ونرسل ع�
 FREQUENCY_NAMES = {"daily": "اليومي", "weekly": "الأسبوعي", "monthly": "الشهري"}
 
 
-def _parse_deliver_time(pref) -> tuple[int, int]:
+def _parse_deliver_time(pref: ReportPref) -> tuple[int, int]:
     from app.config import settings
 
     deliver = pref.deliver_time or settings.report_time
@@ -406,7 +415,7 @@ def _parse_deliver_time(pref) -> tuple[int, int]:
     return hh, mm
 
 
-def _report_due(pref, now_local_dt) -> bool:
+def _report_due(pref: ReportPref, now_local_dt: datetime) -> bool:
     """هل حان وقت إرسال تقرير المستخدم (الدورية + الوقت + عدم التكرار)؟"""
     from app.timeutil import first_day_of_week, to_local_naive
 
@@ -442,7 +451,7 @@ def _report_due(pref, now_local_dt) -> bool:
     return False
 
 
-async def periodic_report_job(context) -> None:
+async def periodic_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يرسل التقارير الدورية للمستخدمين الذين فعّلوها (عند استحقاق الموعد)."""
     from app.database.crud import list_report_prefs, mark_report_sent
     from app.timeutil import now_local
@@ -472,7 +481,7 @@ async def periodic_report_job(context) -> None:
     db.close()
 
 
-def setup_periodic_reports(app) -> None:
+def setup_periodic_reports(app: Application) -> None:
     """يُسجّل مهمة متكررة لفحص التقارير الدورية وإرسالها عند الاستحقاق."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — التقارير الدورية لن تعمل.")
@@ -491,7 +500,7 @@ def setup_periodic_reports(app) -> None:
 _LAST_DEVIATION_SENT: dict[int, str] = {}
 
 
-async def deviation_check(context) -> None:
+async def deviation_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يرسل تنبيهًا يوميًا واحدًا لكل مساحة عمل عند انحراف شهرٍ فوق حدٍّ.
 
     الحارس في الذاكرة (date لكل مستخدم) — يُعاد التنبيه في اليوم التالي فقط.
@@ -528,7 +537,7 @@ async def deviation_check(context) -> None:
         db.close()
 
 
-def setup_deviation_check(app) -> None:
+def setup_deviation_check(app: Application) -> None:
     """يُسجّل مهمة متكررة لفحص انحراف الإنفاق."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — تنبيهات الانحراف لن تعمل.")
@@ -547,7 +556,7 @@ def setup_deviation_check(app) -> None:
 BACKUP_INTERVAL_HOURS = 24
 
 
-async def daily_backup_job(context) -> None:
+async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """نسخة احتياطية يومية من قاعدة SQLite عبر خدمة app.database.backup."""
     from app.database.backup import run_backup
 
@@ -557,7 +566,7 @@ async def daily_backup_job(context) -> None:
         logger.exception("فشل النسخ الاحتياطي اليومي")
 
 
-def setup_daily_backup(app) -> None:
+def setup_daily_backup(app: Application) -> None:
     """يُسجّل دورة يومية للنسخ الاحتياطي (أول نسخة بعد ~ساعة من التشغيل)."""
     if app.job_queue is None:
         logger.warning("job_queue غير مُفعّل — النسخ الاحتياطي اليومي لن يعمل.")

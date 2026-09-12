@@ -1,12 +1,27 @@
 """
 التقارير الشهرية، إعدادات التقارير، الإحصائيات، التنبؤ الخطي، انحراف التوقعات.
 """
+import os
 from datetime import datetime, timedelta
 from decimal import Decimal
+
 from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database.db import DATABASE_URL
 from app.database.models import (
-    Budget, CreditLimit, Invoice, Note, ReportPref, Task, Transaction,
+    Budget,
+    CreditLimit,
+    Invoice,
+    Note,
+    ReportPref,
+    Task,
+    Transaction,
 )
+from app.exchange import convert_totals_to_base
+from app.timeutil import now_local, now_utc, to_local_naive, to_utc_naive
+
+
 def get_report_pref(db: Session, telegram_user_id: int) -> ReportPref | None:
     return db.query(ReportPref).filter(ReportPref.telegram_user_id == telegram_user_id).first()
 
@@ -14,8 +29,6 @@ def set_report_frequency(
     db: Session, telegram_user_id: int, frequency: str, deliver_time: str | None = None
 ) -> ReportPref:
     """يضبط تفضيل التقارير الدورية للمستخدم (إنشاء/تحديث)."""
-    from app.timeutil import now_utc
-    from app.database.crud import get_report_pref
 
     pref = get_report_pref(db, telegram_user_id)
     if pref is None:
@@ -40,7 +53,6 @@ def list_report_prefs(db: Session) -> list[ReportPref]:
 
 def mark_report_sent(db: Session, pref: ReportPref) -> None:
     """يسجّل وقت إرسال آخر تقرير دوري (لمنع التكرار)."""
-    from app.timeutil import now_utc
 
     pref.last_sent_at = now_utc()
     db.commit()
@@ -57,8 +69,6 @@ def monthly_totals(
     المبالغ المحوَّلة بعملة الأساس لحظة التسجيل (struct الدقة التاريخية)، مع
     stored_base: العملة الأساس المعتمدة — تُستخدم في الرسم إن طابقت العملة المطلوبة.
     """
-    from app.config import settings
-    from app.timeutil import now_local, to_local_naive, to_utc_naive
     from app.database.crud import accessible_user_ids
 
 
@@ -163,10 +173,6 @@ def user_ids_with_data(db: Session) -> list[int]:
 
 def db_size_bytes() -> int | None:
     """حجم ملف قاعدة البيانات (بايت) لـ SQLite، أو None لغيره/تعذّر القراءة."""
-    import os
-
-    from app.database.db import DATABASE_URL
-
     if not DATABASE_URL.startswith("sqlite"):
         return None
     path = DATABASE_URL.replace("sqlite:///", "", 1)
@@ -179,9 +185,7 @@ def db_size_bytes() -> int | None:
 
 def user_stats(db: Session, telegram_user_id: int) -> dict:
     """إحصائيات مخطط الاستخدام حسب مساحة عمل المستخدم — بلا أي شبكة."""
-    from app.timeutil import now_utc, to_local_naive
     from app.database.crud import accessible_user_ids
-    from app.database.crud import db_size_bytes, monthly_totals
 
 
     uids = accessible_user_ids(db, telegram_user_id)
@@ -307,9 +311,6 @@ def forecast_totals(
     history: int = 6,
 ) -> dict:
     """تنبؤ مصاريف/إيرادات الأشهر القادمة لكل عملة (انحدار خطي على آخر قيم)."""
-    from app.config import settings
-    from app.timeutil import now_local
-    from app.database.crud import _linear_forecast, _unified_amount_safe, monthly_totals
 
     months = max(1, min(int(months), 12))
     history = max(2, int(history))
@@ -377,7 +378,6 @@ def forecast_totals(
 
 def _unified_amount_safe(totals: dict, base: str) -> Decimal | None:
     """يعيد المجموع الموحّد لعملة الأساس أو None عند تعذّر التحويل (شبكة/لا عملات)."""
-    from app.exchange import convert_totals_to_base
 
     if not totals:
         return Decimal("0.00")
@@ -397,9 +397,6 @@ def deviation_summary(
     يعيد: {as_of, threshold_pct, deviations: [{currency, kind, current, average, pct}]}
     حيث pct نسبة الانحراف (موجب/سالب) — يُنتظر من المتصل فلترة الأهم.
     """
-    from app.timeutil import now_local
-    from app.database.crud import monthly_totals
-
     entries = monthly_totals(db, telegram_user_id, months=4, include_stored=False)
     if not entries:
         return {"as_of": now_local().strftime("%Y-%m-%d"), "threshold_pct": threshold_pct, "deviations": []}

@@ -8,9 +8,10 @@ bot.conversation عبر ConversationHandler — هنا فقط الأوامر ا�
 import asyncio
 import logging
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 
 from telegram import Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from app.database.crud import complete_task, find_pending_task, undo_last_record
 from app.database.db import SessionLocal
@@ -39,7 +40,7 @@ def resolve_period_arg(raw: str) -> str | None:
     return PERIOD_KEYS.get((raw or "all").lower())
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from bot.menus import send_main_menu
 
     first = update.effective_user.first_name or ""
@@ -55,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /help — دليل شامل للأوامر والأزرار بدون أي تحليل AI."""
     from bot.menus import send_main_menu
 
@@ -101,14 +102,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update.message, context, text=guide)
 
 
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /menu — يعرض القائمة الرئيسية (بأزرار InlineKeyboard)."""
     from bot.menus import send_main_menu
 
     await send_main_menu(update.message, context)
 
 
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     telegram_user_id = update.effective_user.id
     # context.args يلتقط الوسائط النصية للأمر بشكل صحيح، ويعمل مع /done@BotUsername
     text = (
@@ -137,14 +138,14 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 
-async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /lang — تبديل لغة الواجهة بين العربية والإنجليزية."""
     from bot.menus import send_lang_menu
 
     await send_lang_menu(update.message)
 
 
-async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /undo — يحذف (soft-delete) آخر سجل أضافه المستخدم."""
     telegram_user_id = update.effective_user.id
     db = SessionLocal()
@@ -163,7 +164,7 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لا يوجد سجلات سابقة يمكن التراجع عنها.")
 
 
-async def redo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def redo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /redo — يستعيد آخر سجل تم التراجع عنه (/undo عكسيًا)."""
     from app.database.crud import restore_last_deleted
 
@@ -184,7 +185,7 @@ async def redo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لا توجد سجلات محذوفة يمكن استعادتها.")
 
 
-async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /convert <المبلغ> <المن> <المن أو إلى> <إلى> — تحويل عملة."""
     args = context.args
     if len(args) < 3:
@@ -220,7 +221,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /report — يولّد تقرير Excel للمعاملات المالية ويُرسله كملف."""
     from datetime import timedelta
 
@@ -283,7 +284,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /export [today|week|month|pdf] — ملف Excel واحد بكل السجلات للفترة المحددة."""
     from datetime import timedelta
 
@@ -341,7 +342,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """تصدير PDF بكل السجلات (الفترة الاختيارية عبر /export pdf [period] أعلاه)."""
     from datetime import timedelta
 
@@ -392,14 +393,14 @@ async def _export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /chart — رسم بياني (matplotlib) بمقارنة الإيرادات والمصاريف شهريًا."""
     from app.charts import generate_monthly_chart
     from app.database.db import SessionLocal as _S
 
     telegram_user_id = update.effective_user.id
 
-    def _gen_chart():
+    def _gen_chart() -> BytesIO | None:
         db = _S()
         try:
             return generate_monthly_chart(db, telegram_user_id)
@@ -427,7 +428,7 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def report_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /report_on [daily|weekly|monthly] — تفعيل التقرير الدوري التلقائي."""
     from app.database.crud import set_report_frequency
 
@@ -468,7 +469,7 @@ async def report_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def report_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /report_off — إيقاف التقرير الدوري."""
     from app.database.crud import set_report_frequency
 
@@ -481,7 +482,7 @@ async def report_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("تم إيقاف التقارير الدورية.")
 
 
-async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /budget — ميزانيات شهرية للمصاريف حسب العملة أو الشخص.
 
     /budget إضافة عملة ILS 2000
@@ -622,7 +623,7 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 
-async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /debts — رصيد كل شخص (من يدين لك ومن تدين له)."""
     from app.database.crud import person_debts
     from bot.formatters import format_debts
@@ -636,7 +637,7 @@ async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_debts(payload))
 
 
-async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /invoices — قائمة الفواتير الآجلة (معلّقة/متأخرة)."""
     from app.database.crud import list_invoices
     from bot.formatters import format_invoices
@@ -661,7 +662,7 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_invoices(invoices, title=title))
 
 
-async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /orders — قائمة الطلبيات وحالتها (مفتوحة/منجزة)."""
     from app.database.crud import list_orders
     from bot.formatters import format_orders
@@ -686,7 +687,7 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_orders(orders, title=title))
 
 
-async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /credit — حدود ائتمانية للأشخاص.
 
     /credit قائمة
@@ -724,7 +725,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_credit_limits(payload))
 
 
-async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /health — فحص صحة النظام (قاعدة، هجرات، إعدادات، إصدارات)."""
     from bot.diagnostics import run_health_checks
     from bot.formatters import format_health_report
@@ -737,7 +738,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_health_report(checks))
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /stats — إحصائيات استخدام البوت حسب مساحة عملك."""
     from app.database.crud import user_stats
     from bot.formatters import format_user_stats
@@ -751,7 +752,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_user_stats(stats))
 
 
-async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /forecast [عدد الأشهر] — توقعات المصاريف/الإيرادات للأشهر القادمة."""
     from app.database.crud import forecast_totals
     from bot.formatters import format_forecast
@@ -771,7 +772,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_forecast(payload))
 
 
-async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /deviation — انحراف إنفاق/إيراد الشهر الحالي عن متوسط آخر 3 أشهر."""
     from app.database.crud import deviation_summary
     from bot.formatters import format_deviation
@@ -785,15 +786,11 @@ async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(format_deviation(payload))
 
 
-async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر مخفي /admin_stats — إحصائيات عامة للمسؤول (لا يكشف بيانات فردية)."""
     from app.admin import build_admin_stats
-    from app.config import settings
 
-    user_id = update.effective_user.id
-    if user_id not in settings.admin_user_ids:
-        logger.warning("محاولة وصول غير مصرّح لأمر الأدمن من user=%s", user_id)
-        await update.message.reply_text("عذرًا، هذا الأمر متاح للمسؤول فقط.")
+    if not await _require_admin(update, "admin_stats"):
         return
 
     db = SessionLocal()
@@ -813,7 +810,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"📅 تقارير دورية مفعّلة: {stats['active_reports']}",
     ]
 
-    def _sum_line(label, totals):
+    def _sum_line(label: str, totals: dict[str, Decimal]) -> str:
         if not totals:
             return f"{label}: 0"
         parts = ", ".join(f"{v} {c}" for c, v in totals.items())
@@ -836,12 +833,47 @@ def _is_admin(user_id: int) -> bool:
     return user_id in settings.admin_user_ids
 
 
-async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر مخفي /feedback — يعرض رسائل التحليل الخاطئ بانتظار المراجعة اليدوية."""
+async def _alert_admin_of_probe(update: Update, attacker_id: int, count: int) -> None:
+    """يرسل إنذارًا فوريًا لأول أدمن مُعدّ عند تجاوز عتبة استكشاف الصلاحيات."""
+    from app.config import settings
+
+    try:
+        if not settings.admin_user_ids:
+            return
+        await update.bot.send_message(
+            chat_id=settings.admin_user_ids[0],
+            text=f"⚠️ إنذار أمني: {count} محاولات فاشلة لأوامر الأدمن من user={attacker_id} خلال ٥ دقائق.",
+        )
+    except Exception:
+        logger.exception("فشل إرسال إنذار الأمان الخاص بمحاولات الأدمن الفاشلة")
+
+
+async def _require_admin(update: Update, label: str) -> bool:
+    """بوابة موحّدة لأوامر الأدمن: يرفض غير المصرّح له مع تتبّع المحاولات
+    الفاشلة وإنذار عند بلوغ عتبة استكشاف الصلاحيات."""
+    from bot.ratelimit import ADMIN_ATTEMPTS_MAX, ADMIN_ATTEMPTS_WINDOW, register_admin_denied
+
     user_id = update.effective_user.id
-    if not _is_admin(user_id):
-        logger.warning("محاولة وصول غير مصرّح لأمر /feedback من user=%s", user_id)
-        await update.message.reply_text("عذرًا، هذا الأمر متاح للمسؤول فقط.")
+    if _is_admin(user_id):
+        return True
+    denied = register_admin_denied(user_id)
+    logger.warning("محاولة وصول غير مصرّح لأمر الأدمن (%s) من user=%s", label, user_id)
+    if denied >= ADMIN_ATTEMPTS_MAX:
+        logger.critical(
+            "استكشاف صلاحيات مفترض: %d محاولات فاشلة لأوامر الأدمن من user=%s خلال %ds",
+            denied,
+            user_id,
+            int(ADMIN_ATTEMPTS_WINDOW),
+        )
+        if denied == ADMIN_ATTEMPTS_MAX:
+            await _alert_admin_of_probe(update, user_id, denied)
+    await update.message.reply_text("عذرًا، هذا الأمر متاح للمسؤول فقط.")
+    return False
+
+
+async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر مخفي /feedback — يعرض رسائل التحليل الخاطئ بانتظار المراجعة اليدوية."""
+    if not await _require_admin(update, "feedback"):
         return
 
     from app.database.crud import list_correction_feedback
@@ -867,12 +899,9 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر مخفي /feedback_ack <id> — يعلّم سجل تحليل خاطئ كمراجَع يدويًا."""
-    user_id = update.effective_user.id
-    if not _is_admin(user_id):
-        logger.warning("محاولة وصول غير مصرّح لأمر /feedback_ack من user=%s", user_id)
-        await update.message.reply_text("عذرًا، هذا الأمر متاح للمسؤول فقط.")
+    if not await _require_admin(update, "feedback_ack"):
         return
 
     args = context.args
@@ -891,7 +920,7 @@ async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("✅ عُلِّم السجل كمراجَع." if ok else "لم أجد سجلًا بهذا الرقم.")
 
 
-async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /work — إدارة الحساب المشترك (مساحة عمل لعدة معرّفات Telegram).
 
     الاستخدام:
@@ -988,7 +1017,7 @@ async def system_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         logger.exception("فشل إرسال رسالة خطأ إلى المستخدم")
 
 
-def register_handlers(app) -> None:
+def register_handlers(app: Application) -> None:
     """يُسجّل كل المعالجات في Application (بما فيها ConversationHandler)."""
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))

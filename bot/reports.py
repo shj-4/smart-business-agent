@@ -8,10 +8,15 @@
 الإرسال والجدولة يعيشان في bot.reminders (periodic_report_job)؛ هنا فقط بناء النص.
 """
 
+from datetime import datetime
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
 
 from app.database.crud import accessible_user_ids, mark_overdue_tasks
 from app.database.models import Task, Transaction
+from app.formatting import fmt_amount as _fmt_amount
+from app.formatting import totals_line as _totals_line
 from app.timeutil import now_local, to_local_naive
 
 # الدورية ↔ الفترة المستخدمة للمقارنة (لدى التقارير الأسبوعي/الشهري نعرض الفترة السابقة)
@@ -35,7 +40,9 @@ DISPLAY_LABELS = {
 }
 
 
-def _totals_between(db: Session, user_id: int, lo, hi, tx_type: str) -> dict:
+def _totals_between(
+    db: Session, user_id: int, lo: datetime | None, hi: datetime | None, tx_type: str
+) -> dict:
     """إجمالي عمليات نوع معيّن بين حدود زمنية (بصيغة UTC) مصنّفًا بالعملة.
 
     المبالغ تُجمع في Python لأنها مخزّنة مشفّرة.
@@ -74,7 +81,7 @@ def _overdue_info(db: Session, user_id: int) -> tuple[int, list[dict]]:
     return len(rows), top
 
 
-def _period_bounds(frequency: str):
+def _period_bounds(frequency: str) -> tuple[datetime | None, datetime | None]:
     """حدود الفترة المعروضة (UTC naive). للدوري اليومي نعرض اليوم، وللأسبوعي/الشهري الفترة السابقة."""
     from app.database.crud import get_comparison_ranges
 
@@ -82,24 +89,6 @@ def _period_bounds(frequency: str):
     if frequency == "daily":
         return ranges["current"]
     return ranges["previous"]
-
-
-def _fmt_amount(value) -> str:
-    from decimal import Decimal
-
-    try:
-        d = Decimal(str(value))
-    except Exception:
-        return str(value)
-    if d == d.to_integral_value():
-        return format(d, "f")
-    return format(d.normalize(), "f")
-
-
-def _totals_line(totals: dict) -> str:
-    if not totals:
-        return "لا توجد"
-    return " + ".join(f"{_fmt_amount(total)} {currency}" for currency, total in totals.items())
 
 
 def _unified_line(totals: dict, stored: dict | None = None) -> str | None:
@@ -116,13 +105,14 @@ def _unified_line(totals: dict, stored: dict | None = None) -> str | None:
     return f"المجموع الموحّد: {_fmt_amount(total)} {base}"
 
 
-def _stored_totals_between(db: Session, user_id: int, lo, hi, tx_type: str) -> dict:
+def _stored_totals_between(
+    db: Session, user_id: int, lo: datetime | None, hi: datetime | None, tx_type: str
+) -> dict:
     """مبالغ نوع معيّن بين حدود زمنية محوَّلة ومثبّتة بعملة الأساس عند التسجيل.
 
     يُفضَّل في التقارير التاريخية على تحويل أسعار اليوم (لأنها توثّق سعر
     لحظة العملية الفعلية). العملات بلا سعر مخزَّن تُستبعد فتُحسب حيّة.
     """
-    from decimal import Decimal
 
     from app.config import settings
 
@@ -150,7 +140,7 @@ def build_periodic_summary(
     db: Session,
     telegram_user_id: int,
     frequency: str,
-    now_dt=None,
+    now_dt: datetime | None = None,
 ) -> str:
     """يبني نص تقرير دوري للمستخدم (لا يرسل أي شيء)."""
     from app.database.crud import get_comparison_ranges
@@ -184,14 +174,14 @@ def build_periodic_summary(
 
     lines = [f"📊 تقريرك {FREQUENCY_NAMES[frequency]} — {today_str}\n"]
 
-    lines.append(f"💸 المصاريف ({display_label}): {_totals_line(expenses)}")
+    lines.append(f"💸 المصاريف ({display_label}): {_totals_line(expenses) or 'لا توجد'}")
     if expenses:
         unified = _unified_line(expenses, stored=stored_expenses)
         if unified:
             lines.append(unified)
 
     lines.append("")
-    lines.append(f"💰 الإيرادات ({display_label}): {_totals_line(incomes)}")
+    lines.append(f"💰 الإيرادات ({display_label}): {_totals_line(incomes) or 'لا توجد'}")
     if incomes:
         unified = _unified_line(incomes, stored=stored_incomes)
         if unified:

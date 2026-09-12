@@ -3,33 +3,23 @@
 """
 from datetime import datetime, timedelta
 from decimal import Decimal
+
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from app import timeutil as _timeutil
+from app.audit import log_audit
+from app.cache import get_or_set
+from app.config import settings
 from app.database.models import (
-    Note, Task, Transaction,
+    Note,
+    Task,
+    Transaction,
 )
-def _best_effort_base_amount(amount, currency: str | None):
-    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None).
+from app.money import _best_effort_base_amount, _sum_amounts_by_currency, _unified_totals_for_rows
+from app.timeutil import now_utc, to_local_naive, to_utc_naive
 
-    دقة تاريخية: نقوم بمحاولة تحويل واحدة لحظة الإنشاء؛ إن فشلت (لا إنترنت/
-    عملة غير معرفة) تُترك القيم None، وفي كل تقرير لاحق تُعاد العملية للباقي
-    بأسعار اليوم عبر convert_totals_to_base(stored=...).
-    """
-    from app.config import settings
-    from app.exchange import convert
-
-    base = (settings.base_currency or "").upper().strip()
-    if amount is None or not currency or not base or currency.upper() == base:
-        return None, None
-    try:
-        conv = convert(amount, currency, base)
-    except Exception:
-        return None, None
-    result = conv.get("result")
-    if result is None:
-        return None, None
-    return Decimal(str(result)), base
 
 def create_transaction(
     db: Session,
@@ -38,8 +28,14 @@ def create_transaction(
     raw_message: str,
     telegram_message_id: int | None = None,
 ) -> Transaction | None:
-    from app.database.crud import _clean_person, _clean_text, _invalidate_caches, _is_duplicate_message, _to_decimal, normalize_currency
-    from app.database.crud import _best_effort_base_amount
+    from app.database.crud import (
+        _clean_person,
+        _clean_text,
+        _invalidate_caches,
+        _is_duplicate_message,
+        _to_decimal,
+        normalize_currency,
+    )
 
     if _is_duplicate_message(db, Transaction, telegram_user_id, telegram_message_id):
         return None
@@ -88,7 +84,12 @@ def create_note(
     telegram_message_id: int | None = None,
 ) -> Note | None:
     """يخزّن الطلبيات والملاحظات (order / note) بدل إضاعتها بصمت."""
-    from app.database.crud import _clean_person, _clean_text, _invalidate_caches, _is_duplicate_message
+    from app.database.crud import (
+        _clean_person,
+        _clean_text,
+        _invalidate_caches,
+        _is_duplicate_message,
+    )
 
     if _is_duplicate_message(db, Note, telegram_user_id, telegram_message_id):
         return None
@@ -127,15 +128,13 @@ def soft_delete_last(db: Session, model, telegram_user_id: int) -> object | None
     )
 
 def get_period_range(period: str):
-    from app.timeutil import first_day_of_week, now_local, to_utc_naive
-
-    local_now = now_local()
+    local_now = _timeutil.now_local()
 
     if period == "today":
         local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "this_week":
         # الأسبوع يبدأ من أول يوم قابل للتكوين (افتراضيًا الأحد لفلسطين/السياق العربي)
-        fd = first_day_of_week()
+        fd = _timeutil.first_day_of_week()
         weekday = local_now.weekday()
         local_start = local_now - timedelta(days=(weekday - fd) % 7)
         local_start = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -157,9 +156,7 @@ def get_comparison_ranges(period: str) -> dict:
     previous=[أول الشهر الماضي حتى أول الشهر الحالي].
     يعيد dict: {"current": (start, end), "previous": (start, end)}.
     """
-    from app.timeutil import first_day_of_week, now_local, to_utc_naive
-
-    local_now = now_local()
+    local_now = _timeutil.now_local()
 
     def _bounds(local_start_dt, local_end_dt):
         return (
@@ -176,7 +173,7 @@ def get_comparison_ranges(period: str) -> dict:
         }
 
     if period == "this_week":
-        fd = first_day_of_week()
+        fd = _timeutil.first_day_of_week()
         weekday = local_now.weekday()
         cur_start = local_now - timedelta(days=(weekday - fd) % 7)
         cur_start = cur_start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -209,58 +206,6 @@ def get_comparison_ranges(period: str) -> dict:
     # all_time أو غير معروف: لا مقارنة
     return None
 
-def _sum_amounts_by_currency(rows) -> dict:
-    """يجمع مبالغ سجلات (بعد فك التشفير) لكل عملة — يستخدم بدل SQL SUM.
-
-    لأن amount مخزَّن مشفّرًا، تُقرأ الصفوف ويُجمَع في Python.
-    """
-    total: dict = {}
-    for r in rows:
-        amt = r.amount
-        if amt is None:
-            continue
-        c = r.currency or "غير محددة"
-        total[c] = total.get(c, Decimal("0")) + amt
-    return total
-
-def _split_stored_base(rows, base_currency: str) -> tuple[dict, dict]:
-    """يقسّم صفوف المعاملات إلى (مبالغ محوَّلة بعملة الأساس وقت التسجيل، مبالغ حيّة).
-
-    العائد: (stored: {currency: Decimal}, live: {currency: Decimal}).
-    المبالغ المحوَّلة موثّقة أن base_currency_at_creation == base أي أن قيمها فعلًا
-    بعملة الأساس؛ ما عداها يحتاج سعر اليوم لحظة التقارير.
-    """
-    stored: dict = {}
-    live: dict = {}
-    for r in rows:
-        amt = r.amount
-        if amt is None:
-            continue
-        c = r.currency or "غير محددة"
-        if r.base_currency_at_creation == base_currency and r.amount_in_base_currency is not None:
-            stored[c] = stored.get(c, Decimal("0")) + Decimal(str(r.amount_in_base_currency))
-        else:
-            live[c] = live.get(c, Decimal("0")) + amt
-    return stored, live
-
-def _unified_totals_for_rows(rows, base_currency: str) -> dict:
-    """مجموع موحّد بدقة تاريخية: يفضّل مبالغ سعر الصرف المثبَّت وقت التسجيل.
-
-    يعيد: {"base", "total": Decimal|None, "partial": bool, "from_stored": bool}
-    يُرفق كحقل فرعي في نتيجة run_query ويقرؤه تنسيق العرض مباشرة.
-    """
-    from app.exchange import convert_totals_to_base
-    from app.database.crud import _split_stored_base
-
-    stored, live = _split_stored_base(rows, base_currency)
-    conv = convert_totals_to_base(live, base_currency, stored=stored)
-    return {
-        "base": base_currency,
-        "total": conv.get("total"),
-        "partial": conv.get("partial", False),
-        "from_stored": bool(stored),
-    }
-
 def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     """تنفيذ استعلام مع تخزين مؤقت قصير (TTL) للاستعلامات التجميعية المتكررة.
 
@@ -276,16 +221,17 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     if metric in ("list_tasks", "list_overdue_tasks"):
         return _run_query_uncached(db, telegram_user_id, query_details)
 
-    from app.cache import get_or_set
-
     namespace = "run_query"
     key = f"{namespace}:{telegram_user_id}:{metric}:{period}:{person}"
     return get_or_set(key, lambda: _run_query_uncached(db, telegram_user_id, query_details))
 
 def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict) -> dict:
-    from app.timeutil import to_local_naive
-    from app.database.crud import accessible_user_ids, list_overdue_tasks, list_pending_tasks, mark_overdue_tasks
-    from app.database.crud import _sum_amounts_by_currency, _unified_totals_for_rows, get_comparison_ranges, get_period_range
+    from app.database.crud import (
+        accessible_user_ids,
+        list_overdue_tasks,
+        list_pending_tasks,
+        mark_overdue_tasks,
+    )
 
 
     metric = query_details.get("metric")
@@ -335,8 +281,6 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
     if metric == "total_expenses":
         expense_rows = q.filter(Transaction.type == "expense").all()
         total = _sum_amounts_by_currency(expense_rows)
-        from app.config import settings
-
         return {
             "metric": metric,
             "period": period,
@@ -348,8 +292,6 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
     elif metric == "total_income":
         income_rows = q.filter(Transaction.type == "income").all()
         total = _sum_amounts_by_currency(income_rows)
-        from app.config import settings
-
         return {
             "metric": metric,
             "period": period,
@@ -472,14 +414,10 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
 
     أمن المساحة: أعضاء عاديون لا يتراجعون (المرتكز أو الأفراد فقط).
     """
-    from app.timeutil import now_utc
-    from app.database.crud import _invalidate_caches, can_manage_records
-    from app.database.crud import soft_delete_last
+    from app.database.crud import _invalidate_caches, can_manage_records, soft_delete_last
 
 
     if not can_manage_records(db, telegram_user_id):
-        from app.audit import log_audit
-
         log_audit(telegram_user_id, "denied_undo", "workspace_role")
         return None
 
@@ -509,8 +447,6 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
         kind = "مهمة"
         label = (row.description or "")[:60]
 
-    from app.audit import log_audit
-
     log_audit(
         telegram_user_id, "soft_delete", f"{model.__name__}:{row.id}", detail=(label or "")[:80]
     )
@@ -523,7 +459,6 @@ def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
     يبحث عن أحدث deleted_at بين المعاملات/المهام/الملاحظات المحذوفة في نطاق
     المستخدم ويزيله — فيعود السجل للظهور في كل الاستعلامات.
     """
-    from app.audit import log_audit
     from app.database.crud import _invalidate_caches, accessible_user_ids, can_manage_records
 
 
@@ -570,7 +505,6 @@ def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
 
 def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> list[dict]:
     """يعرض آخر سجلات المستخدم (معاملات + مهام + ملاحظات) مرتبة بالأحدث."""
-    from app.timeutil import to_local_naive
     from app.database.crud import accessible_user_ids
 
 
@@ -653,9 +587,7 @@ def delete_record_by_id(
     الأفراد يمسحون سجلاتهم؛ أعضاء المساحة المشتركة يمسحها المرتكز (المالك) فقط —
     وأي رفض يُسجَّل في سجل التدقيق. ترجع تسمية السجل المحذوف أو None.
     """
-    from app.audit import log_audit
-    from app.database.crud import _invalidate_caches, can_manage_records
-    from app.database.crud import get_record_by_id
+    from app.database.crud import _invalidate_caches, can_manage_records, get_record_by_id
 
 
     if not can_manage_records(db, telegram_user_id):
@@ -688,7 +620,6 @@ def delete_record_by_id(
 
 def _search_row_result(r, model) -> dict:
     """يبني عنصر نتيجة بحث من سجل مطابق (النص المشفّر يُقرأ هنا فقط عند الحاجة)."""
-    from app.timeutil import to_local_naive
 
     local_dt = to_local_naive(r.created_at)
     model_name = model.__name__
@@ -737,7 +668,6 @@ def search_records(
     سجلات أقدم/مطابقة أخرى لم تُفحص) — ليُبلَّغ المستخدم أن البحث جزئي.
     """
     from app.database.crud import _like_escape, accessible_user_ids
-    from app.database.crud import _search_row_result
 
     needle = (term or "").strip().lower()
     if not needle:
@@ -836,9 +766,13 @@ def search_records(
 
 def update_transaction(db: Session, row: Transaction, fields: dict) -> Transaction:
     """يحدّث حقول محددة في معاملة مالية."""
-    from app.audit import log_audit
-    from app.timeutil import now_utc
-    from app.database.crud import _clean_person, _clean_text, _invalidate_caches, _to_decimal, normalize_currency
+    from app.database.crud import (
+        _clean_person,
+        _clean_text,
+        _invalidate_caches,
+        _to_decimal,
+        normalize_currency,
+    )
 
 
     old = {
@@ -871,8 +805,6 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
 
 def update_note(db: Session, row: Note, fields: dict) -> Note:
     """يحدّث حقول محددة في ملاحظة/طلبية."""
-    from app.audit import log_audit
-    from app.timeutil import now_utc
     from app.database.crud import _clean_person, _clean_text, _invalidate_caches
 
 

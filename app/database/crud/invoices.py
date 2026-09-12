@@ -3,11 +3,17 @@
 """
 from datetime import datetime
 from decimal import Decimal
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from app.config import settings
 from app.database.models import (
-    Invoice, Note,
+    Invoice,
+    Note,
 )
+from app.timeutil import now_utc, to_local_naive, to_utc_naive
+
 ORDER_STATUSES = ("open", "done")
 
 def create_invoice(
@@ -17,8 +23,13 @@ def create_invoice(
     raw_message: str | None = None,
 ) -> Invoice | None:
     """ينشئ فاتورة آجلة؛ amount إلزامي. يعيد None على قيم غير صالحة."""
-    from app.config import settings
-    from app.database.crud import _clean_person, _clean_text, _invalidate_caches, _to_decimal, normalize_currency
+    from app.database.crud import (
+        _clean_person,
+        _clean_text,
+        _invalidate_caches,
+        _to_decimal,
+        normalize_currency,
+    )
 
 
     amount = _to_decimal(data.get("amount"))
@@ -32,12 +43,8 @@ def create_invoice(
         except ValueError:
             due_date = None
         if due_date is not None and due_date.tzinfo is not None:
-            from app.timeutil import to_utc_naive
-
             due_date = to_utc_naive(due_date)
     if isinstance(due_date, datetime) and due_date.tzinfo is not None:
-        from app.timeutil import to_utc_naive
-
         due_date = to_utc_naive(due_date)
 
     invoice = Invoice(
@@ -64,7 +71,6 @@ def list_invoices(
     db: Session, telegram_user_id: int, status: str | None = None, limit: int = 50
 ) -> list[Invoice]:
     """فواتير المستخدم (كل أعضاء المساحة) مطابقة لحالة اختيارية، الأحدث أولًا."""
-    from app.timeutil import now_utc, to_local_naive
     from app.database.crud import accessible_user_ids
 
 
@@ -100,7 +106,6 @@ def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bo
     )
     if invoice is None or invoice.status == "paid":
         return False
-    from app.timeutil import now_utc
 
     invoice.status = "paid"
     invoice.paid_at = now_utc()
@@ -114,8 +119,6 @@ def mark_overdue_invoices(db: Session, now_dt=None) -> list[Invoice]:
 
     مستخدم من مهمة الفحص الدوري (reminders)؛ يكتب الحالة للعرض فقط دون إرسال.
     """
-    from app.timeutil import now_utc
-
     now_dt = now_dt or now_utc()
     overdue = []
     rows = (
@@ -138,7 +141,6 @@ def list_orders(
 ) -> list[Note]:
     """الطلبيات (note_type=order) مع فلتر حالة اختياري، الأحدث أولًا."""
     from app.database.crud import accessible_user_ids
-    from app.database.crud import ORDER_STATUSES
 
     q = db.query(Note).filter(
         Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
@@ -152,7 +154,6 @@ def list_orders(
 def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: str) -> bool:
     """يغيّر حالة طلبية (open/done) — يعيد False إن لم توجد طلبية أو حالة غير صالحة."""
     from app.database.crud import _invalidate_caches, accessible_user_ids
-    from app.database.crud import ORDER_STATUSES
 
     if status not in ORDER_STATUSES:
         return False
@@ -168,7 +169,6 @@ def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: s
     )
     if note is None:
         return False
-    from app.timeutil import now_utc
 
     note.status = status
     note.updated_at = now_utc()

@@ -2,15 +2,21 @@
 الموازنات: إنشاء/استهلاك/إعادة تعيين شهري، ورصيد الأشخاص.
 """
 from decimal import Decimal, InvalidOperation
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from app.database.models import (
-    Budget, Transaction,
-)
-def _current_month_key() -> str:
-    from app.timeutil import now_local
 
-    return now_local().strftime("%Y-%m")
+from app.audit import log_audit
+from app.config import settings
+from app.database.models import (
+    Budget,
+    Transaction,
+)
+from app.exchange import CURRENCY_NAMES
+from app.formatting import current_month_key as _current_month_key
+from app.money import _unified_totals_for_rows
+from app.timeutil import now_local, to_utc_naive
+
 
 def create_budget(
     db: Session,
@@ -25,7 +31,6 @@ def create_budget(
     يعيد None إذا الميزانية موجودة مسبقًا (لكل مستخدم واحد لكل scope/هدف).
     """
     from app.database.crud import _clean_text, _invalidate_caches, normalize_currency
-    from app.database.crud import _current_month_key
 
 
     scope = (scope or "").lower().strip()
@@ -34,8 +39,6 @@ def create_budget(
     category = _clean_text(target) if scope == "category" else None
 
     if scope == "currency":
-        from app.exchange import CURRENCY_NAMES
-
         if currency is None or currency.upper() not in CURRENCY_NAMES:
             # عملة غير معروفة (normalize_currency تمرر النص كما هو) — رفضها
             # بدل إنشاء ميزانية لن تطابقها أي معاملة أبدًا (تبقى 0% للأبد).
@@ -97,12 +100,10 @@ def get_budget(db: Session, telegram_user_id: int, budget_id: int) -> Budget | N
 
 def delete_budget(db: Session, telegram_user_id: int, budget_id: int) -> bool:
     from app.database.crud import _invalidate_caches
-    from app.database.crud import get_budget
 
     budget = get_budget(db, telegram_user_id, budget_id)
     if not budget:
         return False
-    from app.audit import log_audit
 
     detail = f"scope={budget.scope} target={budget.person or budget.currency} limit={budget.monthly_limit}"
     db.delete(budget)
@@ -116,8 +117,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
 
     يعيد: {spent: Decimal, limit: Decimal, percent: float, over: bool}
     """
-    from app.timeutil import now_local, to_utc_naive
-    from app.database.crud import _unified_totals_for_rows, accessible_user_ids
+    from app.database.crud import accessible_user_ids
 
 
     local_now = now_local()
@@ -146,8 +146,6 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         # شخص/تصنيف بلا عملة: مبالغ العملات المتعددة تُحوَّل لعملة الأساس
         # (بالمبالغ المثبَّتة وقت التسجيل إن توفرت — الدقة التاريخية) بدل
         # جمع شيكل مع دولار في رقم واحد.
-        from app.config import settings
-
         unified = _unified_totals_for_rows(spent_rows, settings.base_currency)
         spent = unified["total"]
         if spent is None:
@@ -169,7 +167,6 @@ def budget_usage(db: Session, budget: Budget) -> dict:
 
 def budget_monthly_reset(db: Session, budget: Budget) -> bool:
     """يرجّع True إذا تغيّر الشهر ويجب إعادة ضبط حالة التنبيه."""
-    from app.database.crud import _current_month_key
     current_key = _current_month_key()
     if budget.month_key != current_key:
         budget.month_key = current_key
@@ -185,8 +182,7 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
     و balance_unified (بالعملة الأساس بدقة تاريخية عبر المبالغ المخزّنة) إن أمكن.
     balance = income - expense: موجب = يدين لك، سالب = تدين له.
     """
-    from app.config import settings
-    from app.database.crud import _unified_totals_for_rows, accessible_user_ids
+    from app.database.crud import accessible_user_ids
 
 
     base = (settings.base_currency or "").upper().strip()

@@ -77,6 +77,7 @@ def test_admin_stats_cached(monkeypatch):
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
+    from app import money
     from app.admin import build_admin_stats
     from app.database.db import Base
 
@@ -92,13 +93,13 @@ def test_admin_stats_cached(monkeypatch):
     db = SessionLocal()
 
     calls = {"n": 0}
-    real = crud._sum_amounts_by_currency
+    real = money._sum_amounts_by_currency
 
     def counting(rows):
         calls["n"] += 1
         return real(rows)
 
-    monkeypatch.setattr(crud, "_sum_amounts_by_currency", counting)
+    monkeypatch.setattr(money, "_sum_amounts_by_currency", counting)
 
     s1 = build_admin_stats(db)
     s2 = build_admin_stats(db)

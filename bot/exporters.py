@@ -5,10 +5,12 @@
 """
 
 import io
+from datetime import datetime
 from decimal import Decimal
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy.orm import Session
 
 from app.database.crud import accessible_user_ids
@@ -26,7 +28,7 @@ THIN_BORDER = Border(
 )
 
 
-def _style_header(ws, cols: int):
+def _style_header(ws: Worksheet, cols: int) -> None:
     for col in range(1, cols + 1):
         cell = ws.cell(row=1, column=col)
         cell.font = HEADER_FONT
@@ -35,7 +37,7 @@ def _style_header(ws, cols: int):
         cell.border = THIN_BORDER
 
 
-def _auto_width(ws):
+def _auto_width(ws: Worksheet) -> None:
     for col in ws.columns:
         max_len = 0
         col_letter = col[0].column_letter
@@ -48,8 +50,8 @@ def _auto_width(ws):
 def generate_transactions_excel(
     db: Session,
     telegram_user_id: int,
-    start_utc=None,
-    end_utc=None,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على المعاملات المالية لفترة محددة."""
     q = db.query(Transaction).filter(
@@ -75,7 +77,7 @@ def generate_transactions_excel(
     return buf
 
 
-def _write_transactions_sheet(ws, rows):
+def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
     """يكتب معاملات مالية في ورقة عمل (العناوين + الصفوف + الإجماليات)."""
     headers = ["التاريخ", "النوع", "المبلغ", "العملة", "الشخص", "التصنيف", "الوصف"]
     ws.append(headers)
@@ -155,7 +157,7 @@ def generate_tasks_excel(
     return buf
 
 
-def _write_tasks_sheet(ws, tasks):
+def _write_tasks_sheet(ws: Worksheet, tasks: list[Task]) -> None:
     """يكتب المهام في ورقة عمل."""
     headers = ["الحالة", "الوصف", "الشخص", "الموعد", "تاريخ الإنشاء"]
     ws.append(headers)
@@ -212,7 +214,7 @@ def generate_notes_excel(
     return buf
 
 
-def _write_notes_sheet(ws, notes):
+def _write_notes_sheet(ws: Worksheet, notes: list[Note]) -> None:
     """يكتب الطلبيات والملاحظات في ورقة عمل."""
     headers = ["النوع", "الوصف", "الشخص", "التصنيف", "تاريخ الإنشاء"]
     ws.append(headers)
@@ -241,8 +243,8 @@ def _write_notes_sheet(ws, notes):
 def generate_export_excel(
     db: Session,
     telegram_user_id: int,
-    start_utc=None,
-    end_utc=None,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
 ) -> io.BytesIO:
     """يولّد ملف Excel واحدًا بكل السجلات (معاملات + مهام + طلبيات/ملاحظات) لفترة محددة.
 
@@ -337,7 +339,7 @@ def _pdf_font() -> str:
 _pdf_font.cached = None
 
 
-def _pdf_text(value, font: str) -> str:
+def _pdf_text(value: str | None, font: str) -> str:
     """يعيد نصًا (قد يكون عربيًا) جاهزًا لعرض صحيح في PDF — تشكيل+اتجاه إن توفرت."""
     text = str(value or "")
     if font == "Helvetica" or not text.strip():
@@ -358,8 +360,8 @@ def _pdf_text(value, font: str) -> str:
 def generate_export_pdf(
     db: Session,
     telegram_user_id: int,
-    start_utc=None,
-    end_utc=None,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
 ) -> io.BytesIO:
     """يولّد ملف PDF واحدًا بكل السجلات (معاملات + مهام + طلبيات/ملاحظات).
 
@@ -421,7 +423,11 @@ def generate_export_pdf(
     body_style = ParagraphStyle("BodyRTL", parent=styles["BodyText"], fontSize=9, fontName=_FONT)
     cell_style = ParagraphStyle("CellRTL", parent=styles["BodyText"], fontSize=8, fontName=_FONT)
 
-    def _as_table(headers, rows, first_total_idx: int | None = None):
+    def _as_table(
+        headers: list[str],
+        rows: list[list[str]],
+        first_total_idx: int | None = None,
+    ) -> Table:
         data = [[Paragraph(_pdf_text(h, _FONT), cell_style) for h in headers]]
         for r in rows:
             data.append([Paragraph(_pdf_text(cell, _FONT), cell_style) for cell in r])

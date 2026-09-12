@@ -3,9 +3,14 @@
 """
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from sqlalchemy.orm import Session
-from app.cache import clear as clear_cache
+
 from dateutil import parser as date_parser
+from sqlalchemy.orm import Session
+
+from app.cache import clear as clear_cache
+from app.events import emit
+from app.timeutil import to_utc_naive
+
 CURRENCY_ALIASES = {
     "شيكل": "ILS",
     "الشيكل": "ILS",
@@ -40,7 +45,6 @@ MAX_DESCRIPTION_LEN = 500  # حد أقصى لطول النصوص الحرة (ا�
 
 def normalize_currency(raw: str | None) -> str | None:
     """يحوّل أي صيغة عملة إلى رمز ISO موحّد (ILS لشيقل، USD لدولار...)."""
-    from app.database.crud import CURRENCY_ALIASES
     if not raw:
         return None
     key = raw.strip().lower().replace(" ", "")
@@ -55,7 +59,6 @@ def normalize_currency(raw: str | None) -> str | None:
 
 def _clean_text(value) -> str | None:
     """ينظّف نصًا حرًا: يقلّص المسافات ويحدّ طوله (أو يعيد None)."""
-    from app.database.crud import MAX_DESCRIPTION_LEN
     if value is None:
         return None
     s = str(value).strip()
@@ -109,8 +112,6 @@ def parse_date_local(date_str: str) -> datetime | None:
     يتوافق مع كل إصدارات بايثون: نجرب أولاً صيغة صريحة "YYYY-MM-DD HH:MM[:SS]"
     ثم dateutil المرن. القيمة الناتجة تُعتبر بالتوقيت المحلي وتُرجع كـ UTC.
     """
-    from app.timeutil import to_utc_naive
-
     if not date_str:
         return None
     s = date_str.strip().replace("Z", "+00:00")
@@ -148,6 +149,4 @@ def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
 
     for uid in accessible_user_ids(db, telegram_user_id):
         clear_cache(f"run_query:{uid}")
-    from app.admin import clear_admin_cache
-
-    clear_admin_cache()
+    emit("data_written")  # admin يستمع لهذا الحدث لمسح كاش الإحصائيات

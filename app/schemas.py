@@ -11,6 +11,8 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.normalize import normalize_priority, normalize_recurrence
+
 
 def _to_str_or_none(value) -> str | None:
     """يحوّل أي قيمة إلى نص، أو None إذا كانت خالية/غير مناسبة."""
@@ -115,12 +117,7 @@ class AnalysisResultSchema(BaseModel):
         s = _to_str_or_none(v)
         if not s:
             return None
-        low = s.strip().lower()
-        if low in ("high", "عالية", "عالي", "عاجل", "مهم", "مستعجل"):
-            return "high"
-        if low in ("low", "منخفضة", "منخفض", "ضعيفة"):
-            return "low"
-        return "normal"
+        return normalize_priority(s)
 
     @field_validator("recurrence", mode="before")
     @classmethod
@@ -128,14 +125,7 @@ class AnalysisResultSchema(BaseModel):
         s = _to_str_or_none(v)
         if not s:
             return None
-        low = s.strip().lower()
-        if low in ("daily", "يومي", "يوم", "كل يوم"):
-            return "daily"
-        if low in ("weekly", "اسبوعي", "أسبوعي", "اسبوع", "كل اسبوع", "كل أسبوع"):
-            return "weekly"
-        if low in ("monthly", "شهري", "شهر", "كل شهر"):
-            return "monthly"
-        return None
+        return normalize_recurrence(s)
 
     @field_validator("amount", mode="before")
     @classmethod

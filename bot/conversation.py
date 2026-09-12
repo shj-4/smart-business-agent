@@ -12,7 +12,8 @@ import re
 from decimal import Decimal
 from decimal import InvalidOperation as DecimalInvalidOperation
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from sqlalchemy.orm import Session
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -39,6 +40,7 @@ from app.database.crud import (
     update_transaction,
 )
 from app.database.db import SessionLocal
+from app.normalize import normalize_priority
 from bot.formatters import (
     FIELD_LABELS,
     TYPE_NAMES,
@@ -113,19 +115,7 @@ def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | 
         result["currency"] = norm
         return result, None
     if field == "priority":
-        _P = {
-            "عالية": "high",
-            "عالي": "high",
-            "عاجل": "high",
-            "مهم": "high",
-            "منخفضة": "low",
-            "منخفض": "low",
-            "عادية": "normal",
-            "عادي": "normal",
-        }
-        result["priority"] = _P.get(
-            value, value.lower() if value.lower() in ("high", "normal", "low") else "normal"
-        )
+        result["priority"] = normalize_priority(value)
         return result, None
     if field == "date":
         from app.database.crud import parse_date_local
@@ -210,7 +200,7 @@ def parse_convert_text(raw: str) -> dict | None:
     return {"amount": amount, "from": codes[0], "to": codes[1]}
 
 
-async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """نص حر من زر "إضافة ميزانية" (عملة/شخص) → إنشاء الميزانية."""
     pending = context.user_data.pop("pending_budget", None)
     if not pending:
@@ -261,7 +251,7 @@ async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return None
 
 
-async def convert_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def convert_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """نص حر من زر "تحويل عملة" → تحويل وعرض الناتج."""
     context.user_data.pop("pending_convert", None)
     parsed = parse_convert_text(update.message.text)
@@ -292,7 +282,7 @@ async def convert_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return None
 
 
-async def workspace_invite_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def workspace_invite_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """نص حر من زر "إضافة عضو" → دعوة المعرّف الرقمي إلى المساحة المشتركة."""
     context.user_data.pop("pending_ws_invite", None)
     from bot.menus import MAIN_HOME_KEYBOARD
@@ -383,7 +373,13 @@ def can_save_record(result: dict) -> bool:
     return False
 
 
-def _do_save(db, telegram_user_id, result, raw_message, telegram_message_id=None):
+def _do_save(
+    db: Session,
+    telegram_user_id: int,
+    result: dict,
+    raw_message: str | None,
+    telegram_message_id: int | None = None,
+) -> str | None:
     data_type = result.get("type")
 
     if not can_save_record(result):
@@ -421,11 +417,17 @@ def _do_save(db, telegram_user_id, result, raw_message, telegram_message_id=None
     return None
 
 
-def save_record(db, telegram_user_id, result, raw_message, telegram_message_id=None):
+def save_record(
+    db: Session,
+    telegram_user_id: int,
+    result: dict,
+    raw_message: str | None,
+    telegram_message_id: int | None = None,
+) -> str | None:
     return _do_save(db, telegram_user_id, result, raw_message, telegram_message_id)
 
 
-def missing_fields_for(result: dict) -> list:
+def missing_fields_for(result: dict) -> list[str]:
     data_type = result.get("type")
     missing = []
 
@@ -459,7 +461,7 @@ def ask_for_field_prompt(data_type: str, field: str) -> str:
     return f"أرسل {label} من فضلك."
 
 
-def fill_field_from_reply(partial: dict, reply_result: dict, field: str):
+def fill_field_from_reply(partial: dict, reply_result: dict, field: str) -> None:
     if field == "amount":
         if reply_result.get("amount") is not None:
             partial["amount"] = reply_result["amount"]
@@ -492,7 +494,7 @@ def handle_query_intent(result: dict, telegram_user_id: int) -> str:
 
 async def _start_collect(
     update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, raw_text: str, msg_id: int
-):
+) -> None:
     """يخزّن التسجيل الناقص في user_data ويسأل المستخدم عن أول حقل ناقص."""
     data_type = result.get("type")
     missing = missing_fields_for(result)
@@ -527,7 +529,7 @@ def _send_confirm(
 
 async def _handle_record_result(
     update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, raw_text: str, msg_id: int
-):
+) -> int | None:
     """يوجّه نتيجة record: إنجاز فوري، جمع نواقص، أو شاشة تأكيد."""
     data_type = result.get("type")
 
@@ -561,7 +563,7 @@ async def _handle_record_result(
     return _send_confirm(update, context, result, raw_text, msg_id)
 
 
-async def _handle_query(update: Update, result: dict) -> int:
+async def _handle_query(update: Update, result: dict) -> None:
     reply = await asyncio.to_thread(handle_query_intent, result, update.effective_user.id)
     await safe_reply(update.message, reply)
     return None
@@ -570,7 +572,7 @@ async def _handle_query(update: Update, result: dict) -> int:
 # ---------- دخول المحادثة ----------
 
 
-async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """نقطة دخول النصوص: تعديل حقل التأكيد → تعديل مهمة → ميزانية → تحويل → جمع نواقص → تسجيل/استعلام."""
     if context.user_data.get("confirm_editing_field"):
         return await edit_confirm_field_value(update, context)
@@ -591,7 +593,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await fresh_entry(update, context)
 
 
-async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """يحلّل رسالة نصية جديدة ويوجّهها (تسجيل/استعلام/محادثة)."""
     # نوع صريح من زر "تسجيل عملية ← نوع" يُحتفظ به قبل مسح الحالة المعلّقة
     seed = context.user_data.pop("record_seed_type", None)
@@ -622,7 +624,7 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return None
 
 
-async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """يملأ الحقل الناقص من ردّ المستخدم (حالة COLLECT)."""
     partial = context.user_data.get("pending_record")
     data_type = context.user_data.get("pending_type")
@@ -696,7 +698,7 @@ class MediaTooLargeError(Exception):
     """الملف الصوتي يتجاوز الحد الأقصى المسموح."""
 
 
-def _check_file_size(message) -> None:
+def _check_file_size(message: Message) -> None:
     """يرمي MediaTooLargeError إذا حجم الملف يتجاوز الحد المسموح."""
     from app.config import settings
 
@@ -795,7 +797,7 @@ def _analyze_media_sync(
 MEDIA_FILTER = filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.PHOTO
 
 
-async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """نقطة دخول الوسائط: نسخ → تحليل → نفس مسار التسجيل/الاستعلام."""
     _clear_all_pending(context)
     telegram_user_id = update.effective_user.id
@@ -847,7 +849,9 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- التأكيد (أزرار InlineKeyboard) ----------
 
 
-async def _confirm_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE, accept: bool):
+async def _confirm_resolve(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, accept: bool
+) -> None:
     query = update.callback_query
     await query.answer()
 
@@ -881,15 +885,15 @@ async def _confirm_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE, a
     return None
 
 
-async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return await _confirm_resolve(update, context, accept=True)
 
 
-async def confirm_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return await _confirm_resolve(update, context, accept=False)
 
 
-async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """زر تعديل حقل في شاشة التأكيد → يعرض قائمة الحقول القابلة للتعديل."""
     query = update.callback_query
     await query.answer()
@@ -906,7 +910,7 @@ async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRM
 
 
-async def _reshow_confirm(query, context):
+async def _reshow_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> int:
     result = context.user_data.get("confirm_result") or {}
     await query.edit_message_text(
         _build_confirm_text(result), reply_markup=_build_confirm_keyboard()
@@ -914,7 +918,7 @@ async def _reshow_confirm(query, context):
     return CONFIRM
 
 
-async def confirm_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """اختيار حقل من شاشة تعديل التأكيد → يطلب القيمة الجديدة."""
     query = update.callback_query
     await query.answer()
@@ -934,7 +938,7 @@ async def confirm_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CONFIRM
 
 
-async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """قيمة حقل التعديل في شاشة التأكيد (رسالة نصية أثناء CONFIRM)."""
     result = context.user_data.get("confirm_result") or {}
     field = context.user_data.pop("confirm_editing_field", None)
@@ -951,7 +955,7 @@ async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT
     return CONFIRM
 
 
-async def task_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def task_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """تعديل وصف مهمة عبر زر القائمة (رسالة نصية خارج ConversationHandler)."""
     task_id = context.user_data.pop("pending_task_edit_id", None)
     if not task_id:
@@ -1005,33 +1009,19 @@ def _normalize_edit_value(field: str, raw: str) -> tuple[object, str | None]:
             return None, "عملة غير معروفة. جرّب: شيكل / دولار / دينار / يورو."
         return norm, None
     if field == "priority":
-        _P = {
-            "high": "high",
-            "normal": "normal",
-            "low": "low",
-            "عالية": "high",
-            "عالي": "high",
-            "عاجل": "high",
-            "مهم": "high",
-            "منخفضة": "low",
-            "منخفض": "low",
-            "عادية": "normal",
-            "عادي": "normal",
-        }
-        return _P.get(value, "normal"), None
+        return normalize_priority(value), None
     if field in ("due_date", "date"):
         from app.database.crud import parse_date_local
 
-        parsed = parse_date_local(value)
-        if parsed is None:
+        if parse_date_local(value) is None:
             return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"
-        return parsed, None
+        return value, None
     if not value:
         return None, "القيمة لا يمكن أن تكون فارغة."
     return value, None
 
 
-async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """تعديل حقل آخر سجل عبر زر القائمة (رسالة نصية خارج ConversationHandler)."""
     record_id = context.user_data.pop("pending_record_edit_id", None)
     model_name = context.user_data.pop("pending_record_edit_model", None)
@@ -1078,7 +1068,7 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return None
 
 
-async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """بحث في السجلات (رسالة نصية بعد زر "🔍 بحث"): يرد بنتائج صفحات بأزرار."""
     term = (update.message.text or "").strip()
     context.user_data.pop("pending_search", None)
@@ -1109,7 +1099,7 @@ async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return None
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _record_feedback(context, source="cancel", telegram_user_id=update.effective_user.id)
     _clear_all_pending(context)
     from bot.menus import MAIN_HOME_KEYBOARD

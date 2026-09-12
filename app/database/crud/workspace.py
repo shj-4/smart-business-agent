@@ -2,9 +2,12 @@
 مساحات العمل المشتركة: acquis التعريف، إنشاء/دعوة/إزالة/نقل الملكية، وفحص الصلاحيات.
 """
 from sqlalchemy.orm import Session
+
 from app.database.models import (
     WorkspaceMember,
 )
+
+
 def workspace_for_user(db: Session, telegram_user_id: int) -> int | None:
     """معرّف مساحة العمل التي ينتمي إليها المستخدم (أو None إن بقي فرديًا)."""
     row = (

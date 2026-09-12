@@ -2,13 +2,19 @@
 المهام: إنشاء/استعلام/استحقاق/تكرار، وترتيب حسب الأولوية (LIMIT مُقنَّن).
 """
 import calendar
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from sqlalchemy import case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from app.audit import log_audit
 from app.database.models import (
     Task,
 )
+from app.normalize import normalize_priority, normalize_recurrence
+from app.timeutil import now_utc, to_local_naive, to_utc_naive
+
 _PRIORITY_RANK = {"high": 0, "normal": 1, "low": 2}
 
 _MAX_DT = datetime.max
@@ -17,37 +23,11 @@ _TASK_FETCH_CAP = 500
 
 def _normalize_priority(value) -> str:
     """يقنن قيمة الأولوية إلى high|normal|low (الافتراضي normal)."""
-    from app.database.crud import _clean_text
-
-    v = (_clean_text(value) or "").lower()
-    if v in ("high", "عالية", "عالي", "عالى", "مهم", "عاجل", "مستعجل", "h"):
-        return "high"
-    if v in ("low", "منخفضة", "منخفض", "ضعيفة", "l", "عادية جدًا"):
-        return "low"
-    return "normal"
+    return normalize_priority(value)
 
 def _normalize_recurrence(value) -> str | None:
     """يقنن قيمة التكرار إلى daily|weekly|monthly أو None."""
-    from app.database.crud import _clean_text
-
-    v = (_clean_text(value) or "").lower()
-    mapping = {
-        "daily": "daily",
-        "يومي": "daily",
-        "كل يوم": "daily",
-        "يوم": "daily",
-        "weekly": "weekly",
-        "أسبوعي": "weekly",
-        "كل اسبوع": "weekly",
-        "كل أسبوع": "weekly",
-        "اسبوعي": "weekly",
-        "اسبوع": "weekly",
-        "monthly": "monthly",
-        "شهري": "monthly",
-        "كل شهر": "monthly",
-        "شهر": "monthly",
-    }
-    return mapping.get(v)
+    return normalize_recurrence(value)
 
 def create_task(
     db: Session,
@@ -56,8 +36,13 @@ def create_task(
     raw_message: str,
     telegram_message_id: int | None = None,
 ) -> Task | None:
-    from app.database.crud import _clean_person, _clean_text, _invalidate_caches, _is_duplicate_message, parse_date_local
-    from app.database.crud import _normalize_priority, _normalize_recurrence
+    from app.database.crud import (
+        _clean_person,
+        _clean_text,
+        _invalidate_caches,
+        _is_duplicate_message,
+        parse_date_local,
+    )
 
     if _is_duplicate_message(db, Task, telegram_user_id, telegram_message_id):
         return None
@@ -123,8 +108,13 @@ def _task_order_by():
 def list_pending_tasks(
     db: Session, telegram_user_id: int, person: str | None = None, limit: int = 50
 ):
-    from app.database.crud import accessible_user_ids
-    from app.database.crud import _TASK_FETCH_CAP, _person_filter, _priority_sort, _task_order_by
+    from app.database.crud import (
+        _TASK_FETCH_CAP,
+        _person_filter,
+        _priority_sort,
+        _task_order_by,
+        accessible_user_ids,
+    )
 
     filters = [
         Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
@@ -149,8 +139,13 @@ def list_overdue_tasks(
     # تُرجع المهام المسجَّلة كمتأخرة (status == "overdue") — بعد أن
     # يقوم mark_overdue_tasks بتحديثها. (لا نعتمد على status == "pending"
     # لأنه لا يأتي بالنتائج بعد التحديث.)
-    from app.database.crud import accessible_user_ids
-    from app.database.crud import _TASK_FETCH_CAP, _person_filter, _priority_sort, _task_order_by
+    from app.database.crud import (
+        _TASK_FETCH_CAP,
+        _person_filter,
+        _priority_sort,
+        _task_order_by,
+        accessible_user_ids,
+    )
 
     filters = [
         Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
@@ -170,7 +165,6 @@ def list_overdue_tasks(
     return _priority_sort(tasks)[:limit]
 
 def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
-    from app.timeutil import now_utc
     from app.database.crud import accessible_user_ids
 
 
@@ -191,8 +185,7 @@ def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
 
 def list_done_tasks(db: Session, telegram_user_id: int, person: str | None = None, limit: int = 50):
     """المهام المنجزة (للتصفح عبر القوائم) — الأحدث أولًا."""
-    from app.database.crud import accessible_user_ids
-    from app.database.crud import _person_filter
+    from app.database.crud import _person_filter, accessible_user_ids
 
     filters = [
         Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
@@ -209,8 +202,6 @@ def delete_task_by_id(db: Session, telegram_user_id: int, task_id: int) -> Task 
 
     أمن المساحة: أعضاء عاديون لا يحذفون (المرتكز أو الأفراد فقط).
     """
-    from app.audit import log_audit
-    from app.timeutil import now_utc
     from app.database.crud import _invalidate_caches, accessible_user_ids, can_manage_records
 
 
@@ -263,7 +254,6 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
 
 def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | None:
     from app.database.crud import _invalidate_caches, accessible_user_ids
-    from app.database.crud import _respawn_recurring_task
 
     task = (
         db.query(Task)
@@ -278,7 +268,6 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         task.status = "done"
         db.commit()
         db.refresh(task)
-        from app.audit import log_audit
 
         log_audit(
             telegram_user_id,
@@ -303,9 +292,6 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
     due = getattr(done_task, "due_date", None)
     if not rule or not due:
         return
-    from datetime import timedelta
-
-    from app.timeutil import to_local_naive, to_utc_naive
 
     try:
         local_due = to_local_naive(due)
@@ -347,12 +333,9 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
         return
     _invalidate_caches(db, telegram_user_id)
 
-def update_task(db: Session, row: Task, fields: dict) -> Task:
+def update_task(db: Session, row: Task, fields: dict[str, str]) -> Task:
     """يحدّث حقول محددة في مهمة."""
-    from app.audit import log_audit
-    from app.timeutil import now_utc
     from app.database.crud import _clean_person, _clean_text, _invalidate_caches, parse_date_local
-    from app.database.crud import _normalize_priority
 
 
     old = {

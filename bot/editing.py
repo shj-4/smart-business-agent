@@ -27,6 +27,8 @@ from app.database.crud import (
     update_transaction,
 )
 from app.database.db import SessionLocal
+from app.database.models import Note, Task, Transaction
+from app.normalize import normalize_priority
 
 logger = logging.getLogger(__name__)
 
@@ -52,27 +54,6 @@ FIELD_LABELS_AR = {
 }
 
 PRIORITY_LABELS_AR = {"high": "عالية ⚡", "normal": "عادية", "low": "منخفضة"}
-
-_PRIORITY_INPUTS = {
-    "عالية": "high",
-    "عالي": "high",
-    "عاجلة": "high",
-    "عاجل": "high",
-    "مهم": "high",
-    "مستعجل": "high",
-    "high": "high",
-    "منخفضة": "low",
-    "منخفض": "low",
-    "ضعيفة": "low",
-    "low": "low",
-    "عادية": "normal",
-    "عادي": "normal",
-    "normal": "normal",
-}
-
-
-def _normalize_priority_input(value: str) -> str:
-    return _PRIORITY_INPUTS.get(value.strip().lower(), "normal")
 
 
 # مرادفات حقول للمستخدم في نمط /fix
@@ -108,7 +89,7 @@ def _build_records_keyboard(records: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _build_fields_keyboard(record) -> InlineKeyboardMarkup:
+def _build_fields_keyboard(record: Task | Transaction | Note) -> InlineKeyboardMarkup:
     """يُنشئ أزرار InlineKeyboard لاختيار الحقول القابلة للتعديل."""
     model_name = type(record).__name__
     fields = EDITABLE_FIELDS.get(model_name, [])
@@ -120,7 +101,7 @@ def _build_fields_keyboard(record) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def _get_current_value(record, field: str) -> str:
+def _get_current_value(record: Task | Transaction | Note, field: str) -> str:
     """يجلب القيمة الحالية للحقل."""
     val = getattr(record, field, None)
     if val is None:
@@ -132,7 +113,7 @@ def _get_current_value(record, field: str) -> str:
     return str(val)
 
 
-def _format_record_info(record) -> str:
+def _format_record_info(record: Task | Transaction | Note) -> str:
     """يعرض معلومات السجل الحالي مع الحقول القابلة للتعديل."""
     model_name = type(record).__name__
     lines = [f"**{model_name}** — اختر حقلًا للتعديل:\n"]
@@ -162,7 +143,7 @@ def _format_record_info(record) -> str:
     return "\n".join(lines)
 
 
-async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """أمر /edit — يعرض آخر 10 سجلات كأزرار."""
     telegram_user_id = update.effective_user.id
     db = SessionLocal()
@@ -181,7 +162,7 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return EDIT_SELECT
 
 
-async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """أمر /fix — تعديل سريع لآخر سجل.
 
     - /fix → يعرض حقول آخر سجل للتعديل (كما /edit بدون اختيار).
@@ -230,7 +211,7 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return ConversationHandler.END
                 fields = {field: new_value}
                 if field == "priority":
-                    fields["priority"] = _normalize_priority_input(new_value)
+                    fields["priority"] = normalize_priority(new_value)
                 if model_name == "Transaction":
                     update_transaction(db, record, fields)
                 elif model_name == "Task":
@@ -256,7 +237,7 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return EDIT_FIELD
 
 
-async def edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """معالجة ضغط الزر على سجل محدد."""
     query = update.callback_query
     await query.answer()
@@ -295,7 +276,7 @@ async def edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     return EDIT_FIELD
 
 
-async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """معالجة ضغط الزر على حقل محدد."""
     query = update.callback_query
     await query.answer()
@@ -328,7 +309,7 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     return EDIT_FIELD
 
 
-async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """يستقبل القيمة الجديدة ويُحدّث السجل."""
     field = context.user_data.get("edit_field")
     model_name = context.user_data.get("edit_model")
@@ -364,7 +345,7 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
             update_transaction(db, record, fields)
         elif model_name == "Task":
             if field == "priority":
-                fields["priority"] = _normalize_priority_input(new_value)
+                fields["priority"] = normalize_priority(new_value)
             update_task(db, record, fields)
         elif model_name == "Note":
             update_note(db, record, fields)
@@ -381,7 +362,7 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """إلغاء محادثة التعديل."""
     for key in ("edit_record", "edit_model", "edit_id", "edit_field", "edit_records"):
         context.user_data.pop(key, None)

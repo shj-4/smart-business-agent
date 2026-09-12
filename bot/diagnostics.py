@@ -8,6 +8,8 @@
 import logging
 import sys
 
+from sqlalchemy.orm import Session
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ def _versions() -> list[dict]:
     ]
 
 
-def _db_check(db_session) -> dict:
+def _db_check(db_session: Session | None) -> dict:
     from sqlalchemy import text as sqlalchemy_text
 
     ok = False
@@ -46,7 +48,7 @@ def _db_check(db_session) -> dict:
     return {"ok": ok, "label": "قاعدة البيانات", "detail": detail}
 
 
-def _migration_check(db_session) -> dict:
+def _migration_check(db_session: Session | None) -> dict:
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from sqlalchemy import text
@@ -134,7 +136,7 @@ def _size_check() -> dict:
     return {"ok": True, "label": "حجم قاعدة البيانات", "detail": "—"}
 
 
-def run_health_checks(db_session=None) -> list[dict]:
+def run_health_checks(db_session: Session | None = None) -> list[dict]:
     """يعيد قائمة فحوصات {ok, warn?, label, detail} — كل بند مستقل بلا شبكة."""
     checks = [
         _db_check(db_session),
