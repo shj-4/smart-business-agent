@@ -4,6 +4,7 @@
 """
 
 import asyncio
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from app.database.crud import (
     delete_task_by_id,
     list_done_tasks,
 )
+from app.timeutil import now_utc
 from bot import menus
 from bot.conversation import (
     _confirm_editable_fields,
@@ -32,7 +34,7 @@ def _seed_task(db, desc="الاتصال بسامر", user=USER_A):
     return create_task(
         db,
         user,
-        {"description": desc, "person": "سامر", "date": "2026-09-10 10:00"},
+        {"description": desc, "person": "سامر", "date": (now_utc() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")},
         raw_message=f"مهمة {desc}",
     )
 
