@@ -4,7 +4,6 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -276,7 +275,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
     if start:
         q = q.filter(Transaction.created_at >= start)
     if person:
-        q = q.filter(Transaction.person.like(f"%{person}%"))
+        q = q.filter(Transaction.person == person)
 
     if metric == "total_expenses":
         expense_rows = q.filter(Transaction.type == "expense").all()
@@ -318,13 +317,13 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
-            Transaction.person.like(f"%{person}%"),
+            Transaction.person == person,
         )
         q_expense = db.query(Transaction).filter(
             Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
-            Transaction.person.like(f"%{person}%"),
+            Transaction.person == person,
         )
         if start:
             q_income = q_income.filter(Transaction.created_at >= start)
@@ -374,7 +373,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 Transaction.created_at < hi,
             )
             if person:
-                qq = qq.filter(Transaction.person.like(f"%{person}%"))
+                qq = qq.filter(Transaction.person == person)
             return _sum_amounts_by_currency(qq.all())
 
         cur_lo, cur_hi = ranges["current"]
@@ -667,7 +666,7 @@ def search_records(
     وsaturated=True إن امتلأت النافذة أو أوقفنا البحث عند بلوغ الحد (قد توجد
     سجلات أقدم/مطابقة أخرى لم تُفحص) — ليُبلَّغ المستخدم أن البحث جزئي.
     """
-    from app.database.crud import _like_escape, accessible_user_ids
+    from app.database.crud import accessible_user_ids
 
     needle = (term or "").strip().lower()
     if not needle:
@@ -683,35 +682,51 @@ def search_records(
         "order": "طلبية",
         "note": "ملاحظة",
     }
-    pattern = f"%{_like_escape(needle)}%"
-    matched = set()  # (اسم النموذج, id) — منع الازدواج بين مرحلتَي الاستعلام
+    matched = set()  # (اسم النموذج, id) — منع الازدواج
     matches: list[dict] = []
     models = (Transaction, Task, Note)
 
-    def _plain_conds(model) -> list:
-        conds = []
+    def _plain_match(r, model) -> bool:
+        # النص العادي (person/category + تسمية النوع) — بلا قراءة الحقول المشفّرة
         for attr in ("person", "category"):
-            col = getattr(model, attr, None)
-            if col is not None:
-                conds.append(func.lower(col).like(pattern, escape="\\"))
-        label_col = getattr(model, "note_type", None) or getattr(model, "type", None)
-        if label_col is not None:
-            for code, label in kinds.items():
-                if needle in label:
-                    conds.append(label_col == code)
-        return conds
+            if getattr(model, attr, None) is None:
+                continue
+            if needle in (getattr(r, attr) or "").lower():
+                return True
+        label = kinds.get(getattr(r, "note_type", None) or getattr(r, "type", None) or "", "")
+        return bool(label) and needle in label
 
-    # 1) مطابقة النص العادي داخل نافذة الأحدث — بلا فك تشفير
+    def _encrypted_match(r) -> bool:
+        parts = [
+            (str(getattr(r, "amount", "") or "")),
+            (r.description or ""),
+            (r.raw_message or ""),
+        ]
+        if getattr(r, "note_type", None):
+            parts.append(kinds.get(r.note_type, r.note_type))
+        if getattr(r, "type", None) in kinds:
+            parts.append(kinds[r.type])
+        return any(needle in (p or "").lower() for p in parts)
+
+    def _add(model, r):
+        key = (model.__name__, r.id)
+        if key in matched:
+            return
+        matched.add(key)
+        matches.append(_search_row_result(r, model))
+
+    # نافذة الأحدث تُقرأ مرة واحدة لكل نموذج: يُفحص النص العادي أولًا (بلا فك
+    # تشفير)، وإن بلغنا الحد توقفنا مبكرًا. الحقول المشفّرة تُفحص على النافذة
+    # نفسها فقط حين تقصر النتائج — لا إعادة قراءة لذات النافذة ثانيةً.
     for model in models:
-        conds = _plain_conds(model)
-        if not conds:
-            continue
+        if len(matches) >= limit:
+            saturated = True
+            break
         rows = (
             db.query(model)
             .filter(
                 model.telegram_user_id.in_(accessible),
                 model.deleted_at.is_(None),
-                or_(*conds),
             )
             .order_by(model.created_at.desc())
             .limit(per_model)
@@ -719,44 +734,17 @@ def search_records(
         )
         if len(rows) == per_model:
             saturated = True
+        pending = []
         for r in rows:
-            matched.add((model.__name__, r.id))
-            matches.append(_search_row_result(r, model))
-
-    # 2) عند الحاجة فقط: فحص نافذة الأحدث في Python للمطابقة على الحقول المشفّرة
-    if len(matches) < limit:
-        for model in models:
-            rows = (
-                db.query(model)
-                .filter(
-                    model.telegram_user_id.in_(accessible),
-                    model.deleted_at.is_(None),
-                )
-                .order_by(model.created_at.desc())
-                .limit(per_model)
-                .all()
-            )
-            if len(rows) == per_model:
-                saturated = True
-            for r in rows:
-                if (model.__name__, r.id) in matched:
-                    continue
-                haystack_parts = [
-                    (r.person or ""),
-                    (getattr(r, "category", "") or ""),
-                    (str(getattr(r, "amount", "") or "")),
-                    (r.description or ""),
-                    (r.raw_message or ""),
-                ]
-                if getattr(r, "note_type", None):
-                    haystack_parts.append(kinds.get(r.note_type, r.note_type))
-                if getattr(r, "type", None) in kinds:
-                    haystack_parts.append(kinds[r.type])
-                if any(needle in (part or "").lower() for part in haystack_parts):
-                    matches.append(_search_row_result(r, model))
-    else:
-        # بلوغ الحد عبر النص العادي دون مسح الوصف المشفّر → النتائج جزئية
-        saturated = True
+            if _plain_match(r, model):
+                _add(model, r)
+            else:
+                pending.append(r)
+        for r in pending:
+            if len(matches) >= limit:
+                break
+            if _encrypted_match(r):
+                _add(model, r)
 
     matches.sort(key=lambda c: c["created_at"], reverse=True)
     result = matches[:limit]
@@ -816,7 +804,7 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
             elif key == "person":
                 row.person = _clean_person(fields[key])
             elif key == "description":
-                row.description = _clean_text(fields[key]) or row.description
+                row.description = _clean_text(fields[key])
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)

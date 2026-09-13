@@ -96,7 +96,8 @@ class Settings(BaseSettings):
     dashboard_password: str = Field(
         default="",
         description="كلمة مرور لوحة التحكم و /api/* — إن تُركت فارغة تُولَّد كلمة "
-        "مرور مؤقتة عند كل إقلاع وتُطبع في سجل التشغيل.",
+        "مرور مؤقتة عند كل إقلاع وتُحفظ في ملف منفصل (data/dashboard_credentials.txt) "
+        "بصلاحيات 0600 — لا تُكتب في السجلات.",
     )
 
     @field_validator("admin_user_ids", mode="before")

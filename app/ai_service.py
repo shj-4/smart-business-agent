@@ -43,8 +43,12 @@ INJECTION_PATTERNS = (
     "أهمل التعليمات",
     "لا تتبع تعليماتك",
     "تجاوز التعليمات",
-    "أنت الآن",
-    "you are now",
+    "تظاهر بأنك",
+    "تصرّف كأنك",
+    "مساعد خبيث",
+    "you are now a",
+    "you are now an",
+    "you are now the",
     "pretend you are",
     "roleplay as",
     "act as system",
@@ -340,6 +344,11 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         return {"intent": "chat", "injection_guard": True, "type": "unknown", "raw": transcript[:200]}
 
     try:
+        user_prompt = (
+            "استخرج بيانات الفاتورة من هذا المستند (PDF):"
+            if mime_type == "application/pdf"
+            else "استخرج بيانات الفاتورة من هذه الصورة:"
+        )
         response = retry(
             stop=_RETRY_STOP,
             wait=_RETRY_WAIT,
@@ -347,7 +356,7 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         )(
             lambda: _call_gemini(
                 contents=[
-                    "استخرج بيانات الفاتورة من هذه الصورة:",
+                    user_prompt,
                     types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 ],
                 config={"safety_settings": [], "system_instruction": RECEIPT_SYSTEM_PROMPT},

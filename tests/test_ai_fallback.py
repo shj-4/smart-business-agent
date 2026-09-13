@@ -9,6 +9,7 @@
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.ai_service import analyze_message, analyze_receipt_image
@@ -171,3 +172,40 @@ class TestMediaImageBranch:
             kind, text, result = _analyze_media_sync(b"jpg", "image/jpeg", "فاتورة (صورة)")
         assert text == ""
         assert kind == "فاتورة (صورة)"
+
+    def test_pdf_document_routes_to_receipt_reader(self):
+        """مستند PDF يُعالَج كفاتورة عبر نفس analyzer مع mime_type=application/pdf."""
+        from bot.conversation import _analyze_media_sync
+
+        with patch("bot.conversation.analyze_receipt_image") as mock_receipt:
+            mock_receipt.return_value = {
+                "intent": "record",
+                "type": "expense",
+                "amount": 150.0,
+                "currency": "ILS",
+                "person": "شركة الكهرباء",
+                "description": "فاتورة شهرية",
+            }
+            kind, text, result = _analyze_media_sync(b"%PDF-1.4fake", "application/pdf", "فاتورة (PDF)")
+            mock_receipt.assert_called_once_with(b"%PDF-1.4fake", mime_type="application/pdf")
+        assert kind == "فاتورة (PDF)"
+        assert "شركة الكهرباء" in text
+        assert result["type"] == "expense"
+
+    def test_pdf_receipt_analysis_reaches_gemini_with_pdf_mime(self):
+        """analyze_receipt_image يستقبل بايتات PDF ويبنّي الطلب بنفس مكتبة الـ MIME."""
+        from app.ai_service import analyze_receipt_image
+
+        pdf_bytes = b"%PDF-1.4\nfake"
+        with patch("app.ai_service._call_gemini") as mock_call:
+            mock_call.return_value = SimpleNamespace(text='{"type": "expense"}')
+            with patch(
+                "app.ai_service._parse_json", return_value={"intent": "record", "type": "expense"}
+            ):
+                with patch("app.schemas.normalize_analysis", side_effect=lambda x: x):
+                    result = analyze_receipt_image(pdf_bytes, mime_type="application/pdf")
+        assert result["type"] == "expense"
+        assert mock_call.call_count == 2  # استخراج نص للحارس + التحليل
+        content = mock_call.call_args.kwargs["contents"]
+        part = content[1]
+        assert part.inline_data.mime_type == "application/pdf"

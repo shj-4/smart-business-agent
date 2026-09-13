@@ -23,6 +23,7 @@ class TestInjectionGuard:
         assert not has_injection_pattern("المفروض أدفع 300 لمورد مواد")
         assert not has_injection_pattern("ادفع للمحل كل شهر قبل يوم 5")
         assert not has_injection_pattern("شو المهام المتأخرة؟")
+        assert not has_injection_pattern("أنت الآن مدين لي 500 شيكل")
 
     def test_analyze_message_routes_injection_to_chat(self, monkeypatch):
         def _fail_when_called(*args, **kwargs):

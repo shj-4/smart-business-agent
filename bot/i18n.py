@@ -30,6 +30,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "btn_budget": {"ar": "💰 الميزانيات", "en": "💰 Budgets"},
     "btn_chart": {"ar": "📈 الرسم البياني", "en": "📈 Chart"},
     "btn_export": {"ar": "📦 تصدير Excel", "en": "📦 Export Excel"},
+    "btn_export_pdf": {"ar": "📄 تصدير PDF", "en": "📄 Export PDF"},
+    "btn_summary": {"ar": "🧾 تقرير شامل", "en": "🧾 Summary report"},
     "btn_convert": {"ar": "💱 تحويل عملة", "en": "💱 Convert currency"},
     "btn_workspace": {"ar": "🏢 المساحة المشتركة", "en": "🏢 Shared workspace"},
     "btn_search": {"ar": "🔍 بحث", "en": "🔍 Search"},

@@ -38,7 +38,7 @@ from app.database.crud import (
     search_records,
 )
 from app.database.db import SessionLocal
-from app.database.models import Budget, Task
+from app.database.models import Budget, Note, Task, Transaction
 from app.timeutil import to_local_naive
 from bot.conversation import _clear_all_pending
 from bot.formatters import format_query_result
@@ -146,6 +146,8 @@ TOOLS_MENU = [
     [("🛒 طلبياتي", "tool:orders")],
     [("⚠️ الحدود الائتمانية", "tool:credit")],
     [("📈 الرسم البياني", "tool:chart")],
+    [("🧾 تقرير شامل", "tool:summary")],
+    [("📄 تصدير PDF", "tool:pdf")],
     [("📦 تصدير Excel", "ex:menu")],
     [("💱 تحويل عملة", "tool:convert")],
     [("🏢 المساحة المشتركة", "ws:status")],
@@ -186,6 +188,8 @@ def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [("sb:start", t("btn_search", lang))],
         [("bg:list", t("btn_budget", lang))],
         [("tool:chart", t("btn_chart", lang))],
+        [("tool:summary", t("btn_summary", lang))],
+        [("tool:pdf", t("btn_export_pdf", lang))],
         [("ex:menu", t("btn_export", lang))],
         [("tool:convert", t("btn_convert", lang))],
         [("ws:status", t("btn_workspace", lang))],
@@ -597,13 +601,24 @@ async def _handle_budget(
 async def _workspace_status(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    from app.database.crud import list_workspace
+    from app.database.crud import list_workspace, pending_workspace_invite
 
     uid = query.from_user.id
     db = SessionLocal()
     try:
         info = list_workspace(db, uid)
-        if info is None:
+        invite_wid = pending_workspace_invite(db, uid)
+        if info is None and invite_wid is not None:
+            text = (
+                f"📩 لديك دعوة انضمام إلى مساحة عمل #{invite_wid}.\n\n"
+                "بقبولك تُدمج بيانات الطرفين (ترى بيانات المالك ويراها هو). "
+                "لا يُنفَّذ أي دمج قبل موافقتك الصريحة."
+            )
+            rows = [
+                [("✅ قبول الدعوة", f"ws:accept:{invite_wid}")],
+                [("❌ رفض الدعوة", f"ws:decline:{invite_wid}")],
+            ]
+        elif info is None:
             text = (
                 "لا تملك مساحة مشتركة بعد.\n\n"
                 "مع المساحة المشتركة يرى جميع الأعضاء نفس الأرقام "
@@ -619,6 +634,11 @@ async def _workspace_status(
                 f"الأعضاء ({len(info['members'])}):\n{members}\n\n"
                 "يعمل الجميع على سجل واحد مشترك."
             )
+            if info["owner"] and info["pending"]:
+                text += (
+                    "\n\n⏳ دعوات بانتظار القبول:\n"
+                    + "\n".join(f"• {m}" for m in info["pending"])
+                )
             rows = [
                 [("👥 إدارة الأعضاء", "ws:members")],
                 [("➕ إضافة عضو", "ws:add")],
@@ -650,6 +670,12 @@ async def _workspace_members(
             rows = []
             if info["owner"]:
                 rows = [[("❌ إخراج " + str(m), f"ws:rm:{m}")] for m in info["members"] if m != uid]
+                if info["pending"]:
+                    text += (
+                        "\n\n⏳ دعوات معلّقة بانتظار القبول:\n"
+                        + "\n".join(f"• {m}" for m in info["pending"])
+                    )
+                    rows += [[("🕒 إلغاء " + str(m), f"ws:rm:{m}")] for m in info["pending"]]
             rows.append([("⬅️ رجوع للمساحة", "ws:status")])
     finally:
         db.close()
@@ -713,6 +739,40 @@ async def _workspace_remove(
     await _workspace_members(query, context)
 
 
+async def _workspace_accept(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, workspace_id: str
+) -> None:
+    from app.database.crud import accept_workspace_invite
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = accept_workspace_invite(db, uid, int(workspace_id))
+        await query.answer(
+            "✅ انضممت إلى المساحة المشتركة — بياناتكما أصبحت مشتركة الآن."
+            if ok
+            else "لا توجد دعوة بهذا المعرّف."
+        )
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
+async def _workspace_decline(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, workspace_id: str
+) -> None:
+    from app.database.crud import decline_workspace_invite
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = decline_workspace_invite(db, uid, int(workspace_id))
+        await query.answer("تم رفض الدعوة." if ok else "لا توجد دعوة بهذا المعرّف.")
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
 async def _handle_workspace(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
 ) -> None:
@@ -725,6 +785,10 @@ async def _handle_workspace(
         await _workspace_leave(query, context)
     elif act == "members":
         await _workspace_members(query, context)
+    elif act == "accept" and len(parts) > 1:
+        await _workspace_accept(query, context, parts[1])
+    elif act == "decline" and len(parts) > 1:
+        await _workspace_decline(query, context, parts[1])
     elif act == "rm" and len(parts) > 1:
         await _workspace_remove(query, context, parts[1])
     else:
@@ -785,12 +849,144 @@ async def _handle_tool(
     act = parts[0] if parts else ""
     if act == "chart":
         await _handle_tool_chart(query, context)
+    elif act == "summary":
+        await _handle_tool_summary(query, context)
+    elif act == "pdf":
+        await _handle_tool_pdf(query, context)
     elif act == "convert":
         await _handle_tool_convert(query, context)
     elif act in ("debts", "invoices", "orders", "credit"):
         await _tool_lists(query, context, act)
     else:
         await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
+
+
+async def _handle_tool_summary(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """تقرير شامل نصي: إحصاءات عامة + خلاصة الشهر بالعملة الأساس."""
+    from decimal import Decimal
+
+    from sqlalchemy import func
+
+    from app.config import settings
+    from app.database.crud import accessible_user_ids
+    from app.exchange import convert_totals_to_base
+    from app.timeutil import now_local, to_utc_naive
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ids = accessible_user_ids(db, uid)
+        filters_tx = (
+            Transaction.telegram_user_id.in_(ids),
+            Transaction.deleted_at.is_(None),
+        )
+        tx_count = db.query(func.count(Transaction.id)).filter(*filters_tx).scalar()
+        task_count = (
+            db.query(func.count(Task.id))
+            .filter(Task.telegram_user_id.in_(ids), Task.deleted_at.is_(None))
+            .scalar()
+        )
+        overdue = (
+            db.query(func.count(Task.id))
+            .filter(
+                Task.telegram_user_id.in_(ids),
+                Task.deleted_at.is_(None),
+                Task.status == "overdue",
+            )
+            .scalar()
+        )
+        order_count = (
+            db.query(func.count(Note.id))
+            .filter(
+                Note.telegram_user_id.in_(ids),
+                Note.deleted_at.is_(None),
+                Note.note_type == "order",
+            )
+            .scalar()
+        )
+        base = (settings.base_currency or "ILS").upper()
+        local_now = now_local()
+        start = to_utc_naive(
+            local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        agg: dict = {}
+        for rtype, currency, amount in db.query(
+            Transaction.type,
+            Transaction.currency,
+            Transaction.amount,
+        ).filter(*filters_tx, Transaction.created_at >= start).all():
+            c = (currency or "").upper()
+            entry = agg.setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            kind = "expense" if rtype == "expense" else "income"
+            entry[kind] += amount or Decimal("0")
+        exp_conv = convert_totals_to_base(
+            {c: agg[c]["expense"] for c in agg if agg[c]["expense"]}, base
+        )
+        inc_conv = convert_totals_to_base(
+            {c: agg[c]["income"] for c in agg if agg[c]["income"]}, base
+        )
+        total_expense = exp_conv.get("total")
+        total_income = inc_conv.get("total")
+        expense = total_expense if total_expense is not None else Decimal("0")
+        income = total_income if total_income is not None else Decimal("0")
+    finally:
+        db.close()
+
+    text = (
+        f"🧾 التقرير الشامل — {local_now.strftime('%Y-%m-%d')}\n"
+        "──────────\n"
+        f"📊 المعاملات: {tx_count}\n"
+        f"📝 المهام: {task_count} ({overdue} متأخرة)\n"
+        f"🛒 الطلبيات: {order_count}\n"
+        "──────────\n"
+        f"💰 خلاصة الشهر ({base}):\n"
+        f"المصروفات: {float(expense):,.2f}\n"
+        f"الإيرادات: {float(income):,.2f}\n"
+        f"الصافي: {float(income - expense):,.2f}"
+    )
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_tool_pdf(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """يولّد ملف PDF شامل (معاملات + مهام + طلبيات/ملاحظات) ويرسله كملف."""
+    from bot.exporters import generate_export_pdf
+
+    uid = query.from_user.id
+
+    def _gen() -> io.BytesIO | None:
+        db = SessionLocal()
+        try:
+            return generate_export_pdf(db, uid)
+        finally:
+            db.close()
+
+    try:
+        buf = await asyncio.to_thread(_gen)
+    except Exception:
+        logger.exception("خطأ في توليد PDF من قائمة الأدوات")
+        await query.edit_message_text(
+            "حدث خطأ أثناء توليد ملف PDF (reportlab غير متوفر؟). جرّب تصدير Excel.",
+            reply_markup=_home_keyboard(),
+        )
+        return
+
+    if buf is None:
+        await query.edit_message_text("لم يُولَّد الملف.", reply_markup=_home_keyboard())
+        return
+
+    await query.message.reply_chat_action("upload_document")
+    await query.message.reply_document(
+        document=buf,
+        filename="تقرير شامل.pdf",
+        caption="📄 تقرير PDF شامل — معاملات + مهام + طلبيات وملاحظات",
+    )
+    await query.edit_message_text("تم إرسال ملف PDF ✅", reply_markup=_home_keyboard())
 
 
 async def _tool_lists(

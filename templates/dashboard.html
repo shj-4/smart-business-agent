@@ -1,99 +1,75 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم الأعمال</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Segoe UI', Tahoma, sans-serif;
-            background: #f0f2f5;
-            color: #1a1a1a;
-            padding: 20px;
-        }
-        .container { max-width: 1100px; margin: 0 auto; }
-        h1 { margin-bottom: 20px; font-size: 24px; }
-        .cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 25px;
-        }
-        .card {
-            background: #fff;
-            border-radius: 10px;
-            padding: 18px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .card .num { font-size: 28px; font-weight: bold; }
-        .card .label { color: #666; margin-top: 4px; }
-        .card.green .num { color: #16a34a; }
-        .card.red .num { color: #dc2626; }
-        .card.blue .num { color: #2563eb; }
+{% extends "base.html" %}
+{% block title %}لوحة تحكم الأعمال{% endblock %}
+{% block content %}
+<h1>لوحة تحكم الأعمال</h1>
 
-        .panel {
-            background: #fff;
-            border-radius: 10px;
-            padding: 18px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .panel h2 { font-size: 18px; margin-bottom: 12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #eee; }
-        th { background: #f8fafc; color: #475569; font-weight: 600; }
-        .badge {
-            display: inline-block;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-size: 12px;
-        }
-        .badge.expense { background: #fee2e2; color: #b91c1c; }
-        .badge.income { background: #dcfce7; color: #15803d; }
-        .badge.pending { background: #fef9c3; color: #a16207; }
-        .badge.overdue { background: #fee2e2; color: #b91c1c; }
-        .badge.done { background: #dcfce7; color: #15803d; }
-        .time { color: #8b8b8b; font-size: 12px; }
-        .nav-links a {
-            margin-left: 15px;
-            color: #2563eb;
-            text-decoration: none;
-        }
-        .empty { color: #888; padding: 15px; text-align: center; }
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>لوحة تحكم الأعمال</h1>
-    <div class="nav-links">
-        <a href="/dashboard">الرئيسية</a>
-        <a href="/dashboard/transactions">المعاملات</a>
-        <a href="/dashboard/tasks">المهام</a>
-        <a href="/dashboard/notes">الملاحظات</a>
-        <a href="/dashboard/budgets">الميزانيات</a>
-    </div>
+<div class="alert success">خلاصة الشهر الحالي — العملة الأساس: <strong>{{ base_currency }}</strong>
+    <span class="export-links" style="margin-inline-start:12px">
+        <a href="/dashboard/export?fmt=xlsx">📦 تصدير Excel</a>
+        <a href="/dashboard/export?fmt=pdf">📄 تصدير PDF</a>
+    </span>
+</div>
 
-    <div class="cards">
-        <div class="card green"><div class="num">{{ counts.transactions }}</div><div class="label">عدد العمليات</div></div>
-        <div class="card blue"><div class="num">{{ counts.tasks }}</div><div class="label">المهام</div></div>
-        <div class="card red"><div class="num">{{ counts.notes }}</div><div class="label">الملاحظات</div></div>
-        <div class="card"><div class="num">{{ counts.users }}</div><div class="label">المستخدمون</div></div>
-    </div>
+<div class="cards">
+    <div class="card blue"><div class="num">{{ counts.transactions }}</div><div class="label">عدد العمليات</div></div>
+    <div class="card red"><div class="num">{{ month_cards.expense }}</div><div class="label">مصروفات الشهر</div></div>
+    <div class="card green"><div class="num">{{ month_cards.income }}</div><div class="label">إيرادات الشهر</div></div>
+    <div class="card {{ month_cards.net_cls }}"><div class="num">{{ month_cards.net }}</div><div class="label">صافي الشهر</div></div>
+    <div class="card"><div class="num">{{ counts.tasks }}</div><div class="label">المهام</div></div>
+    <div class="card"><div class="num">{{ counts.notes }}</div><div class="label">الملاحظات</div></div>
+    <div class="card"><div class="num">{{ counts.users }}</div><div class="label">المستخدمون</div></div>
+    <div class="card amber"><div class="num">{{ counts.overdue }}</div><div class="label">مهام متأخرة</div></div>
+</div>
 
+{% if chart_url %}
+<div class="panel">
+    <h2>الإيرادات مقابل المصاريف — آخر {{ chart_months }} أشهر</h2>
+    <img class="chart-img" src="{{ chart_url }}" alt="الرسم البياني الشهري">
+</div>
+{% endif %}
+
+<div class="grid-2">
     <div class="panel">
-        <h2>آخر المعاملات</h2>
-        {% if transactions %}
+        <h2>أعلى تصنيفات المصاريف (هذا الشهر)</h2>
+        {% if top_categories %}
+        <ul class="top-list">
+            {% for c in top_categories %}
+            <li><span>{{ c.category }}</span><span class="amt">{{ c.amount }}</span></li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty">لا توجد مصروفات هذا الشهر بعد.</div>
+        {% endif %}
+    </div>
+    <div class="panel">
+        <h2>أبرز الأطراف (عملاء/موردون)</h2>
+        {% if top_parties %}
+        <ul class="top-list">
+            {% for p in top_parties %}
+            <li><span>{{ p.person }}</span><span class="amt">{{ p.net }}</span></li>
+            {% endfor %}
+        </ul>
+        <p style="margin-top:10px"><a class="btn-link" href="/dashboard/customers">عرض كل الأطراف</a></p>
+        {% else %}
+        <div class="empty">لا توجد أطراف مسجلة بعد.</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="panel">
+    <h2>آخر المعاملات</h2>
+    {% if transactions %}
+    <div style="overflow-x:auto;">
         <table>
             <thead>
-                <tr><th>التاريخ</th><th>النوع</th><th>المبلغ</th><th>العملة</th><th>الشخص</th><th>التصنيف</th><th>الوصف</th></tr>
+                <tr><th>التاريخ</th><th>النوع</th><th class="num-col">المبلغ</th><th>العملة</th><th>الشخص</th><th>التصنيف</th><th>الوصف</th></tr>
             </thead>
             <tbody>
             {% for t in transactions %}
                 <tr>
-                    <td class="time">{{ t.date }}</td>
+                    <td class="nowrap">{{ t.date }}</td>
                     <td><span class="badge {{ t.type }}">{{ 'مصروف' if t.type == 'expense' else 'إيراد' }}</span></td>
-                    <td>{{ t.amount }}</td>
+                    <td class="num-col">{{ t.amount }}</td>
                     <td>{{ t.currency or '' }}</td>
                     <td>{{ t.person or '' }}</td>
                     <td>{{ t.category or '' }}</td>
@@ -102,14 +78,16 @@
             {% endfor %}
             </tbody>
         </table>
-        {% else %}
-        <div class="empty">لا توجد معاملات مالية بعد.</div>
-        {% endif %}
     </div>
+    {% else %}
+    <div class="empty">لا توجد معاملات مالية بعد.</div>
+    {% endif %}
+</div>
 
-    <div class="panel">
-        <h2>المهام المتأخرة</h2>
-        {% if overdue_tasks %}
+<div class="panel">
+    <h2>المهام المتأخرة</h2>
+    {% if overdue_tasks %}
+    <div style="overflow-x:auto;">
         <table>
             <thead>
                 <tr><th>الوصف</th><th>الشخص</th><th>الموعد</th><th>الحالة</th></tr>
@@ -119,20 +97,22 @@
                 <tr>
                     <td>{{ t.description }}</td>
                     <td>{{ t.person or '' }}</td>
-                    <td class="time">{{ t.due_date or '' }}</td>
+                    <td class="nowrap">{{ t.due_date or '' }}</td>
                     <td><span class="badge overdue">متأخرة</span></td>
                 </tr>
             {% endfor %}
             </tbody>
         </table>
-        {% else %}
-        <div class="empty">لا توجد مهام متأخرة. ممتاز!</div>
-        {% endif %}
     </div>
+    {% else %}
+    <div class="empty">لا توجد مهام متأخرة. ممتاز!</div>
+    {% endif %}
+</div>
 
-    <div class="panel">
-        <h2>آخر الملاحظات</h2>
-        {% if notes %}
+<div class="panel">
+    <h2>آخر الملاحظات</h2>
+    {% if notes %}
+    <div style="overflow-x:auto;">
         <table>
             <thead>
                 <tr><th>التاريخ</th><th>النوع</th><th>الوصف</th><th>الشخص</th></tr>
@@ -140,18 +120,17 @@
             <tbody>
             {% for n in notes %}
                 <tr>
-                    <td class="time">{{ n.date }}</td>
-                    <td>{{ 'طلبية' if n.note_type == 'order' else 'ملاحظة' }}</td>
+                    <td class="nowrap">{{ n.date }}</td>
+                    <td><span class="badge {{ 'order' if n.note_type == 'order' else 'note' }}">{{ 'طلبية' if n.note_type == 'order' else 'ملاحظة' }}</span></td>
                     <td>{{ n.description }}</td>
                     <td>{{ n.person or '' }}</td>
                 </tr>
             {% endfor %}
             </tbody>
         </table>
-        {% else %}
-        <div class="empty">لا توجد ملاحظات بعد.</div>
-        {% endif %}
     </div>
+    {% else %}
+    <div class="empty">لا توجد ملاحظات بعد.</div>
+    {% endif %}
 </div>
-</body>
-</html>
+{% endblock %}

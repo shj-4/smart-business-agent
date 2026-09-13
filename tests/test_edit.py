@@ -179,6 +179,18 @@ class TestUpdateNote:
         assert updated.description == "مستلزمات محدثة"
         assert updated.updated_at is not None
 
+    def test_clears_description_with_empty_string(self, db_session):
+        """تفريغ الوصف (مسافة/فارغ) يُخلي الحقل فعلًا — description nullable=True."""
+        _, _, note = _seed_all(db_session)
+        updated = update_note(db_session, note, {"description": " "})
+        assert updated.description is None
+
+    def test_null_value_keeps_unchanged(self, db_session):
+        """None = «لا تغيير» — الحراسة تستبعده قبل معالجة الحقل."""
+        _, _, note = _seed_all(db_session)
+        updated = update_note(db_session, note, {"description": None})
+        assert updated.description == "مستلزمات مكتبية"
+
     def test_ignores_invalid_field(self, db_session):
         _, _, note = _seed_all(db_session)
         updated = update_note(db_session, note, {"nonexistent": "x"})

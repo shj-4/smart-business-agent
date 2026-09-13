@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}لوحة تحكم الأعمال{% endblock %}</title>
+    <style>
+        :root {
+            --bg: #f1f5f9;
+            --surface: #ffffff;
+            --line: #e2e8f0;
+            --text: #0f172a;
+            --muted: #64748b;
+            --primary: #2563eb;
+            --primary-weak: #eff6ff;
+            --green: #16a34a;
+            --green-weak: #dcfce7;
+            --red: #dc2626;
+            --red-weak: #fee2e2;
+            --amber: #d97706;
+            --amber-weak: #fef3c7;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', 'Tahoma', 'Arial', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+        .topbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .topbar-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .brand { font-weight: 700; font-size: 18px; color: var(--primary); }
+        .nav { display: flex; gap: 4px; flex-wrap: wrap; }
+        .nav a {
+            color: var(--muted);
+            text-decoration: none;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 14px;
+            transition: background 0.15s, color 0.15s;
+        }
+        .nav a:hover { background: var(--primary-weak); color: var(--primary); }
+        .nav a.active { background: var(--primary); color: #fff; }
+        .container { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
+        h1 { font-size: 22px; margin-bottom: 18px; }
+        h2 { font-size: 17px; margin-bottom: 12px; }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px;
+            margin-bottom: 22px;
+        }
+        .card {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 18px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--line);
+        }
+        .card .num { font-size: 26px; font-weight: 700; }
+        .card .label { color: var(--muted); font-size: 13px; margin-top: 4px; }
+        .card.green .num { color: var(--green); }
+        .card.red .num { color: var(--red); }
+        .card.blue .num { color: var(--primary); }
+        .card.amber .num { color: var(--amber); }
+
+        .panel {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 18px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--line);
+            margin-bottom: 20px;
+        }
+        .panel-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .count { color: var(--muted); font-size: 13px; }
+
+        .filters {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+            background: var(--surface);
+            padding: 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--line);
+        }
+        .filters input[type="search"],
+        .filters select,
+        .filters input[type="text"] {
+            padding: 8px 12px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+            color: var(--text);
+            min-width: 180px;
+        }
+        .filters button {
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 18px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .filters button:hover { filter: brightness(1.05); }
+
+        .export-links a, .btn-link {
+            display: inline-block;
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            text-decoration: none;
+            border: 1px solid var(--line);
+            background: #fff;
+            color: var(--primary);
+        }
+        .export-links a:hover { background: var(--primary-weak); }
+
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--line); }
+        th { background: #f8fafc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+        tr:hover td { background: #f8fafc; }
+        .nowrap { white-space: nowrap; }
+        .num-col { text-align: left; font-variant-numeric: tabular-nums; }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge.expense { background: var(--red-weak); color: var(--red); }
+        .badge.income { background: var(--green-weak); color: var(--green); }
+        .badge.pending { background: var(--amber-weak); color: var(--amber); }
+        .badge.overdue { background: var(--red-weak); color: var(--red); }
+        .badge.done { background: var(--green-weak); color: var(--green); }
+        .badge.order { background: var(--primary-weak); color: var(--primary); }
+        .badge.note { background: #f1f5f9; color: var(--muted); }
+        .badge.neutral { background: #f1f5f9; color: var(--muted); }
+
+        .pagination {
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+        .pagination a, .pagination span {
+            display: inline-block;
+            min-width: 34px;
+            text-align: center;
+            padding: 6px 10px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 13px;
+            border: 1px solid var(--line);
+            color: var(--text);
+            background: #fff;
+        }
+        .pagination a:hover { border-color: var(--primary); color: var(--primary); }
+        .pagination .current { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .pagination .gap { border: none; background: transparent; }
+
+        .empty { color: var(--muted); padding: 22px; text-align: center; }
+
+        .status { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+        .status.ok { background: var(--green-weak); color: var(--green); }
+        .status.warn { background: var(--amber-weak); color: var(--amber); }
+        .status.over { background: var(--red-weak); color: var(--red); }
+
+        .budget-card {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .budget-card .target { font-weight: 600; font-size: 15px; margin-bottom: 8px; }
+        .progress {
+            background: var(--line);
+            border-radius: 20px;
+            height: 12px;
+            margin: 8px 0;
+            overflow: hidden;
+        }
+        .progress .fill {
+            height: 100%;
+            border-radius: 20px;
+            background: var(--primary);
+            transition: width 0.3s;
+        }
+        .progress .fill.warn { background: var(--amber); }
+        .progress .fill.over { background: var(--red); }
+        .meta { color: var(--muted); font-size: 13px; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+        .chart-img { width: 100%; height: auto; border-radius: 8px; }
+
+        .top-list { list-style: none; }
+        .top-list li {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--line);
+            font-size: 14px;
+        }
+        .top-list li:last-child { border-bottom: none; }
+        .top-list .amt { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            border: 1px solid var(--line);
+        }
+        .alert.success { background: var(--green-weak); color: #15803d; border-color: #bbf7d0; }
+        .alert.error { background: var(--red-weak); color: #b91c1c; border-color: #fecaca; }
+
+        .merge-form { display: inline-flex; gap: 6px; align-items: center; margin-top: 6px; }
+        .merge-form input, .merge-form button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+        .merge-form button { background: var(--red-weak); color: #b91c1c; cursor: pointer; border-color: #fecaca; }
+    </style>
+</head>
+<body>
+<header class="topbar">
+    <div class="topbar-inner">
+        <div class="brand">💼 لوحة تحكم الأعمال</div>
+        <nav class="nav">
+            <a href="/dashboard" class="{{ 'active' if active == 'home' }}">الرئيسية</a>
+            <a href="/dashboard/transactions" class="{{ 'active' if active == 'transactions' }}">المعاملات</a>
+            <a href="/dashboard/customers" class="{{ 'active' if active == 'customers' }}">الأطراف</a>
+            <a href="/dashboard/tasks" class="{{ 'active' if active == 'tasks' }}">المهام</a>
+            <a href="/dashboard/notes" class="{{ 'active' if active == 'notes' }}">الطلبيات والملاحظات</a>
+            <a href="/dashboard/budgets" class="{{ 'active' if active == 'budgets' }}">الميزانيات</a>
+        </nav>
+    </div>
+</header>
+<main class="container">
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

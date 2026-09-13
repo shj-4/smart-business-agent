@@ -117,7 +117,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
 
     يعيد: {spent: Decimal, limit: Decimal, percent: float, over: bool}
     """
-    from app.database.crud import accessible_user_ids
+    from app.database.crud import _like_escape, accessible_user_ids
 
 
     local_now = now_local()
@@ -133,9 +133,9 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     if budget.scope == "currency":
         q = q.filter(Transaction.currency == budget.currency)
     elif budget.scope == "category":
-        q = q.filter(Transaction.category.like(f"%{budget.category}%"))
+        q = q.filter(Transaction.category.like(f"%{_like_escape(budget.category)}%", escape="\\"))
     else:
-        q = q.filter(Transaction.person.like(f"%{budget.person}%"))
+        q = q.filter(Transaction.person == budget.person)
 
     spent_rows = q.all()
 

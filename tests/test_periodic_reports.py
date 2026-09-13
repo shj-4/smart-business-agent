@@ -386,6 +386,31 @@ class TestChart:
         assert generate_monthly_chart(db_session, USER_A) is None
 
 
+class TestGlobalChart:
+    """الرسم العمومي للوحة التحكم (كل المستخدمين)."""
+
+    def test_returns_none_without_data(self, db_session):
+        from app.charts import generate_global_monthly_chart
+
+        assert generate_global_monthly_chart(db_session) is None
+
+    def test_returns_png_bytes_when_data_exists(self, db_session):
+        from app.charts import generate_global_monthly_chart
+        from app.timeutil import now_local, to_utc_naive
+
+        start = to_utc_naive(now_local().replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+        _add_transaction(
+            db_session,
+            USER_A,
+            tx_type="expense",
+            amount=120,
+            dt_utc=start + timedelta(hours=2),
+        )
+        buf = generate_global_monthly_chart(db_session, months=6)
+        assert buf is not None
+        assert buf.getvalue().startswith(b"\x89PNG")
+
+
 # ---------- رسالة تأكيد /report_on ----------
 
 
@@ -601,11 +626,17 @@ class TestBudgetCommandScope:
 class TestBudgetAlertBroadcast:
     def test_alert_sent_to_all_workspace_members(self, db_session, monkeypatch):
         import bot.reminders as reminders
-        from app.database.crud import create_budget, create_workspace, invite_to_workspace
+        from app.database.crud import (
+            accept_workspace_invite,
+            create_budget,
+            create_workspace,
+            invite_to_workspace,
+        )
 
         owner, partner = 700, 800
         create_workspace(db_session, owner)
         invite_to_workspace(db_session, owner, partner)
+        accept_workspace_invite(db_session, partner, owner)
         budget = create_budget(db_session, owner, "person", "محمد", "100")
         budget.alerted_status = 0
         db_session.commit()

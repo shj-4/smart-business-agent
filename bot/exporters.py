@@ -28,6 +28,24 @@ THIN_BORDER = Border(
 )
 
 
+def _scope_ids(db: Session, telegram_user_id: int | None) -> list[int]:
+    """يعيد معرّفات المستخدمين المسموح تضمينهم في التصدير.
+
+    عند None (لوحة التحكم: تقرير شامل) تعود كل المعرّفات الموجودة في الجداول.
+    عند رقم: معرّف المستخدم + أعضاء مساحته عبر accessible_user_ids.
+    """
+    if telegram_user_id is not None:
+        return accessible_user_ids(db, telegram_user_id)
+    ids = {
+        rid
+        for (rid,) in db.query(Transaction.telegram_user_id).all()
+        if rid is not None
+    }
+    ids.update(rid for (rid,) in db.query(Task.telegram_user_id).all() if rid is not None)
+    ids.update(rid for (rid,) in db.query(Note.telegram_user_id).all() if rid is not None)
+    return list(ids) or [-1]
+
+
 def _style_header(ws: Worksheet, cols: int) -> None:
     for col in range(1, cols + 1):
         cell = ws.cell(row=1, column=col)
@@ -49,13 +67,13 @@ def _auto_width(ws: Worksheet) -> None:
 
 def generate_transactions_excel(
     db: Session,
-    telegram_user_id: int,
+    telegram_user_id: int | None,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على المعاملات المالية لفترة محددة."""
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
         Transaction.deleted_at.is_(None),
     )
     if start_utc:
@@ -128,17 +146,18 @@ def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
 
 def generate_tasks_excel(
     db: Session,
-    telegram_user_id: int,
+    telegram_user_id: int | None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على المهام (pending + overdue + done)."""
     from app.database.crud import mark_overdue_tasks
 
-    mark_overdue_tasks(db, telegram_user_id)
+    if telegram_user_id is not None:
+        mark_overdue_tasks(db, telegram_user_id)
 
     tasks = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Task.deleted_at.is_(None),
         )
         .order_by(Task.due_date.asc().nulls_last())
@@ -189,13 +208,13 @@ def _write_tasks_sheet(ws: Worksheet, tasks: list[Task]) -> None:
 
 def generate_notes_excel(
     db: Session,
-    telegram_user_id: int,
+    telegram_user_id: int | None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على الطلبيات والملاحظات."""
     notes = (
         db.query(Note)
         .filter(
-            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Note.deleted_at.is_(None),
         )
         .order_by(Note.created_at.desc())
@@ -242,7 +261,7 @@ def _write_notes_sheet(ws: Worksheet, notes: list[Note]) -> None:
 
 def generate_export_excel(
     db: Session,
-    telegram_user_id: int,
+    telegram_user_id: int | None,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
 ) -> io.BytesIO:
@@ -255,7 +274,7 @@ def generate_export_excel(
 
     # المعاملات ضمن الفترة
     tq = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
         Transaction.deleted_at.is_(None),
     )
     if start_utc:
@@ -264,11 +283,12 @@ def generate_export_excel(
         tq = tq.filter(Transaction.created_at <= end_utc)
     transactions = tq.order_by(Transaction.created_at.desc()).all()
 
-    mark_overdue_tasks(db, telegram_user_id)
+    if telegram_user_id is not None:
+        mark_overdue_tasks(db, telegram_user_id)
     tasks = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Task.deleted_at.is_(None),
         )
         .order_by(Task.due_date.asc().nulls_last())
@@ -278,7 +298,7 @@ def generate_export_excel(
     notes = (
         db.query(Note)
         .filter(
-            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Note.deleted_at.is_(None),
         )
         .order_by(Note.created_at.desc())
@@ -359,7 +379,7 @@ def _pdf_text(value: str | None, font: str) -> str:
 
 def generate_export_pdf(
     db: Session,
-    telegram_user_id: int,
+    telegram_user_id: int | None,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
 ) -> io.BytesIO:
@@ -386,7 +406,7 @@ def generate_export_pdf(
     _FONT = _pdf_font()
 
     tq = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
         Transaction.deleted_at.is_(None),
     )
     if start_utc:
@@ -395,11 +415,12 @@ def generate_export_pdf(
         tq = tq.filter(Transaction.created_at <= end_utc)
     transactions = tq.order_by(Transaction.created_at.desc()).all()
 
-    mark_overdue_tasks(db, telegram_user_id)
+    if telegram_user_id is not None:
+        mark_overdue_tasks(db, telegram_user_id)
     tasks = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Task.deleted_at.is_(None),
         )
         .order_by(Task.due_date.asc().nulls_last())
@@ -408,7 +429,7 @@ def generate_export_pdf(
     notes = (
         db.query(Note)
         .filter(
-            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
             Note.deleted_at.is_(None),
         )
         .order_by(Note.created_at.desc())

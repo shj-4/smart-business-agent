@@ -61,8 +61,6 @@ CONFIRM = 2  # ننتظر تأكيد/إلغاء (أزرار InlineKeyboard)
 
 _AMOUNT_RE = re.compile(r"(?P<num>\d+(?:[.,]\d+)?)\s*(?P<cur>[\u0600-\u06FF\w]+)?")
 
-CONFIRM_EDITABLE_FIELDS = ["amount", "currency", "person", "description", "category", "date"]
-
 # النوع (من نتيجة التحليل) → نموذج /edit (نفس حقول محادثة /edit)
 _CONFIRM_TYPE_MODEL = {
     "expense": "Transaction",
@@ -303,11 +301,15 @@ async def workspace_invite_value(update: Update, context: ContextTypes.DEFAULT_T
         db.close()
     if ok:
         await update.message.reply_text(
-            f"✅ أُضيف العضو {digits} إلى مساحتك المشتركة.", reply_markup=MAIN_HOME_KEYBOARD
+            f"✅ أُرسلت دعوة للعضو {digits} إلى مساحتك المشتركة.\n"
+            "لن تُدمج بياناتكما حتى يقبل الطرف الدعوة بنفسه "
+            "(سيراها في قائمة المساحة المشتركة أو عبر /work).",
+            reply_markup=MAIN_HOME_KEYBOARD,
         )
     else:
         await update.message.reply_text(
-            "تعذّرت الإضافة: ربما لست المرتكز (المالك)، أو أرسلت معرّفك الخاص.",
+            "تعذّرت الدعوة: لست المرتكز (المالك)، أو أرسلت معرّفك الخاص، "
+            "أو الطرف عضو نشط في مساحة أخرى (لا سحب دون موافقته).",
             reply_markup=MAIN_HOME_KEYBOARD,
         )
     return None
@@ -712,6 +714,8 @@ def _check_file_size(message: Message) -> None:
         file_size = message.video_note.file_size or 0
     elif message.photo:
         file_size = (message.photo[-1].file_size or 0) if message.photo else 0
+    elif message.document:
+        file_size = message.document.file_size or 0
     if file_size and file_size > limit_bytes:
         raise MediaTooLargeError(
             f"حجم الملف ({file_size // (1024 * 1024)}MB) يتجاوز الحد الأقصى "
@@ -757,6 +761,13 @@ async def _extract_media(update: Update) -> tuple[bytes | None, str | None, str]
         file = await photo.get_file()
         data = await file.download_as_bytearray()
         return bytes(data), "image/jpeg", "فاتورة (صورة)"
+    if message.document:
+        # مستند PDF = فاتورة/إيصال رقمي محتمل
+        doc = message.document
+        file = await doc.get_file()
+        data = await file.download_as_bytearray()
+        mime = doc.mime_type or "application/pdf"
+        return bytes(data), mime, "فاتورة (PDF)"
     return None, None, ""
 
 
@@ -785,7 +796,7 @@ def _analyze_media_sync(
 
     يعيد (نص, نوع الوسيط, نتيجة التحليل أو None إن لم يُفهم).
     """
-    if mime and mime.startswith("image/"):
+    if mime and (mime.startswith("image/") or mime == "application/pdf"):
         result = analyze_receipt_image(media_bytes, mime_type=mime)
         return media_kind, _receipt_to_text(result), result
     text = transcribe_audio(media_bytes, mime_type=mime) if media_bytes else ""
@@ -794,7 +805,7 @@ def _analyze_media_sync(
     return media_kind, text, analyze_message(text)
 
 
-MEDIA_FILTER = filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.PHOTO
+MEDIA_FILTER = filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.PHOTO | filters.Document.PDF
 
 
 async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:

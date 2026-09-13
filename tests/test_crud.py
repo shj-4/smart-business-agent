@@ -544,6 +544,38 @@ class TestSearchRecordsWindow:
         hits2, _ = search_records(db_session, USER_A, "خ_صم", return_meta=True)
         assert hits2 == []
 
+    def test_reads_recent_window_once_when_results_sufficient(self, db_session):
+        """عند بلوغ الحد نصيًا تُقرأ نافذة الأحدث مرة واحدة فقط لكل نموذج
+        (SELECT واحد على transactions) — لا إعادة قراءة للنافذة نفسها."""
+        from sqlalchemy import event as sa_event
+
+        for i in range(30):
+            create_transaction(
+                db_session,
+                USER_A,
+                {"type": "expense", "amount": 1, "currency": "ILS", "person": f"مورد {i}"},
+                raw_message="دفعة",
+            )
+        create_note(db_session, USER_A, {"description": "شيء آخر", "note_type": "note"}, raw_message="n")
+        create_task(db_session, USER_A, {"description": "شيء آخر"}, raw_message="t")
+
+        counts = {"transactions": 0}
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            flat = statement.lower().replace("\n", " ")
+            if statement.lstrip().upper().startswith("SELECT") and " from transactions " in flat:
+                counts["transactions"] += 1
+
+        sa_event.listen(db_session.bind, "before_cursor_execute", _count)
+        try:
+            hits, meta = search_records(db_session, USER_A, "مورد", return_meta=True, limit=10)
+        finally:
+            sa_event.remove(db_session.bind, "before_cursor_execute", _count)
+
+        assert len(hits) == 10
+        assert meta["saturated"] is True
+        assert counts["transactions"] == 1
+
 
 # ---------- الفواتير الآجلة (#22) ----------
 
@@ -851,6 +883,105 @@ class TestBudgetPersonScopeCurrency:
         assert usage["percent"] == 40.0
 
 
+# ---------- دقة أسماء الأشخاص خارج search_records (#3/#4) ----------
+
+
+class TestPersonMatchPrecision:
+    """لا خلط بين أشخاص مختلفين في الحسابات المالية:
+    3) % و _ المحارف البدل تهرَّب (للتصنيف في الميزانية).
+    4) مطابقة الأشخاص تامة (==) — «علي» لا يطابق «عبدالعلي»."""
+
+    PRECISE = "الرجل_الغامض"
+    OTHER = "الرجلXالغامض"  # "_" المطابق لحرف واحد في LIKE غير مهرّب
+
+    def _base_expenses(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 400, "currency": "ILS", "person": self.PRECISE},
+            "دفعة للاسم الحرفي",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 999, "currency": "ILS", "person": self.OTHER},
+            "دفعة للاسم المختلف",
+        )
+
+    def test_credit_usage_exact_match(self, db_session):
+        self._base_expenses(db_session)
+        row = set_credit_limit(db_session, USER_A, self.PRECISE, "1000")
+        usage = credit_usage(db_session, row)
+        assert usage["outstanding"] == Decimal("400.00")
+        assert usage["limit"] == Decimal("1000.00")
+
+    def test_budget_person_exact_match(self, db_session, monkeypatch):
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount))},
+        )
+        self._base_expenses(db_session)
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "person", self.PRECISE, "5000")
+        assert budget_usage(db_session, budget)["spent"] == Decimal("400.00")
+
+    def test_budget_category_escapes_wildcards(self, db_session):
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "category", "خصم_50%", "5000")
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "ILS", "category": "خصم_50%"},
+            "خصم حرفي",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 200, "currency": "ILS", "category": "خصمX50Y"},
+            "تصنيف مختلف",
+        )
+        assert budget_usage(db_session, budget)["spent"] == Decimal("100.00")
+
+    def test_task_person_filter_exact_match(self, db_session):
+        create_task(
+            db_session, USER_A, {"description": "مهمة دقيقة", "person": self.PRECISE}, raw_message="t1"
+        )
+        create_task(
+            db_session, USER_A, {"description": "مهمة غامضة", "person": self.OTHER}, raw_message="t2"
+        )
+        tasks = list_pending_tasks(db_session, USER_A, person=self.PRECISE)
+        assert [t.description for t in tasks] == ["مهمة دقيقة"]
+
+    def test_prefix_names_do_not_mix(self, db_session, monkeypatch):
+        """«علي» لا يطابق «عبدالعلي» في السقف الائتماني والميزانية والقياس."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount))},
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "علي"}, "و"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "عبدالعلي"}, "ع"
+        )
+        row = set_credit_limit(db_session, USER_A, "علي", "500")
+        assert credit_usage(db_session, row)["outstanding"] == Decimal("100.00")
+
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "person", "علي", "1000")
+        assert budget_usage(db_session, budget)["spent"] == Decimal("100.00")
+
+        metric = run_query(
+            db_session,
+            USER_A,
+            {"metric": "total_expenses", "period": "all_time", "person": "علي"},
+        )
+        assert metric["result"] == {"ILS": Decimal("100.00")}
+
+
 # ---------- سعر الصرف المثبَّت وقت التسجيل (#25) ----------
 
 
@@ -1099,16 +1230,24 @@ class TestTaskPriorityRecurrence:
 
 class TestWorkspaceRoleGates:
     def test_can_manage_records_individual_and_owner(self, db_session):
-        from app.database.crud import can_manage_records, create_workspace, invite_to_workspace
+        from app.database.crud import (
+            accept_workspace_invite,
+            can_manage_records,
+            create_workspace,
+            invite_to_workspace,
+        )
 
         assert can_manage_records(db_session, USER_A) is True
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        assert can_manage_records(db_session, USER_B) is True  # معلّق — لا يزال فرديًا
+        accept_workspace_invite(db_session, USER_B, USER_A)
         assert can_manage_records(db_session, USER_A) is True
         assert can_manage_records(db_session, USER_B) is False
 
     def test_member_undo_denied_owner_allowed(self, db_session):
         from app.database.crud import (
+            accept_workspace_invite,
             create_workspace,
             invite_to_workspace,
             leave_workspace,
@@ -1116,6 +1255,7 @@ class TestWorkspaceRoleGates:
 
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        accept_workspace_invite(db_session, USER_B, USER_A)
         create_transaction(
             db_session,
             USER_B,
@@ -1130,6 +1270,7 @@ class TestWorkspaceRoleGates:
 
     def test_member_task_delete_denied(self, db_session):
         from app.database.crud import (
+            accept_workspace_invite,
             create_workspace,
             delete_task_by_id,
             invite_to_workspace,
@@ -1138,6 +1279,7 @@ class TestWorkspaceRoleGates:
 
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        accept_workspace_invite(db_session, USER_B, USER_A)
         task = create_task(db_session, USER_B, {"description": "مهمة الشريك"}, raw_message="مهمة")
         assert delete_task_by_id(db_session, USER_B, task.id) is None
         assert list_pending_tasks(db_session, USER_B)[0].id == task.id

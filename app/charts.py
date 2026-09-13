@@ -106,10 +106,37 @@ def generate_monthly_chart(
     if all_zero:
         return None
 
-    # إعداد الشكل
     labels = [label for label, _ in converted]
     expenses = [float(res["expense"] or 0) for _, res in converted]
     incomes = [float(res["income"] or 0) for _, res in converted]
+
+    return _render_monthly_png(labels, incomes, expenses, months, base)
+
+
+def _render_monthly_png(
+    labels: list[str],
+    incomes: list[float],
+    expenses: list[float],
+    months: int,
+    base: str,
+):
+    """يرسم أعمدة الإيرادات/المصاريف ويصدر PNG (أو None عند فشل الحفظ)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from matplotlib import font_manager
+    from matplotlib import pyplot as plt
+
+    try:
+        available = {f.name for f in font_manager.fontManager.ttflist}
+        for candidate in ("Segoe UI", "Tahoma", "Arial", "DejaVu Sans"):
+            if candidate in available:
+                plt.rcParams["font.family"] = [candidate]
+                break
+    except Exception:
+        logger.debug("تعذر ضبط خط الرسم، نستخدم الافتراضي.")
+    plt.rcParams["axes.unicode_minus"] = False
 
     x_pos = range(len(labels))
     width = 0.38
@@ -151,3 +178,97 @@ def generate_monthly_chart(
 
     buf.seek(0)
     return buf
+
+
+def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None):
+    """مجموع الشهور الستة الأخيرة لجميع المستخدمين (لوحة التحكم) بعملاتها الخام.
+
+    يعيد (buckets, base) حيث كل صندوق: {ym, by_currency, stored, stored_base}.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+
+    from app.config import settings
+    from app.database.models import Transaction
+    from app.timeutil import now_local, to_local_naive, to_utc_naive
+
+    months = max(1, int(months))
+    base = (base_currency or settings.base_currency or "").upper().strip()
+    local_now = now_local()
+    pairs = []
+    y, m = local_now.year, local_now.month
+    for _ in range(months):
+        pairs.append((y, m))
+        if m == 1:
+            y, m = y - 1, 12
+        else:
+            m -= 1
+    pairs.reverse()
+    start = to_utc_naive(datetime(pairs[0][0], pairs[0][1], 1))
+
+    rows = (
+        db.query(
+            Transaction.created_at,
+            Transaction.type,
+            Transaction.currency,
+            Transaction.amount,
+            Transaction.amount_in_base_currency,
+            Transaction.base_currency_at_creation,
+        )
+        .filter(Transaction.deleted_at.is_(None), Transaction.created_at >= start)
+        .all()
+    )
+
+    buckets = []
+    for (yy, mm) in pairs:
+        buckets.append(
+            {
+                "ym": (yy, mm),
+                "by_currency": {},
+                "stored": {},
+                "stored_base": base,
+            }
+        )
+    index = {b["ym"]: b for b in buckets}
+    for created_at, rtype, currency, amount, stored, stored_base in rows:
+        local = to_local_naive(created_at)
+        bucket = index.get((local.year, local.month))
+        if bucket is None:
+            continue
+        c = (currency or "").upper()
+        kind = "expense" if rtype == "expense" else "income"
+        entry = bucket["by_currency"].setdefault(
+            c, {"expense": Decimal("0"), "income": Decimal("0")}
+        )
+        entry[kind] = entry.get(kind, Decimal("0")) + (amount or Decimal("0"))
+        if stored is not None and stored_base == base and c:
+            stored_entry = bucket["stored"].setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            stored_entry[kind] = stored_entry.get(kind, Decimal("0")) + stored
+    return buckets, base
+
+
+def generate_global_monthly_chart(db, months: int | None = None, base_currency: str | None = None):
+    """مثل generate_monthly_chart لكن لكل المستخدمين (لوحة التحكم) — لا فلتر معرّف."""
+    from app.config import settings
+
+    months = months or settings.chart_months
+    buckets, base = _global_monthly_raw(db, months, base_currency)
+
+    converted = []
+    all_zero = True
+    for b in buckets:
+        stored = b["stored"] if b["stored_base"] == base else None
+        res = _convert_month_currency_groups(b["by_currency"], base, stored=stored or None)
+        converted.append((b["ym"], res))
+        if (res["expense"] or 0) != 0 or (res["income"] or 0) != 0:
+            all_zero = False
+
+    if all_zero:
+        return None
+
+    labels = [f"{y}-{m:02d}" for (y, m), _ in converted]
+    expenses = [float(res["expense"] or 0) for _, res in converted]
+    incomes = [float(res["income"] or 0) for _, res in converted]
+    return _render_monthly_png(labels, incomes, expenses, months, base)

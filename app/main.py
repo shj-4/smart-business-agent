@@ -9,24 +9,29 @@ setup_services.ps1. لوحة التحكم محتاجة ملفات قوالب ف�
 """
 
 import base64
+import io
 import logging
 import os
 import secrets
+import urllib.parse
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.audit import setup_audit_log
 from app.cache import start_sweeper
+from app.charts import _convert_month_currency_groups, generate_global_monthly_chart
 from app.config import TELEGRAM_BOT_TOKEN, settings
 from app.database.db import engine, get_db
-from app.database.models import Budget, Note, Task, Transaction
+from app.database.models import Budget, Invoice, Note, Task, Transaction, WorkspaceMember
+from app.exchange import convert_totals_to_base
 from app.sentry import install_sentry
-from app.timeutil import to_local_naive
+from app.timeutil import now_local, to_local_naive
 
 setup_audit_log()
 start_sweeper()
@@ -53,16 +58,41 @@ PERIOD_NAMES = {
 
 logger = logging.getLogger("app.dashboard")
 
-_DASHBOARD_USERNAME = settings.dashboard_username or "admin"
-_DASHBOARD_PASSWORD = settings.dashboard_password
-if not _DASHBOARD_PASSWORD:
-    _DASHBOARD_PASSWORD = secrets.token_urlsafe(18)
-    logger.warning(
-        "DASHBOARD_PASSWORD غير مضبوط في .env — حُدِّدت كلمة مرور مؤقتة للوحة/API: %s "
-        "(ضع DASHBOARD_PASSWORD في .env لثباتها عبر عمليات إعادة التشغيل، والمستخدم الافتراضي: %s)",
-        _DASHBOARD_PASSWORD,
-        _DASHBOARD_USERNAME,
-    )
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DASHBOARD_CRED_FILE = os.path.join(_PACKAGE_ROOT, "data", "dashboard_credentials.txt")
+
+
+def _write_dashboard_credentials(username: str, password: str) -> str:
+    """يكتب الاعتماديات في ملف منفصل بصلاحيات مقيدة (0600) لا في السجلات العامة."""
+    os.makedirs(os.path.dirname(_DASHBOARD_CRED_FILE), exist_ok=True)
+    fd = os.open(_DASHBOARD_CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"DASHBOARD_USERNAME={username}\nDASHBOARD_PASSWORD={password}\n")
+    return _DASHBOARD_CRED_FILE
+
+
+def _generate_dashboard_credentials() -> tuple[str, str]:
+    """يعيد (اسم المستخدم، كلمة المرور) — يولّد مؤقتةً عند غياب الإعداد.
+
+    لا تُطبع كلمة المرور في السجلات أبدًا؛ تُحفظ في _DASHBOARD_CRED_FILE
+    (0600) ويُسجَّل التلميح + مسار الملف فقط.
+    """
+    username = settings.dashboard_username or "admin"
+    password = settings.dashboard_password
+    if not password:
+        password = secrets.token_urlsafe(18)
+        cred_file = _write_dashboard_credentials(username, password)
+        logger.warning(
+            "DASHBOARD_PASSWORD غير مضبوط في .env — وُلدّت كلمة مرور مؤقتة ولا تُكتب في "
+            "السجلات. المستخدم: %s؛ كلمة المرور محفوظة في ملف منفصل: %s (صلاحيات 0600). "
+            "ضع DASHBOARD_PASSWORD في .env لثباتها عبر عمليات إعادة التشغيل.",
+            username,
+            cred_file,
+        )
+    return username, password
+
+
+_DASHBOARD_USERNAME, _DASHBOARD_PASSWORD = _generate_dashboard_credentials()
 
 
 def _basic_auth_ok(authorization: str) -> bool:
@@ -94,7 +124,7 @@ def require_dashboard_auth(request: Request) -> None:
 
 def _period_start(period: str) -> datetime:
     """حدود بداية الفترة بالتوقيت المحلي محوّلًا إلى UTC naive."""
-    from app.timeutil import now_local, to_utc_naive
+    from app.timeutil import to_utc_naive
 
     local_now = now_local()
     if period == "today":
@@ -111,6 +141,227 @@ def _period_start(period: str) -> datetime:
     else:
         return None
     return to_utc_naive(local)
+
+
+# ---------- مساعدات لوحة التحكم (تنسيق/واجهة/تجميع) ----------
+
+
+def _fmt(value) -> str:
+    """تنسيق رقم مبالغ (آلاف + فاصلتان) أو سلسلة فارغة للمعدوم."""
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _like_pattern(term: str) -> str:
+    """يَهرب محارف LIKE ويبني نمط \"%...%\" للبحث الجزئي."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _qs(params: dict) -> str:
+    return urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+
+
+def _page_href(base_path: str, params: dict, page: int | None) -> str:
+    next_params = dict(params)
+    next_params.pop("page", None)
+    if page and page > 1:
+        next_params["page"] = str(page)
+    return f"{base_path}?{_qs(next_params)}"
+
+
+def _pagination(page: int, pages: int, base_path: str, params: dict) -> dict:
+    """يبني هيكل أزرار الترقيم (نافذة + فجوات) — بلا قوالب جانبية."""
+    def add(nums: list, value: int) -> None:
+        nums.append({"num": value, "url": _page_href(base_path, params, value)})
+
+    items: list[dict] = []
+    if pages <= 1:
+        return {"count": pages, "prev": None, "next": None, "items": items}
+    first = max(page - 2, 1)
+    last = min(page + 2, pages)
+    window = list(range(first, last + 1))
+    if window[0] > 1:
+        add(items, 1)
+        if window[0] > 2:
+            items.append({"num": None})
+    for n in window:
+        add(items, n)
+    if window[-1] < pages:
+        if window[-1] < pages - 1:
+            items.append({"num": None})
+        add(items, pages)
+    return {
+        "count": pages,
+        "prev": {"url": _page_href(base_path, params, page - 1)} if page > 1 else None,
+        "next": {"url": _page_href(base_path, params, page + 1)} if page < pages else None,
+        "items": items,
+    }
+
+
+def _summary_month(db: Session, base: str) -> dict:
+    """مجموع الشهر الحالي (كل المستخدمين) موحَّدًا بالعملة الأساسية."""
+    by_currency: dict = {}
+    stored: dict = {}
+    start = _period_start("this_month")
+    rows = (
+        db.query(
+            Transaction.type,
+            Transaction.currency,
+            Transaction.amount,
+            Transaction.amount_in_base_currency,
+            Transaction.base_currency_at_creation,
+        )
+        .filter(
+            Transaction.deleted_at.is_(None),
+            Transaction.created_at >= start,
+        )
+        .all()
+    )
+    for rtype, currency, amount, stored_amt, stored_base in rows:
+        c = (currency or "").upper()
+        kind = "expense" if rtype == "expense" else "income"
+        entry = by_currency.setdefault(c, {"expense": Decimal("0"), "income": Decimal("0")})
+        entry[kind] += amount or Decimal("0")
+        if stored_amt is not None and stored_base == base and c:
+            se = stored.setdefault(c, {"expense": Decimal("0"), "income": Decimal("0")})
+            se[kind] += Decimal(str(stored_amt))
+    return _convert_month_currency_groups(by_currency, base, stored=stored or None)
+
+
+def _category_tops(db: Session, base: str, limit: int = 6) -> list[dict]:
+    """أعلى تصنيفات المصاريف هذا الشهر (موحَّدة بالعملة الأساسية)."""
+    start = _period_start("this_month")
+    rows = (
+        db.query(
+            Transaction.category,
+            Transaction.currency,
+            Transaction.amount,
+            Transaction.amount_in_base_currency,
+            Transaction.base_currency_at_creation,
+        )
+        .filter(
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "expense",
+            Transaction.created_at >= start,
+        )
+        .all()
+    )
+    agg: dict = {}
+    for category, currency, amount, stored_amt, stored_base in rows:
+        key = category or "أخرى"
+        bucket = agg.setdefault(key, {"by_currency": {}, "stored": {}})
+        c = (currency or "").upper()
+        entry = bucket["by_currency"].setdefault(c, Decimal("0"))
+        entry += amount or Decimal("0")
+        if stored_amt is not None and stored_base == base and c:
+            se = bucket["stored"].setdefault(c, Decimal("0"))
+            se += Decimal(str(stored_amt))
+    out = []
+    for key, bucket in agg.items():
+        conv = convert_totals_to_base(
+            bucket["by_currency"], base, stored=bucket["stored"] or None
+        )
+        total = conv.get("total")
+        if total is None:
+            continue
+        out.append({"category": key, "amount": _fmt(total), "raw": float(total)})
+    out.sort(key=lambda x: x["raw"], reverse=True)
+    return out[:limit]
+
+
+def _party_rows(db: Session, base: str, limit: int = 500) -> list[dict]:
+    """تجمع أسماء الأطراف (عملاء/موردون) عبر المعاملات والطلبيات والمهام.
+
+    كل طرف = اسم نصي؛ المجاميع تُوحَّد بالعملة الأساسية (المخزَّنة عند
+    التسجيل إن توافقت، وإلا بسعر اليوم). تُرجع الصفوف مرتبة بعدد السجلات.
+    """
+    notes_count = dict(
+        db.query(Note.person, func.count(Note.id))
+        .filter(
+            Note.deleted_at.is_(None),
+            Note.person.isnot(None),
+            Note.note_type == "order",
+        )
+        .group_by(Note.person)
+        .all()
+    )
+    tasks_count = dict(
+        db.query(Task.person, func.count(Task.id))
+        .filter(Task.deleted_at.is_(None), Task.person.isnot(None))
+        .group_by(Task.person)
+        .all()
+    )
+    tx_rows = (
+        db.query(
+            Transaction.person,
+            Transaction.type,
+            Transaction.created_at,
+            Transaction.currency,
+            Transaction.amount,
+            Transaction.amount_in_base_currency,
+            Transaction.base_currency_at_creation,
+        )
+        .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
+        .order_by(Transaction.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    agg: dict = {}
+    for person, rtype, created_at, currency, amount, stored_amt, stored_base in tx_rows:
+        p = person.strip()
+        bucket = agg.setdefault(
+            p,
+            {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None},
+        )
+        bucket["records"] += 1
+        if created_at and (bucket["last_seen"] is None or created_at > bucket["last_seen"]):
+            bucket["last_seen"] = created_at
+        kind = "expense" if rtype == "expense" else "income"
+        c = (currency or "").upper()
+        entry = bucket["by_currency"].setdefault(
+            c, {"expense": Decimal("0"), "income": Decimal("0")}
+        )
+        entry[kind] += amount or Decimal("0")
+        if stored_amt is not None and stored_base == base and c:
+            se = bucket["stored"].setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            se[kind] += Decimal(str(stored_amt))
+    for p in notes_count:
+        if p and p.strip() and p.strip() not in agg:
+            agg[p.strip()] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+    for p in tasks_count:
+        if p and p.strip() and p.strip() not in agg:
+            agg[p.strip()] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+    rows = []
+    for p, bucket in agg.items():
+        res = _convert_month_currency_groups(
+            bucket["by_currency"], base, stored=bucket["stored"] or None
+        )
+        expense = res["expense"] or Decimal("0")
+        income = res["income"] or Decimal("0")
+        last_seen = (
+            to_local_naive(bucket["last_seen"]).strftime("%Y-%m-%d")
+            if bucket["last_seen"]
+            else ""
+        )
+        rows.append(
+            {
+                "person": p,
+                "records": bucket["records"] + notes_count.get(p, 0) + tasks_count.get(p, 0),
+                "expense": _fmt(expense),
+                "income": _fmt(income),
+                "net": _fmt(income - expense),
+                "last_seen": last_seen,
+            }
+        )
+    rows.sort(key=lambda x: -x["records"])
+    return rows
 
 
 @app.get("/")
@@ -210,7 +461,7 @@ def _recent_transactions(db: Session, limit: int = 10):
             {
                 "date": local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
                 "type": r.type,
-                "amount": float(r.amount) if r.amount else 0,
+                "amount": _fmt(r.amount),
                 "currency": r.currency or "",
                 "person": r.person or "",
                 "category": r.category or "",
@@ -273,7 +524,8 @@ async def dashboard(
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """لوحة التحكم الرئيسية."""
+    """لوحة التحكم الرئيسية: بطاقات + ملخص الشهر + رسم + أعلى التصنيفات والأطراف."""
+    base = (settings.base_currency or "ILS").upper()
     counts = {
         "transactions": db.query(func.count(Transaction.id))
         .filter(Transaction.deleted_at.is_(None))
@@ -281,35 +533,158 @@ async def dashboard(
         "tasks": db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None)).scalar(),
         "notes": db.query(func.count(Note.id)).filter(Note.deleted_at.is_(None)).scalar(),
         "users": db.query(Transaction.telegram_user_id).distinct().count(),
+        "overdue": db.query(func.count(Task.id))
+        .filter(Task.deleted_at.is_(None), Task.status == "overdue")
+        .scalar(),
     }
 
-    overdue_tasks = [t for t in _recent_tasks(db, limit=100) if t["status"] == "overdue"]
+    summary = _summary_month(db, base)
+    expense = summary["expense"] or Decimal("0")
+    income = summary["income"] or Decimal("0")
+    month_cards = {
+        "expense": _fmt(expense),
+        "income": _fmt(income),
+        "net": _fmt(income - expense),
+        "net_cls": "green" if income >= expense else "red",
+    }
+
+    chart_url = None
+    try:
+        buf = generate_global_monthly_chart(
+            db, months=settings.chart_months, base_currency=base
+        )
+        if buf:
+            chart_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        logger.exception("تعذر توليد الرسم البياني للوحة")
 
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
+            "active": "home",
+            "base_currency": base,
+            "chart_months": settings.chart_months or 6,
+            "chart_url": chart_url,
             "counts": counts,
+            "month_cards": month_cards,
+            "top_categories": _category_tops(db, base),
+            "top_parties": _party_rows(db, base, limit=400)[:6],
             "transactions": _recent_transactions(db, limit=10),
             "notes": _recent_notes(db, limit=10),
-            "overdue_tasks": overdue_tasks,
+            "overdue_tasks": [t for t in _recent_tasks(db, limit=100) if t["status"] == "overdue"],
         },
     )
+
+
+EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _transactions_export_bytes(rows: list[Transaction]) -> bytes:
+    """يولّد ملف Excel من قائمة معاملات (تُستعمل لأزرار التصدير باللوحة)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "المعاملات"
+    ws.append(["التاريخ", "النوع", "المبلغ", "العملة", "الشخص", "التصنيف", "الوصف"])
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1E293B")
+    thin = Side(style="thin", color="CBD5E1")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center")
+    for r in rows:
+        local_dt = to_local_naive(r.created_at)
+        ws.append(
+            [
+                local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
+                "إيراد" if r.type == "income" else "مصروف",
+                float(r.amount) if r.amount is not None else 0,
+                r.currency or "",
+                r.person or "",
+                r.category or "",
+                r.description or "",
+            ]
+        )
+    widths = [18, 10, 12, 10, 20, 14, 34]
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = width
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.border = border
+        row[2].number_format = "#,##0.00"
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 @app.get("/dashboard/transactions", response_class=HTMLResponse)
 async def dashboard_transactions(
     request: Request,
     period: str = "all_time",
+    q: str = "",
+    ttype: str = "",
+    page: int = 1,
+    page_size: int = 50,
+    export: str = "",
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """جدول المعاملات المالية مع تصفية بالحالة/الفترة."""
-    q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    """جدول المعاملات: فلاتر (فترة/بحث/نوع) + ترقيم صفحات + تصدير Excel."""
+    base_path = "/dashboard/transactions"
+    params: dict = {}
+    if period != "all_time":
+        params["period"] = period
+    if q:
+        params["q"] = q
+    if ttype:
+        params["ttype"] = ttype
+
+    filters = [Transaction.deleted_at.is_(None)]
     start = _period_start(period)
     if start:
-        q = q.filter(Transaction.created_at >= start)
-    rows = q.order_by(Transaction.created_at.desc()).limit(200).all()
+        filters.append(Transaction.created_at >= start)
+    if ttype in ("expense", "income"):
+        filters.append(Transaction.type == ttype)
+    term = q.strip()
+    if term:
+        pattern = _like_pattern(term)
+        filters.append(
+            or_(
+                Transaction.person.like(pattern, escape="\\"),
+                Transaction.category.like(pattern, escape="\\"),
+            )
+        )
+
+    base_q = db.query(Transaction).filter(*filters)
+
+    if export == "xlsx":
+        content = _transactions_export_bytes(
+            base_q.order_by(Transaction.created_at.desc()).all()
+        )
+        filename = f"transactions_{period or 'all_time'}.xlsx"
+        return Response(
+            content=content,
+            media_type=EXCEL_MIME,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    page = max(page, 1)
+    page_size = min(max(page_size, 5), 200)
+    total = base_q.count()
+    pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, pages)
+    rows = (
+        base_q.order_by(Transaction.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     entity_rows = []
     for r in rows:
@@ -319,7 +694,7 @@ async def dashboard_transactions(
                 "date": local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
                 "type_label": "إيراد" if r.type == "income" else "مصروف",
                 "type_cls": "income" if r.type == "income" else "expense",
-                "amount": r.amount,
+                "amount": _fmt(r.amount),
                 "currency": r.currency or "",
                 "person": r.person or "",
                 "category": r.category or "",
@@ -327,15 +702,34 @@ async def dashboard_transactions(
             }
         )
 
+    period_options = [(k, v) for k, v in PERIOD_NAMES.items()]
     return templates.TemplateResponse(
         request,
-        "table_list.html",
+        "table.html",
         {
+            "active": "transactions",
             "title": "المعاملات المالية",
+            "total": total,
             "rows": entity_rows,
             "columns": TRANSACTION_COLUMNS,
-            "period": period,
-            "periods": PERIOD_NAMES,
+            "filters": {
+                "extras": [("period", period)],
+                "placeholder": "بحث بالشخص أو التصنيف",
+                "q": q,
+                "selects": [
+                    {"name": "period", "selected": period, "options": period_options},
+                    {
+                        "name": "ttype",
+                        "selected": ttype,
+                        "options": [("", "الكل"), ("income", "إيراد"), ("expense", "مصروف")],
+                    },
+                ],
+                "clear_url": base_path,
+            },
+            "export_xlsx": _page_href(base_path, params, 1) + "&export=xlsx",
+            "export_pdf": None,
+            "page": page,
+            "pages": _pagination(page, pages, base_path, params),
         },
     )
 
@@ -343,21 +737,35 @@ async def dashboard_transactions(
 @app.get("/dashboard/tasks", response_class=HTMLResponse)
 async def dashboard_tasks(
     request: Request,
+    status: str = "",
+    q: str = "",
+    page: int = 1,
+    page_size: int = 50,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """جدول المهام مع حالة كل مهمة."""
-    from app.database.crud import mark_overdue_tasks, workspace_for_user
+    """جدول المهام: تصفية بالحالة وبالشخص + ترقيم صفحات."""
+    from app.database.crud import STATUS_ACTIVE, mark_overdue_tasks
 
     # تحديث المهام المتأخرة (كل المستخدمين) — مرة واحدة لكل مساحة مشتركة
     # (mark_overdue_tasks يحدّث كل أعضاء accessible_user_ids، فالتكرار على كل
     # عضوٍ في مساحة من N أعضاء يُنفّذ نفس التحديث N مرات بلا داعٍ).
+    # معرّفات المساحات تُحمَّل استعلامًا مجمّعًا واحدًا بدل workspace_for_user
+    # لكل مستخدمٍ على حدة.
     try:
         db.query(func.count(Task.id)).scalar()  # التأكد من اتصال
+        uid_wid = {
+            uid: wid
+            for uid, wid in db.query(
+                WorkspaceMember.telegram_user_id,
+                WorkspaceMember.workspace_id,
+            )
+            .filter(WorkspaceMember.status == STATUS_ACTIVE)
+            .all()
+        }
         seen = set()
         for (uid,) in db.query(Task.telegram_user_id).distinct().all():
-            wid = workspace_for_user(db, uid)
-            anchor = wid if wid is not None else uid
+            anchor = uid_wid.get(uid, uid)
             if anchor in seen:
                 continue
             seen.add(anchor)
@@ -365,22 +773,47 @@ async def dashboard_tasks(
     except Exception:
         pass
 
-    rows = _recent_tasks(db, limit=200)
+    base_path = "/dashboard/tasks"
+    params: dict = {}
+    if status:
+        params["status"] = status
+    if q:
+        params["q"] = q
+
+    filters = [Task.deleted_at.is_(None)]
+    if status in ("pending", "overdue", "done"):
+        filters.append(Task.status == status)
+    term = q.strip()
+    if term:
+        filters.append(Task.person.like(_like_pattern(term), escape="\\"))
+
+    base_q = db.query(Task).filter(*filters)
+    page = max(page, 1)
+    page_size = min(max(page_size, 5), 200)
+    total = base_q.count()
+    pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, pages)
+    rows = (
+        base_q.order_by(Task.due_date.asc().nulls_last())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     status_map = {
         "pending": ("قيد الانتظار", "pending"),
         "overdue": ("متأخرة", "overdue"),
         "done": ("مكتملة", "done"),
     }
-
     entity_rows = []
     for t in rows:
-        label, cls = status_map.get(t["status"], (t["status"], t["status"]))
+        label, cls = status_map.get(t.status, (t.status, t.status))
+        due_str = to_local_naive(t.due_date).strftime("%Y-%m-%d %H:%M") if t.due_date else ""
         entity_rows.append(
             {
-                "description": t["description"],
-                "person": t["person"],
-                "due_date": t["due_date"],
+                "description": t.description or "",
+                "person": t.person or "",
+                "due_date": due_str,
                 "status_label": label,
                 "status_cls": cls,
             }
@@ -388,13 +821,35 @@ async def dashboard_tasks(
 
     return templates.TemplateResponse(
         request,
-        "table_list.html",
+        "table.html",
         {
+            "active": "tasks",
             "title": "المهام",
+            "total": total,
             "rows": entity_rows,
             "columns": TASK_COLUMNS,
-            "period": None,
-            "periods": PERIOD_NAMES,
+            "filters": {
+                "extras": [],
+                "placeholder": "بحث بالشخص",
+                "q": q,
+                "selects": [
+                    {
+                        "name": "status",
+                        "selected": status,
+                        "options": [
+                            ("", "الكل"),
+                            ("pending", "قيد الانتظار"),
+                            ("overdue", "متأخرة"),
+                            ("done", "مكتملة"),
+                        ],
+                    }
+                ],
+                "clear_url": base_path,
+            },
+            "export_xlsx": None,
+            "export_pdf": None,
+            "page": page,
+            "pages": _pagination(page, pages, base_path, params),
         },
     )
 
@@ -402,34 +857,170 @@ async def dashboard_tasks(
 @app.get("/dashboard/notes", response_class=HTMLResponse)
 async def dashboard_notes(
     request: Request,
+    ntype: str = "",
+    q: str = "",
+    page: int = 1,
+    page_size: int = 50,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """جدول الطلبيات والملاحظات."""
-    rows = _recent_notes(db, limit=200)
+    """جدول الطلبيات والملاحظات: تصفية بالنوع وبالشخص + ترقيم صفحات."""
+    base_path = "/dashboard/notes"
+    params: dict = {}
+    if ntype:
+        params["ntype"] = ntype
+    if q:
+        params["q"] = q
+
+    filters = [Note.deleted_at.is_(None)]
+    if ntype in ("order", "note"):
+        filters.append(Note.note_type == ntype)
+    term = q.strip()
+    if term:
+        pattern = _like_pattern(term)
+        filters.append(
+            or_(
+                Note.person.like(pattern, escape="\\"),
+                Note.category.like(pattern, escape="\\"),
+            )
+        )
+
+    base_q = db.query(Note).filter(*filters)
+    page = max(page, 1)
+    page_size = min(max(page_size, 5), 200)
+    total = base_q.count()
+    pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, pages)
+    rows = (
+        base_q.order_by(Note.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     entity_rows = []
     for n in rows:
+        local_dt = to_local_naive(n.created_at)
         entity_rows.append(
             {
-                "date": n["date"],
-                "type_label": "طلبية" if n["note_type"] == "order" else "ملاحظة",
-                "description": n["description"],
-                "person": n["person"],
-                "category": n["category"],
+                "date": local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
+                "type_label": "طلبية" if n.note_type == "order" else "ملاحظة",
+                "description": n.description or "",
+                "person": n.person or "",
+                "category": n.category or "",
             }
         )
 
     return templates.TemplateResponse(
         request,
-        "table_list.html",
+        "table.html",
         {
+            "active": "notes",
             "title": "الطلبيات والملاحظات",
+            "total": total,
             "rows": entity_rows,
             "columns": NOTE_COLUMNS,
-            "period": None,
-            "periods": PERIOD_NAMES,
+            "filters": {
+                "extras": [],
+                "placeholder": "بحث بالشخص أو التصنيف",
+                "q": q,
+                "selects": [
+                    {
+                        "name": "ntype",
+                        "selected": ntype,
+                        "options": [
+                            ("", "الكل"),
+                            ("order", "طلبية"),
+                            ("note", "ملاحظة"),
+                        ],
+                    }
+                ],
+                "clear_url": base_path,
+            },
+            "export_xlsx": None,
+            "export_pdf": None,
+            "page": page,
+            "pages": _pagination(page, pages, base_path, params),
         },
+    )
+
+
+@app.get("/dashboard/customers", response_class=HTMLResponse)
+async def dashboard_customers(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+):
+    """سجلّ الأطراف (عملاء/موردون): أسماء مجمّعة من المعاملات والطلبيات والمهام."""
+    base = (settings.base_currency or "ILS").upper()
+    rows = _party_rows(db, base)
+    for row in rows:
+        row["net_cls"] = "positive" if _to_pos(row["net"]) >= 0 else "negative"
+    merged = request.query_params.get("merged")
+    return templates.TemplateResponse(
+        request,
+        "customers.html",
+        {
+            "active": "customers",
+            "base_currency": base,
+            "rows": rows,
+            "merged": merged,
+        },
+    )
+
+
+def _to_pos(value: str) -> float:
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+@app.post("/dashboard/customers/merge", response_class=RedirectResponse)
+async def dashboard_customers_merge(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+):
+    """دمج اسمين لنفس الطرف: استبدال source بـ target في كل السجلات."""
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    parsed = urllib.parse.parse_qs(raw)
+    source = (parsed.get("source") or [""])[0].strip()
+    target = (parsed.get("target") or [""])[0].strip()
+    if source and target and source != target:
+        for model in (Transaction, Task, Note, Invoice):
+            db.query(model).filter(model.person == source).update(
+                {model.person: target}, synchronize_session=False
+            )
+        db.commit()
+    return RedirectResponse(url="/dashboard/customers?merged=1", status_code=303)
+
+
+@app.get("/dashboard/export", response_class=Response)
+async def dashboard_export(
+    request: Request,
+    fmt: str = "xlsx",
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+):
+    """تقرير شامل لكل المستخدمين بتصدير Excel أو PDF (أزرار اللوحة الرئيسية)."""
+    if fmt == "pdf":
+        from bot.exporters import generate_export_pdf
+
+        buf = generate_export_pdf(db, None)
+        media_type = "application/pdf"
+        ext = "pdf"
+    else:
+        from bot.exporters import generate_export_excel
+
+        buf = generate_export_excel(db, None)
+        media_type = EXCEL_MIME
+        ext = "xlsx"
+    filename = f"report_{datetime.now().strftime('%Y%m%d')}.{ext}"
+    return Response(
+        content=buf.getvalue(),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -474,7 +1065,7 @@ async def dashboard_budgets(
     return templates.TemplateResponse(
         request,
         "budgets.html",
-        {"budgets": budgets},
+        {"active": "budgets", "budgets": budgets},
     )
 
 

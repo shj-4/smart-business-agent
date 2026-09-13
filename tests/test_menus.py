@@ -483,10 +483,11 @@ class TestWorkspaceButtons:
         assert _find_button(edited[-1][1], "ws:add")
 
     def test_workspace_members_owner_remove_buttons(self, db_session, monkeypatch):
-        from app.database.crud import create_workspace, invite_to_workspace
+        from app.database.crud import accept_workspace_invite, create_workspace, invite_to_workspace
 
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        accept_workspace_invite(db_session, USER_B, USER_A)
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         q, edited = _build_query("ws:members")
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
@@ -495,10 +496,11 @@ class TestWorkspaceButtons:
         assert _find_button(edited[0][1], f"ws:rm:{USER_A}") is None
 
     def test_workspace_member_see_leave_not_remove(self, db_session, monkeypatch):
-        from app.database.crud import create_workspace, invite_to_workspace
+        from app.database.crud import accept_workspace_invite, create_workspace, invite_to_workspace
 
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        accept_workspace_invite(db_session, USER_B, USER_A)
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         q, edited = _build_query("ws:status", user_id=USER_B)
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
@@ -507,10 +509,11 @@ class TestWorkspaceButtons:
         assert _find_button(edited[0][1], "ws:rm:") is None
 
     def test_workspace_leave_via_button(self, db_session, monkeypatch):
-        from app.database.crud import create_workspace, invite_to_workspace
+        from app.database.crud import accept_workspace_invite, create_workspace, invite_to_workspace
 
         create_workspace(db_session, USER_A)
         invite_to_workspace(db_session, USER_A, USER_B)
+        accept_workspace_invite(db_session, USER_B, USER_A)
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         q, edited = _build_query("ws:leave", user_id=USER_B)
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
@@ -524,7 +527,7 @@ class TestWorkspaceButtons:
         assert "Telegram ID" in edited[0][0]
 
     def test_workspace_invite_value(self, db_session, monkeypatch):
-        from app.database.crud import create_workspace, workspace_for_user
+        from app.database.crud import create_workspace, pending_workspace_invite, workspace_for_user
 
         create_workspace(db_session, USER_A)
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
@@ -546,8 +549,68 @@ class TestWorkspaceButtons:
                 _context(),
             )
         )
+        # الدعوة تبقى معلّقة — لا تصبح عضوًا ولا يُدمج شيء قبل القبول
+        assert workspace_for_user(db_session, USER_B) is None
+        assert pending_workspace_invite(db_session, USER_B) == USER_A
+        assert "دعوة" in replies[0]
+
+    def test_workspace_pending_invite_card(self, db_session, monkeypatch):
+        from app.database.crud import create_workspace, invite_to_workspace
+
+        create_workspace(db_session, USER_A)
+        invite_to_workspace(db_session, USER_A, USER_B)
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+
+        q, edited = _build_query("ws:status", user_id=USER_B)
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert "دعوة انضمام" in edited[0][0]
+        assert _find_button(edited[0][1], f"ws:accept:{USER_A}")
+        assert _find_button(edited[0][1], f"ws:decline:{USER_A}")
+
+    def test_workspace_accept_via_button(self, db_session, monkeypatch):
+        from app.database.crud import (
+            create_workspace,
+            invite_to_workspace,
+            workspace_for_user,
+        )
+
+        create_workspace(db_session, USER_A)
+        invite_to_workspace(db_session, USER_A, USER_B)
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+
+        q, edited = _build_query(f"ws:accept:{USER_A}", user_id=USER_B)
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert q.answered
         assert workspace_for_user(db_session, USER_B) == USER_A
-        assert "أُضيف العضو" in replies[0]
+        assert "عضو" in edited[0][0]
+        assert _find_button(edited[0][1], "ws:leave")
+
+    def test_workspace_decline_via_button(self, db_session, monkeypatch):
+        from app.database.crud import (
+            create_workspace,
+            invite_to_workspace,
+            pending_workspace_invite,
+            workspace_for_user,
+        )
+
+        create_workspace(db_session, USER_A)
+        invite_to_workspace(db_session, USER_A, USER_B)
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+
+        q, edited = _build_query(f"ws:decline:{USER_A}", user_id=USER_B)
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert q.answered
+        assert pending_workspace_invite(db_session, USER_B) is None
+        assert workspace_for_user(db_session, USER_B) is None
+        assert "لا تملك مساحة مشتركة" in edited[0][0]
+
+    def test_workspace_accept_is_noop_without_invite(self, db_session, monkeypatch):
+        from app.database.crud import workspace_for_user
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query(f"ws:accept:{USER_A}", user_id=USER_B)
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert workspace_for_user(db_session, USER_B) is None
 
 
 class TestEditLastFlow:

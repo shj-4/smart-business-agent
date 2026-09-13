@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — لوحة التحكم{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+
+{% if filters %}
+<form class="filters" method="get">
+    {% for name, value in filters.extras %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+    {% if filters.placeholder %}
+    <input type="search" name="q" value="{{ filters.q or '' }}" placeholder="{{ filters.placeholder }}">
+    {% endif %}
+    {% for sel in filters.selects %}
+    <select name="{{ sel.name }}">
+        <option value="">الكل</option>
+        {% for value, label in sel.options %}
+        <option value="{{ value }}" {{ 'selected' if sel.selected == value }}>{{ label }}</option>
+        {% endfor %}
+    </select>
+    {% endfor %}
+    <button>تصفية</button>
+    {% if filters.q or (filters.selects and filters.selects | selectattr('selected') | list | length) %}
+    <a class="btn-link" href="{{ filters.clear_url }}">مسح التصفية</a>
+    {% endif %}
+</form>
+{% endif %}
+
+<div class="panel">
+    <div class="panel-head">
+        <span class="count">{{ total }} سجل</span>
+        {% if export_xlsx or export_pdf %}
+        <span class="export-links">
+            {% if export_xlsx %}<a href="{{ export_xlsx }}">📦 Excel</a>{% endif %}
+            {% if export_pdf %}<a href="{{ export_pdf }}">📄 PDF</a>{% endif %}
+        </span>
+        {% endif %}
+    </div>
+    {% if rows %}
+    <div style="overflow-x:auto;">
+        <table>
+            <thead>
+                <tr>
+                    {% for col in columns %}
+                    <th {% if col.cls %}class="{{ col.cls }}"{% endif %}>{{ col.label }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    {% for col in columns %}
+                    {% if col.badge %}
+                    <td><span class="badge {{ row[col.badge] }}">{{ row[col.key] }}</span></td>
+                    {% else %}
+                    <td {% if col.cls %}class="{{ col.cls }}"{% endif %}>{{ row[col.key] }}</td>
+                    {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if pages and pages.count > 1 %}
+    <nav class="pagination">
+        {% if pages.prev %}
+        <a href="{{ pages.prev.url }}">السابق</a>
+        {% endif %}
+        {% for p in pages.items %}
+            {% if p.num is none %}
+            <span class="gap">…</span>
+            {% elif p.num == page %}
+            <span class="current">{{ p.num }}</span>
+            {% else %}
+            <a href="{{ p.url }}">{{ p.num }}</a>
+            {% endif %}
+        {% endfor %}
+        {% if pages.next %}
+        <a href="{{ pages.next.url }}">التالي</a>
+        {% endif %}
+    </nav>
+    {% endif %}
+    {% else %}
+    <div class="empty">لا توجد بيانات مطابقة.</div>
+    {% endif %}
+</div>
+{% endblock %}

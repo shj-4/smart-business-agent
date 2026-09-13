@@ -72,9 +72,9 @@ def create_task(
     return task
 
 def _person_filter(person: str | None):
-    """فلترة SQL حسب الشخص (بمطابقة جزئية تشبه المعاملات)."""
+    """فلترة SQL حسب الشخص (مطابقة تامة — لا خلط بأسماء تبدأ بنفس الكلمة)."""
     if person:
-        return Task.person.like(f"%{person}%")
+        return Task.person == person
     return None
 
 def _priority_sort(tasks: list[Task]) -> list[Task]:

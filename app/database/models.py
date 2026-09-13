@@ -158,12 +158,21 @@ class WorkspaceMember(Base):
       - البيانات تبقى موثقة بمعرّف كاتبها (telegram_user_id) في جداولها؛ لكن
         كل القراءات تُنطّق بمجموعة أعضاء المساحة (IN members) بدل معرّف واحد.
       - عضو واحد لكل معرّف Telegram (مفتاح أساسي) — مغادرة ثم انضمام لتغييرها.
+      - status يتحكم في الانضمام:
+          * "active"  — العضو وافق صراحةً (فوريًا للمالك؛ وبعد قبول الدعوة لغيره)،
+                       وتصبح بيانات الطرفين مرئية داخل المساحة.
+          * "pending" — دعوة معلّقة بانتظار موافقة الطرف المدعو؛ لا يمنح أي وصول
+                       حتى يُقبِل، فتُساوي "active".
+        الصفوف القديمة (قبل الحقل) تُعامَل "active" — الترتيبات القائمة تبقى.
     """
 
     __tablename__ = "workspace_members"
 
     telegram_user_id = Column(BigInteger, primary_key=True)
     workspace_id = Column(BigInteger, nullable=False, index=True)
+    status = Column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
     joined_at = Column(DateTime, default=datetime.utcnow)
 
 

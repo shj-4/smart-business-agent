@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}الأطراف — لوحة التحكم{% endblock %}
+{% block content %}
+<h1>الأطراف (العملاء والموردون)</h1>
+
+{% if merged %}
+<div class="alert success">تم دمج التكرارات بنجاح.</div>
+{% endif %}
+
+<div class="panel">
+    <div class="panel-head">
+        <span class="count">{{ rows | length }} طرفًا</span>
+        <p style="font-size:13px;color:var(--muted)">
+            تَجمع تلقائي من أسماء العملاء/الموردين في المعاملات والطلبيات والمهام.
+            للدمج: أدخل الاسم الجامع لحقل «ادمج في» واضغط دمج.
+        </p>
+    </div>
+    {% if rows %}
+    <div style="overflow-x:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th>الشخص</th>
+                    <th class="num-col">عدد السجلات</th>
+                    <th class="num-col">مصروفات</th>
+                    <th class="num-col">إيرادات</th>
+                    <th class="num-col">الصافي</th>
+                    <th>آخر نشاط</th>
+                    <th>دمج التكرارات</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in rows %}
+                <tr>
+                    <td><strong>{{ p.person }}</strong></td>
+                    <td class="num-col">{{ p.records }}</td>
+                    <td class="num-col">{{ p.expense }}</td>
+                    <td class="num-col">{{ p.income }}</td>
+                    <td class="num-col" style="color:{{ 'var(--green)' if p.net_cls == 'positive' else 'var(--red)' }}">{{ p.net }}</td>
+                    <td class="nowrap">{{ p.last_seen or '' }}</td>
+                    <td>
+                        <form class="merge-form" method="post" action="/dashboard/customers/merge">
+                            <input type="hidden" name="source" value="{{ p.person }}">
+                            <input type="text" name="target" placeholder="ادمج في..." required>
+                            <button type="submit">دمج</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty">لا توجد أطراف مسجلة بعد.</div>
+    {% endif %}
+</div>
+{% endblock %}

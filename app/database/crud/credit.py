@@ -84,7 +84,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
         .filter(
             Transaction.telegram_user_id.in_(accessible_user_ids(db, limit_row.telegram_user_id)),
             Transaction.deleted_at.is_(None),
-            Transaction.person.like(f"%{limit_row.person}%"),
+            Transaction.person == limit_row.person,
         )
         .all()
     )

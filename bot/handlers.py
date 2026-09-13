@@ -924,17 +924,22 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """أمر /work — إدارة الحساب المشترك (مساحة عمل لعدة معرّفات Telegram).
 
     الاستخدام:
-      /work            ← الحالة الحالية (مساحة؟ أعضاء؟)
+      /work            ← الحالة الحالية (مساحة؟ أعضاء؟ دعوة معلّقة؟)
       /work جديد       ← إنشاء مساحتك الخاصة (أنت مديرها)
-      /work اضافة <id> ← يُدخل المالك معرّفًا إلى المساحة (يشارك البيانات)
-      /work حذف <id>   ← يُخرج المالك عضوًا من المساحة
+      /work اضافة <id> ← يدعو المالك معرّفًا — لا يُدمج حتى يقبل الطرف
+      /work قبول       ← قبول الدعوة المعلّقة بانضمامك
+      /work رفض        ← رفض الدعوة المعلّقة
+      /work حذف <id>   ← يُخرج المالك عضوًا / يُلغي دعوة (لا يمس المالك نفسه)
       /work مغادرة     ← العضو يغادر (المالك لا يغادر)
     """
     from app.database.crud import (
+        accept_workspace_invite,
         create_workspace,
+        decline_workspace_invite,
         invite_to_workspace,
         leave_workspace,
         list_workspace,
+        pending_workspace_invite,
         remove_from_workspace,
     )
 
@@ -956,12 +961,32 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target = int(args[1])
             ok = invite_to_workspace(db, telegram_user_id, target)
             if ok:
-                await update.message.reply_text(f"✅ أُضيف المعرّف {target} إلى مساحة عملك.")
+                await update.message.reply_text(
+                    f"✅ أُرسلت دعوة للمعرّف {target} إلى مساحتك.\n"
+                    "لن تُدمج بياناتكما حتى يقبل الطرف الدعوة بنفسه."
+                )
             else:
                 await update.message.reply_text(
-                    "لا يوجد إجراء: تأكد أنك مالك المساحة (أنشئها بـ /work جديد)، "
-                    "وأن المعرّف مختلف عن معرّفك."
+                    "تعذّرت الدعوة: لست المالك، أو معرّف ذاتي، "
+                    "أو الطرف عضو نشط في مساحة أخرى (لا سحب دون موافقته)."
                 )
+            return
+
+        if action in ("قبول", "تقبل"):
+            invite_wid = pending_workspace_invite(db, telegram_user_id)
+            ok = accept_workspace_invite(db, telegram_user_id, invite_wid) if invite_wid else False
+            await update.message.reply_text(
+                "✅ قبلت الدعوة — بياناتكما أصبحت مشتركة الآن."
+                if ok
+                else "لا توجد دعوة معلّقة للقبول."
+            )
+            return
+
+        if action in ("رفض", "رفض الدعوة"):
+            ok = decline_workspace_invite(db, telegram_user_id)
+            await update.message.reply_text(
+                "تم رفض دعوة الانضمام." if ok else "لا توجد دعوة معلّقة للرفض."
+            )
             return
 
         if action == "حذف" and len(args) >= 2 and args[1].isdigit():
@@ -984,6 +1009,14 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # الحالة الحالية
         info = list_workspace(db, telegram_user_id)
         if info is None:
+            invite_wid = pending_workspace_invite(db, telegram_user_id)
+            if invite_wid is not None:
+                await update.message.reply_text(
+                    f"📩 لديك دعوة انضمام إلى مساحة عمل #{invite_wid}.\n\n"
+                    "ابقَ مسؤولًا عن بياناتك: لا يُدمج شيء قبل موافقتك.\n"
+                    "• للقبول: /work قبول\n• للرفض: /work رفض"
+                )
+                return
             await update.message.reply_text(
                 "أنت حاليًا بمساحة فردية (بياناتك خاصة بك).\n"
                 "لإنشاء مساحة مشتركة: /work جديد\n"
@@ -993,12 +1026,18 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         members = ", ".join(str(m) for m in info["members"])
         role = "مالك" if info["owner"] else "عضو"
-        await update.message.reply_text(
+        text = (
             f"🏢 مساحة العمل: {info['workspace_id']} (أنت: {role})\n"
             f"الأعضاء ({len(info['members'])}): {members}\n\n"
             f"مشاركون يرون نفس البيانات (معاملات/مهام/ميزانيات).\n"
             f"• إضافة: /work اضافة <id>   • إزالة: /work حذف <id>   • مغادرة: /work مغادرة"
         )
+        if info["owner"] and info["pending"]:
+            text += (
+                "\n\n⏳ دعوات بانتظار القبول:\n"
+                + "\n".join(f"• {m}" for m in info["pending"])
+            )
+        await update.message.reply_text(text)
     finally:
         db.close()
 
