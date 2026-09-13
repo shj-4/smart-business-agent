@@ -8,6 +8,11 @@
 import os
 import sys
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
+
 # إضافة جذر المشروع إلى مسار الاستيراد كي نستطيع استيراد app.*
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:

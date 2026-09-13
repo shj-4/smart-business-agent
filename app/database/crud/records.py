@@ -1,7 +1,7 @@
 """
 العمليات المالية والملاحظات والاستعلام والتاريخ والتعديل والبحث (مع مسار الاستعلام المُجمَّع).
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_
@@ -602,8 +602,8 @@ def delete_record_by_id(
     if row is None:
         return None
     label = row.description or getattr(row, "amount", None) or "(بدون وصف)"
-    row.deleted_at = datetime.utcnow()
-    row.updated_at = datetime.utcnow()
+    row.deleted_at = now_utc()
+    row.updated_at = now_utc()
     try:
         db.commit()
     except IntegrityError:

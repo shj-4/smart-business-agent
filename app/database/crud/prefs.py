@@ -1,14 +1,13 @@
 """
 تفضيلات اللغة لكل مستخدم (UserPref).
 """
-from datetime import datetime
-
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database.models import (
     UserPref,
 )
+from app.timeutil import now_utc
 
 
 def get_user_lang(db: Session, telegram_user_id: int) -> str:
@@ -25,7 +24,7 @@ def set_user_lang(db: Session, telegram_user_id: int, lang: str) -> str:
         db.add(row)
     else:
         row.lang = lang
-        row.updated_at = datetime.utcnow()
+        row.updated_at = now_utc()
     try:
         db.commit()
     except IntegrityError:
