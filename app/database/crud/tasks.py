@@ -268,21 +268,39 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         )
         .first()
     )
-    if task and task.status in ("pending", "overdue"):
-        task.status = "done"
-        db.commit()
-        db.refresh(task)
+    if not task or task.status not in ("pending", "overdue"):
+        return None
 
-        log_audit(
-            telegram_user_id,
-            "complete_task",
-            f"task:{task_id}",
-            detail=(task.description or "")[:80],
+    # تحديث شرطي ذرّي بدل "اقرأ ثم ثبّت": طلبان متزامنان قد يقرآن status ==
+    # pending كلاهما قبل إثبات أيٍّ منهما. التحديث هنا لا يطبَّق إلا إذا كان
+    # السطر ما زال pending/overdue (rowcount) — الرابح فقط يتقدم لإعادة توليد
+    # المهمة المتكررة، والخاسر يعود None فيتجنب مكرَّرين بدل واحد (لا حاجة
+    # لقفل FOR UPDATE: التحديث الشرطي نفسه يحمي في SQLite وMySQL).
+    updated = (
+        db.query(Task)
+        .filter(
+            Task.id == task_id,
+            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.status.in_(["pending", "overdue"]),
+            Task.deleted_at.is_(None),
         )
-        _invalidate_caches(db, telegram_user_id)
-        _respawn_recurring_task(db, telegram_user_id, task)
-        return task
-    return None
+        .update({Task.status: "done", Task.updated_at: now_utc()})
+    )
+    db.commit()
+    if updated != 1:
+        db.rollback()
+        return None
+    db.refresh(task)
+
+    log_audit(
+        telegram_user_id,
+        "complete_task",
+        f"task:{task_id}",
+        detail=(task.description or "")[:80],
+    )
+    _invalidate_caches(db, telegram_user_id)
+    _respawn_recurring_task(db, telegram_user_id, task)
+    return task
 
 def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task) -> None:
     """يعيد جدولة مهمة متكررة: عند إنجازها يُنشئ تكرارًا تاليًا (يوم/أسبوع/شهر).

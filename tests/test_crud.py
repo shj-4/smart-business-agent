@@ -1367,3 +1367,92 @@ class TestWorkspaceRoleGates:
         assert delete_task_by_id(db_session, USER_B, task.id) is None
         assert list_pending_tasks(db_session, USER_B)[0].id == task.id
         assert delete_task_by_id(db_session, USER_A, task.id) is not None
+
+
+class TestCompleteTaskRace:
+    """سباق التزامن على إنجاز مهمة متكررة — يجب ألا يُولَّد سوى تكرار واحد."""
+
+    def test_concurrent_completions_spawn_single_recurrence(self, tmp_path):
+        """طلبان متزامنان لإنجاز نفس المهمة يسفران عن تكرار واحد (لا مكرَّرين)."""
+        import threading
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.database.db import Base
+
+        engine = create_engine(
+            f"sqlite:///{str(tmp_path / 'race.db')}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+        seed = Session()
+        task = create_task(
+            seed,
+            USER_A,
+            {"description": "جرد المخزن", "recurrence": "daily", "date": "2099-01-01 10:00"},
+            raw_message="كل يوم جرد المخزن",
+        )
+        tid = task.id
+        seed.close()
+
+        barrier = threading.Barrier(2)
+        results = []
+
+        def _attempt():
+            db = Session()
+            barrier.wait(timeout=10)
+            try:
+                results.append(complete_task(db, USER_A, tid))
+            finally:
+                db.close()
+
+        threads = [threading.Thread(target=_attempt) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        check = Session()
+        try:
+            assert check.query(Task).filter(Task.id == tid).first().status == "done"
+            respawn = (
+                check.query(Task)
+                .filter(
+                    Task.id != tid,
+                    Task.recurrence_rule == "daily",
+                    Task.status == "pending",
+                    Task.deleted_at.is_(None),
+                )
+                .count()
+            )
+            assert respawn == 1, "سباق الإنجاز ولّد مهمة متكررة مكرَّرة"
+            assert sum(1 for r in results if r is not None) == 1
+        finally:
+            check.close()
+            Base.metadata.drop_all(engine)
+            engine.dispose()
+
+    def test_second_completion_no_duplicate_spawn(self, db_session):
+        """إنجاز ثانٍ لنفس المهمة (بعد أن أُنجزت) لا يُعيد توليد التكرار."""
+        task = create_task(
+            db_session,
+            USER_A,
+            {"description": "جرد المخزن", "recurrence": "daily", "date": "2099-01-01 10:00"},
+            raw_message="كل يوم جرد المخزن",
+        )
+        assert complete_task(db_session, USER_A, task.id) is not None
+        assert complete_task(db_session, USER_A, task.id) is None
+        spawns = (
+            db_session.query(Task)
+            .filter(
+                Task.id != task.id,
+                Task.recurrence_rule == "daily",
+                Task.status == "pending",
+                Task.deleted_at.is_(None),
+            )
+            .count()
+        )
+        assert spawns == 1
