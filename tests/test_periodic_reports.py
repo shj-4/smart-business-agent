@@ -517,14 +517,23 @@ class TestBudgetCheckSessionCleanup:
         import bot.reminders as reminders
 
         created, closed = [], []
-        user_ids = [(111,), (222,)]
+        budget_ids = [(111,), (222,)]
 
         class _Q:
+            def order_by(self, *a, **k):
+                return self
+
+            def filter(self, *a, **k):
+                return self
+
             def distinct(self):
                 return self
 
             def all(self):
-                return user_ids
+                return budget_ids
+
+            def first(self):
+                return None
 
         class _FakeSession:
             def __init__(self):
@@ -540,15 +549,12 @@ class TestBudgetCheckSessionCleanup:
 
         monkeypatch.setattr(reminders, "SessionLocal", lambda: _FakeSession())
 
-        import app.database.crud as crud
-
-        monkeypatch.setattr(crud, "list_budgets", lambda db, uid: [])
         import asyncio
 
         asyncio.run(reminders.budget_check(None))
 
-        # جلسة واحدة خارجية + جلسة داخلية لكل مستخدم — وكلها مغلقة
-        assert len(created) == 1 + len(user_ids)
+        # جلسة واحدة خارجية + جلسة داخلية لكل ميزانية (معرّف) — وكلها مغلقة
+        assert len(created) == 1 + len(budget_ids)
         assert len(closed) == len(created)
         assert all(s.closed for s in created)
 
@@ -559,6 +565,9 @@ class TestBudgetCheckSessionCleanup:
 
         class _Q:
             def distinct(self):
+                return self
+
+            def order_by(self, *a, **k):
                 return self
 
             def all(self):

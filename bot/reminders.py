@@ -137,29 +137,38 @@ async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     - إذا تغيّر الشهر (month_key) → إعادة ضبط حالة التنبيه.
     - إذا الاستهلاك ≥ السقف ولم يُنبه بالتجاوز بعد → تنبيه "تجاوز".
     - وإلا إذا الاستهلاك ≥ 80% ولم يُنبه بالاقتراب → تنبيه "اقتراب".
+
+    تُعالَج كل ميزانية مرة واحدة بالضبط لكل دورة: بدل التكرار على مالكي
+    الميزانيات ثم list_budgets (الذي يوسّع لكل أعضاء المساحة)، والذي كان
+    يُعيد الميزانية نفسها مرة واحدة لكل مبتدئ ميزانية في المساحة — فتُحسب
+    N مرات دون داعٍ، وتحتمل أي تعديل مستقبلي تكرار تنبيهات فعلية.
     """
-    from app.database.crud import budget_monthly_reset, budget_usage, list_budgets
+    from app.database.crud import budget_monthly_reset, budget_usage
     from app.database.models import Budget
 
     db = SessionLocal()
     try:
-        user_ids = db.query(Budget.telegram_user_id).distinct().all()
+        budget_ids = [
+            bid
+            for (bid,) in db.query(Budget.id).order_by(Budget.created_at.asc()).all()
+        ]
     except Exception:
-        logger.exception("خطأ في جلب المستخدمين للميزانيات")
+        logger.exception("خطأ في جلب الميزانيات")
         db.close()
         return
     db.close()
 
-    for (uid,) in user_ids:
+    for bid in budget_ids:
         db = SessionLocal()
         try:
-            budgets = list_budgets(db, uid)
-            for budget in budgets:
-                budget_monthly_reset(db, budget)
-                usage = budget_usage(db, budget)
-                await _notify_budget(context, db, budget, usage)
+            budget = db.query(Budget).filter(Budget.id == bid).first()
+            if budget is None:
+                continue
+            budget_monthly_reset(db, budget)
+            usage = budget_usage(db, budget)
+            await _notify_budget(context, db, budget, usage)
         except Exception:
-            logger.exception("خطأ في فحص ميزانية المستخدم %s", uid)
+            logger.exception("خطأ في فحص ميزانية #%s", bid)
         finally:
             db.close()
 
@@ -319,31 +328,37 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     مثل الميزانيات: يُعاد ضبط حالة التنبيه عند تغيّر الشهر المحلي
     (credit_monthly_reset) — فلا يعلّق السقف المارَّ التنبيهات للأبد.
+
+    تُعالَج كل حدود ائتمانية مرة واحدة بالضبط لكل دورة — كما في budget_check
+    (الوضع السابق كان يكرر الحساب مرة لكل منشئ حدّ في المساحة المشتركة).
     """
-    from app.database.crud import credit_monthly_reset, credit_usage, list_credit_limits
+    from app.database.crud import credit_monthly_reset, credit_usage
     from app.database.models import CreditLimit
 
     db = SessionLocal()
     try:
-        user_ids = db.query(CreditLimit.telegram_user_id).distinct().all()
+        limit_ids = [
+            lid for (lid,) in db.query(CreditLimit.id).order_by(CreditLimit.created_at.asc()).all()
+        ]
     except Exception:
-        logger.exception("خطأ في جلب المستخدمين للحدود الائتمانية")
+        logger.exception("خطأ في جلب الحدود الائتمانية")
         db.close()
         return
     db.close()
 
-    for (uid,) in user_ids:
+    for lid in limit_ids:
         db = SessionLocal()
         try:
-            limits = list_credit_limits(db, uid)
-            for lim in limits:
-                credit_monthly_reset(db, lim)
-                usage = credit_usage(db, lim)
-                if usage["amount"] <= 0 or usage["limit"] <= 0:
-                    continue
-                await _notify_credit(context, db, lim, usage)
+            limit_row = db.query(CreditLimit).filter(CreditLimit.id == lid).first()
+            if limit_row is None:
+                continue
+            credit_monthly_reset(db, limit_row)
+            usage = credit_usage(db, limit_row)
+            if usage["amount"] <= 0 or usage["limit"] <= 0:
+                continue
+            await _notify_credit(context, db, limit_row, usage)
         except Exception:
-            logger.exception("خطأ في فحص حد ائتماني للمستخدم %s", uid)
+            logger.exception("خطأ في فحص حد ائتماني #%s", lid)
         finally:
             db.close()
 

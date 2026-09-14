@@ -33,6 +33,7 @@ from bot.reminders import (
 )
 
 USER_A = 111
+USER_B = 222
 
 
 def _run(coro):
@@ -261,6 +262,55 @@ class TestCreditCheck:
         row = db.query(models.CreditLimit).filter_by(person="لؤي").first()
         assert row.alerted_status == 2
         db.close()
+
+    def test_processes_each_limit_once_per_workspace(self, db_env, monkeypatch):
+        """عضوان في مساحة واحدة لكلٌّ حدّ — يُعالَج كل حد مرة واحدة لا مرتين."""
+        from app.database.crud import credit_usage as real_credit_usage
+        from app.database.crud import set_credit_limit
+
+        db = db_env()
+        db.add(models.WorkspaceMember(workspace_id=USER_A, telegram_user_id=USER_A))
+        db.add(models.WorkspaceMember(workspace_id=USER_A, telegram_user_id=USER_B))
+        db.commit()
+        set_credit_limit(db, USER_A, "أحمد", "1000")
+        set_credit_limit(db, USER_B, "سارة", "1000")
+        db.close()
+
+        calls = []
+
+        def _spy(session, limit_row):
+            calls.append(limit_row.id)
+            return real_credit_usage(session, limit_row)
+
+        monkeypatch.setattr("app.database.crud.credit_usage", _spy)
+        _run(credit_check(_make_context()))
+        assert len(calls) == 2  # مرة لكل حد، لا مرة لكل منشئ حد في المساحة
+        assert len(set(calls)) == 2
+
+
+class TestBudgetCheck:
+    def test_processes_each_budget_once_per_workspace(self, db_env, monkeypatch):
+        """عضوان في مساحة واحدة لكلٌّ ميزانية — تُعالَج مرة واحدة لا مرتين."""
+        from app.database.crud import budget_usage as real_budget_usage
+        from app.database.crud import create_budget
+
+        db = db_env()
+        db.add(models.WorkspaceMember(workspace_id=USER_A, telegram_user_id=USER_A))
+        db.add(models.WorkspaceMember(workspace_id=USER_A, telegram_user_id=USER_B))
+        db.commit()
+        create_budget(db, USER_A, "person", "أحمد", "500")
+        create_budget(db, USER_B, "person", "سارة", "500")
+        db.close()
+
+        calls = []
+
+        def _spy(session, budget):
+            calls.append(budget.id)
+            return real_budget_usage(session, budget)
+
+        monkeypatch.setattr("app.database.crud.budget_usage", _spy)
+        _run(budget_check(_make_context()))
+        assert len(calls) == 2  # مرة لكل ميزانية، لا مرة لكل مبتدئ ميزانية في المساحة
 
 
 class TestSetupReminderB3:
