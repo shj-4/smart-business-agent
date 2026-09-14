@@ -46,7 +46,10 @@ def create_transaction(
 
     vat_rate = _to_decimal(data.get("vat_rate"))
     vat_amount = _to_decimal(data.get("vat_amount"))
-    if vat_rate is not None and (vat_rate < 0 or vat_rate > 1000):
+    # ضريبة قيمة مضافة حقيقية لا تتجاوز 100% — حد أعلى منطقي يطابق (وأشد من)
+    # قيد العمود Numeric(6,3) الذي يقبل حتى 999.999؛ الفحص القديم سمح حتى 1000
+    # فيتجاوز الحد التخزيني للعمود ويعطي تعارضًا بين القيد البرمجي وقيد القاعدة.
+    if vat_rate is not None and (vat_rate < 0 or vat_rate > 100):
         vat_rate = None
     if vat_amount is not None and vat_amount < 0:
         vat_amount = None

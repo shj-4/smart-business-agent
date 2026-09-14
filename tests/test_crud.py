@@ -724,6 +724,39 @@ class TestVatFields:
         assert tx.vat_rate is None
         assert tx.vat_amount is None
 
+    def test_vat_rate_over_100_rejected_before_db_limit(self, db_session):
+        """ما بين 100% وحدّ العمود الأقصى (999.999) مرفوض الآن — الضريبة الحقيقية لا
+        تتجاوز 100%، وكان الفحص البرمجي القديم (حتى 1000) يسخّر قيدًا أشد من القاعدة."""
+        for rate in (101, 500, Decimal("999.999")):
+            tx = create_transaction(
+                db_session,
+                USER_A,
+                {
+                    "type": "expense",
+                    "amount": 100,
+                    "currency": "ILS",
+                    "vat_rate": rate,
+                    "description": "اختبار حد الضريبة",
+                },
+                raw_message="اختبار",
+            )
+            assert tx.vat_rate is None, f"rate={rate} should be rejected"
+
+    def test_vat_rate_at_100_accepted(self, db_session):
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 200,
+                "currency": "ILS",
+                "vat_rate": 100,
+                "description": "اختبار حد أقصى مقبول",
+            },
+            raw_message="اختبار",
+        )
+        assert tx.vat_rate == Decimal("100.000")
+
     def test_vat_fields_in_recent_records(self, db_session):
         tx = create_transaction(
             db_session,
