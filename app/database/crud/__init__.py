@@ -74,6 +74,7 @@ from .records import (
     get_period_range,
     get_record_by_id,
     list_recent_records,
+    merge_person,
     restore_last_deleted,
     run_query,
     search_records,

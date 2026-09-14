@@ -23,6 +23,7 @@ from app.database.crud import (
     mark_invoice_paid,
     mark_overdue_invoices,
     mark_overdue_tasks,
+    merge_person,
     monthly_totals,
     person_debts,
     restore_last_deleted,
@@ -32,7 +33,7 @@ from app.database.crud import (
     set_order_status,
     undo_last_record,
 )
-from app.database.models import CreditLimit, Invoice, Note, Task, Transaction
+from app.database.models import Budget, CreditLimit, Invoice, Note, Task, Transaction
 from app.timeutil import now_utc, to_local_naive, to_utc_naive
 
 USER_A = 111
@@ -776,6 +777,89 @@ class TestVatFields:
         entry = next(e for e in list_recent_records(db_session, USER_A) if e["id"] == tx.id)
         assert entry["vat_rate"] == Decimal("17.000")
         assert entry["vat_amount"] == Decimal("17.00")
+
+
+# ---------- دمج أسماء الأطراف (#داشبورد) ----------
+
+
+class TestMergePerson:
+    def _seed_source(self, db_session):
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "محل النور", "description": "فاتورة"},
+            raw_message="t1",
+        )
+        create_note(
+            db_session,
+            USER_A,
+            {"type": "order", "person": "محل النور", "description": "توصيل"},
+            raw_message="n1",
+        )
+        create_task(
+            db_session,
+            USER_A,
+            {"person": "محل النور", "description": "متابعة", "date": "2026-01-01"},
+            raw_message="k1",
+        )
+        create_invoice(
+            db_session,
+            USER_A,
+            {"person": "محل النور", "amount": 50, "currency": "ILS", "description": "ذمة"},
+            raw_message="i1",
+        )
+        set_credit_limit(db_session, USER_A, "محل النور", 500)
+
+    def test_merge_renames_across_all_models(self, db_session):
+        self._seed_source(db_session)
+        changed = merge_person(db_session, "محل النور", "محل النهار")
+
+        for model in (Transaction, Note, Task, Invoice):
+            assert (
+                db_session.query(model).filter(model.person == "محل النور").count() == 0
+            ), model.__name__
+            assert (
+                db_session.query(model).filter(model.person == "محل النهار").count() == 1
+            ), model.__name__
+        assert [lim.person for lim in list_credit_limits(db_session, USER_A)] == ["محل النهار"]
+        assert changed >= 5
+
+    def test_merge_credit_collision_keeps_target(self, db_session):
+        set_credit_limit(db_session, USER_A, "أصل", 100)
+        set_credit_limit(db_session, USER_A, "هدف", 1000)
+        merge_person(db_session, "أصل", "هدف")
+
+        limits = list_credit_limits(db_session, USER_A)
+        assert [lim.person for lim in limits] == ["هدف"]
+        assert limits[0].limit_amount == Decimal("1000.00")
+
+    def test_merge_renames_person_budget(self, db_session):
+        from app.database.crud import create_budget
+
+        create_budget(db_session, USER_A, "person", "مورّد قديم", 500)
+        merge_person(db_session, "مورّد قديم", "مورّد جديد")
+
+        budgets = db_session.query(Budget).filter(Budget.scope == "person").all()
+        assert [b.person for b in budgets] == ["مورّد جديد"]
+
+    def test_merge_invalidates_caches_for_owners(self, db_session, monkeypatch):
+        import app.database.crud.common as common_mod
+
+        emitted = []
+        monkeypatch.setattr(common_mod, "emit", lambda name, **kwargs: emitted.append(name))
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 10, "currency": "ILS", "person": "مدين", "description": "x"},
+            raw_message="t",
+        )
+        merge_person(db_session, "مدين", "دائن")
+
+        assert "data_written" in emitted
+
+    def test_merge_noop_without_valid_names(self, db_session):
+        assert merge_person(db_session, "  ", "ب") == 0
+        assert merge_person(db_session, "أ", "أ") == 0
 
 
 # ---------- الحدود الائتمانية (#26) ----------

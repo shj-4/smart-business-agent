@@ -30,7 +30,7 @@ from app.cache import start_sweeper
 from app.charts import _convert_month_currency_groups, generate_global_monthly_chart
 from app.config import TELEGRAM_BOT_TOKEN, settings
 from app.database.db import engine, get_db
-from app.database.models import Budget, Invoice, Note, Task, Transaction, WorkspaceMember
+from app.database.models import Budget, Note, Task, Transaction, WorkspaceMember
 from app.exchange import convert_totals_to_base
 from app.sentry import install_sentry
 from app.timeutil import now_local, to_local_naive
@@ -361,11 +361,13 @@ def _category_tops(db: Session, base: str, limit: int = 6) -> list[dict]:
     return out[:limit]
 
 
-def _party_rows(db: Session, base: str, limit: int = 500) -> list[dict]:
+def _party_rows(db: Session, base: str) -> list[dict]:
     """تجمع أسماء الأطراف (عملاء/موردون) عبر المعاملات والطلبيات والمهام.
 
     كل طرف = اسم نصي؛ المجاميع تُوحَّد بالعملة الأساسية (المخزَّنة عند
-    التسجيل إن توافقت، وإلا بسعر اليوم). تُرجع الصفوف مرتبة بعدد السجلات.
+    التسجيل إن توافقت، وإلا بسعر اليوم). لا يقصّ أي حزام بيانات — المبالغ
+    مشفّرة فلا يمكن جمعها عبر SQL، لذا يجب سحب كل المعاملات وجمعها في Python
+    لضمان ظهور أرصدة الأطراف كاملة بلا أخطاء صامتة.
     """
     notes_count = dict(
         db.query(Note.person, func.count(Note.id))
@@ -395,7 +397,6 @@ def _party_rows(db: Session, base: str, limit: int = 500) -> list[dict]:
         )
         .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
         .order_by(Transaction.created_at.desc())
-        .limit(limit)
         .all()
     )
     agg: dict = {}
@@ -656,7 +657,7 @@ async def dashboard(
             "counts": counts,
             "month_cards": month_cards,
             "top_categories": _category_tops(db, base),
-            "top_parties": _party_rows(db, base, limit=400)[:6],
+            "top_parties": _party_rows(db, base)[:6],
             "transactions": _recent_transactions(db, limit=10),
             "notes": _recent_notes(db, limit=10),
             "overdue_tasks": [t for t in _recent_tasks(db, limit=100) if t["status"] == "overdue"],
@@ -858,7 +859,7 @@ async def dashboard_tasks(
             seen.add(anchor)
             mark_overdue_tasks(db, anchor)
     except Exception:
-        pass
+        logger.exception("فشل تحديث المهام المتأخرة في لوحة المهام — حالات التأخر لن تنعكس")
 
     base_path = "/dashboard/tasks"
     params: dict = {}
@@ -1075,16 +1076,14 @@ async def dashboard_customers_merge(
     _csrf: None = Depends(require_dashboard_csrf),
 ):
     """دمج اسمين لنفس الطرف: استبدال source بـ target في كل السجلات."""
+    from app.database.crud import merge_person
+
     raw = (await request.body()).decode("utf-8", errors="replace")
     parsed = urllib.parse.parse_qs(raw)
     source = (parsed.get("source") or [""])[0].strip()
     target = (parsed.get("target") or [""])[0].strip()
-    if source and target and source != target:
-        for model in (Transaction, Task, Note, Invoice):
-            db.query(model).filter(model.person == source).update(
-                {model.person: target}, synchronize_session=False
-            )
-        db.commit()
+    if source and target:
+        merge_person(db, source, target)
     return RedirectResponse(url="/dashboard/customers?merged=1", status_code=303)
 
 

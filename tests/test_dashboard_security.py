@@ -384,3 +384,51 @@ def test_explicit_dashboard_password_not_touched(tmp_path, monkeypatch, caplog):
     assert password == PASSWORD
     assert not (tmp_path / "creds.txt").exists()
     assert "ولدّت كلمة مرور مؤقتة" not in caplog.text
+
+
+def test_party_rows_computes_full_aggregates_without_cap(db_session):
+    """_party_rows لا يقصّ المعاملات — يُعدّ كل السجلات لضمان صحة أرقام الأطراف."""
+    for _ in range(520):
+        db_session.add(
+            models.Transaction(
+                telegram_user_id=1,
+                type="expense",
+                amount=Decimal("10.00"),
+                currency="ILS",
+                person="عميل_كامل",
+                description="سجل",
+                raw_message="x",
+            )
+        )
+    db_session.commit()
+
+    rows = api._party_rows(db_session, "ILS")
+    target = [r for r in rows if r["person"] == "عميل_كامل"]
+    assert len(target) == 1
+    assert target[0]["records"] == 520
+    assert target[0]["expense"] == "5,200.00"
+
+
+def test_dashboard_tasks_logs_overdue_mark_failure(client, db_session, monkeypatch, caplog):
+    """خطأ mark_overdue_tasks يُسجَّل في السجل ولا يُبتلع بصمت."""
+    import logging
+
+    db_session.add(
+        models.Task(
+            telegram_user_id=1,
+            status="pending",
+            description="مهمة اختبار",
+            raw_message="x",
+        )
+    )
+    db_session.commit()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic mark_overdue_tasks crash")
+
+    monkeypatch.setattr("app.database.crud.mark_overdue_tasks", _boom)
+
+    with caplog.at_level(logging.ERROR, logger="app.dashboard"):
+        resp = client.get("/dashboard/tasks", headers=_auth_header())
+    assert resp.status_code == 200
+    assert "فشل تحديث المهام المتأخرة" in caplog.text

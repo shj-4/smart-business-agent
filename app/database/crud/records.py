@@ -13,6 +13,9 @@ from app.audit import log_audit
 from app.cache import get_or_set
 from app.config import settings
 from app.database.models import (
+    Budget,
+    CreditLimit,
+    Invoice,
     Note,
     Task,
     Transaction,
@@ -827,3 +830,80 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
     log_audit(row.telegram_user_id, "update", f"note:{row.id}", detail=f"changes={changes}")
     _invalidate_caches(db, row.telegram_user_id)
     return row
+
+def merge_person(db: Session, source: str, target: str) -> int:
+    """يدمج اسمين لنفس الطرف عبر كل السجلات ذات الصلة.
+
+    يستبدل source بـ target في Transaction/Task/Note/Invoice/CreditLimit وبقية
+    ميزانيات النوع person (لوحة التحكم عرض شامل لكل المستخدمين). بعد الكتابة
+    يُبطَل كاش رؤية كل مستخدم متأثر (ولأعضاء مساحاته عبر accessible_user_ids)
+    حتى لا تبقى الأسماء القديمة في ذاكرة run_query حتى انتهاء TTL — كان مسار
+    الدمج القديم يحدّث عبر SQL مباشرة من خارج طبقة crud فيتخطى إبطال الكاش.
+
+    CreditLimit وميزانية person تحملان قيدًا فريدًا (مستخدم + اسم): إن كان
+    للمستخدم سجلّان (المصدر والهدف) يبقى سجل الهدف ويُسقَط سجل المصدر حتى لا
+    يُخلف دمجٌ اسمًا قديمًا مرتبطًا بحد ائتماني غير مطابق للسجلات الجديدة.
+    يعيد عدد الصفوف المتأثرة (تحديثات + حذف تصادمات الائتمان/الميزانيات).
+    """
+    from app.database.crud import _clean_person, _invalidate_caches
+
+    source = _clean_person(source)
+    target = _clean_person(target)
+    if not source or not target or source == target:
+        return 0
+
+    affected: set[int] = set()
+    for model in (Transaction, Note, Task, Invoice, CreditLimit, Budget):
+        for (uid,) in db.query(model.telegram_user_id).filter(model.person == source).distinct():
+            affected.add(uid)
+
+    changed = 0
+
+    def _resolve_unique_per_user(model, source_uids: set[int], extra=None) -> None:
+        """يعيد تسمية source UID-بـ-UID متجنّبًا تصادم القيد الفريد (مستخدم+اسم):
+        من له اسمان معًا يبقى اسم الهدف ويسقط صف المصدر."""
+        nonlocal changed
+        if not source_uids:
+            return
+        q = db.query(model).filter(model.person == source)
+        if extra is not None:
+            q = q.filter(extra)
+        target_filters = [model.person == target]
+        if extra is not None:
+            target_filters.append(extra)
+        collided = source_uids & {
+            uid
+            for (uid,) in db.query(model.telegram_user_id)
+            .filter(*target_filters)
+            .all()
+        }
+        if collided:
+            changed += q.filter(model.telegram_user_id.in_(collided)).delete(
+                synchronize_session=False
+            )
+        rest = source_uids - collided
+        if rest:
+            changed += q.filter(model.telegram_user_id.in_(rest)).update(
+                {model.person: target}, synchronize_session=False
+            )
+
+    for model in (Transaction, Note, Task, Invoice):
+        changed += (
+            db.query(model)
+            .filter(model.person == source)
+            .update({model.person: target}, synchronize_session=False)
+        )
+    _resolve_unique_per_user(
+        CreditLimit,
+        {uid for (uid,) in db.query(CreditLimit.telegram_user_id).filter(CreditLimit.person == source).all()},
+    )
+    _resolve_unique_per_user(
+        Budget,
+        {uid for (uid,) in db.query(Budget.telegram_user_id).filter(Budget.person == source, Budget.scope == "person").all()},
+        extra=Budget.scope == "person",
+    )
+
+    db.commit()
+    for uid in sorted(affected):
+        _invalidate_caches(db, uid)
+    return int(changed)
