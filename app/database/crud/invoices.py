@@ -81,14 +81,18 @@ def list_invoices(
         q = q.filter(Invoice.status == status)
     invoices = q.order_by(Invoice.created_at.desc()).limit(limit).all()
 
-    # تعليم المتأخرة (حالة عرض) عند قراءتها — التغيير الفعلي للموديل الوارد في
-    # المهمة يبقى في مهمة الفحص الدوري حتى لا نكتب على كل قراءة.
+    # حالة العرض فقط: فاتورة pending استحقّت توّها تبدو "overdue" في القراءة دون
+    # كتابة (التحديث الفعلي حصرًا في mark_overdue_invoices). نفصل الكائن المغيَّر
+    # عن الجلسة قبل التعديل حتى لا يُفلشه أي commit() لاحق على نفس الجلسة خارج
+    # مسار الفحص الدوري — كان تعديل حقل مُتتبَّع فخًّا كامنًا.
+    overdue_utc = now_utc()
     for inv in invoices:
         if (
             inv.status == "pending"
             and inv.due_date is not None
-            and to_local_naive(inv.due_date) < to_local_naive(now_utc())
+            and to_local_naive(inv.due_date) < to_local_naive(overdue_utc)
         ):
+            db.expunge(inv)
             inv.status = "overdue"
     return invoices
 

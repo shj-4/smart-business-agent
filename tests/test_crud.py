@@ -32,7 +32,7 @@ from app.database.crud import (
     set_order_status,
     undo_last_record,
 )
-from app.database.models import CreditLimit, Note, Task, Transaction
+from app.database.models import CreditLimit, Invoice, Note, Task, Transaction
 from app.timeutil import now_utc, to_local_naive, to_utc_naive
 
 USER_A = 111
@@ -623,6 +623,26 @@ class TestInvoiceCrud:
         inv = self._invoice(db_session)
         assert mark_invoice_paid(db_session, USER_B, inv.id) is False
         assert list_invoices(db_session, USER_B) == []
+
+    def test_list_overdue_display_not_committed(self, db_session):
+        """تعليم "متأخرة" في القراءة حالة عرض فقط: commit لاحق على نفس الجلسة
+        يجب ألا يُثبّت status="overdue" في القاعدة (التحديث حصرًا في الفحص الدوري)."""
+        inv = self._invoice(db_session)
+        inv.due_date = now_utc() - timedelta(days=2)
+        db_session.commit()
+
+        # تُعرض "متأخرة" للقراءة (السلوك القائم)
+        listed = list_invoices(db_session, USER_A)
+        assert listed[0].id == inv.id
+        assert listed[0].status == "overdue"
+
+        # أي commit لاحق على نفس الجلسة لا يُفلش هذا التعديل "التجميلي"
+        db_session.commit()
+
+        fresh = (
+            db_session.query(Invoice).filter(Invoice.id == inv.id).first()
+        )
+        assert fresh.status == "pending"
 
 
 # ---------- دورة حياة الطلبيات (#38) ----------
