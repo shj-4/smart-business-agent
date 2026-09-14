@@ -231,6 +231,9 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
     """يبحث عن مهمة معلّقة يطابق وصفها الوصف المقدّم (مطابقة جزئية غير حساسة للحالة).
 
     لا يمكن استخدام SQL LIKE لأن الوصف مشفّر — نجلب المهام ونطابق في Python.
+    يُحدّ الجلب بـ _TASK_FETCH_CAP مثل list_pending_tasks/list_overdue_tasks حتى لا
+    يُفك تشفير كامل جدول المهام نصيًا لكل /done أو intent="complete_task"؛ المطابقة
+    خارج النافذة تُرفض (يحتاج المستخدم وصفًا أدق).
     """
     from app.database.crud import accessible_user_ids
 
@@ -244,6 +247,7 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
             Task.deleted_at.is_(None),
         )
         .order_by(Task.created_at.desc())
+        .limit(_TASK_FETCH_CAP)
         .all()
     )
     for task in tasks:

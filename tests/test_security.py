@@ -202,6 +202,45 @@ class TestSumInPython:
         assert find_pending_task(db_session, 111, "لا وجود لها") is None
 
 
+class TestFindPendingTaskBounds:
+    def test_fetch_is_capped_like_list_functions(self, db_session, monkeypatch):
+        import app.database.crud.tasks as tasks_mod
+
+        monkeypatch.setattr(tasks_mod, "_TASK_FETCH_CAP", 3)
+        from app.database.crud import create_task, find_pending_task
+
+        # أقدم مهمة تطابق الهدف لكنها خارج نافذة الجلب (أحدث 3 مهام فقط تُجلب)
+        create_task(db_session, 111, {"description": "شراء معدات مخبرية"}, raw_message="buy")
+        for i in range(5):
+            create_task(
+                db_session,
+                111,
+                {"description": f"مهمة روتينية {i}"},
+                raw_message="routine",
+            )
+
+        # تُفك تشفير وتُقارن أصغر نافذة فقط (الكاب) — لا كل جدول المهام بلا حد
+        assert find_pending_task(db_session, 111, "معدات") is None
+
+    def test_match_within_cap_found(self, db_session, monkeypatch):
+        import app.database.crud.tasks as tasks_mod
+
+        monkeypatch.setattr(tasks_mod, "_TASK_FETCH_CAP", 3)
+        from app.database.crud import create_task, find_pending_task
+
+        create_task(db_session, 111, {"description": "مهمة أصلية"}, raw_message="a")
+        for i in range(3):
+            create_task(
+                db_session,
+                111,
+                {"description": f"تحديثات {i}"},
+                raw_message="t",
+            )
+        task = find_pending_task(db_session, 111, "تحديثات")
+        assert task is not None
+        assert task.description == "تحديثات 2"
+
+
 class TestVoiceSizeLimit:
     from types import SimpleNamespace
 
