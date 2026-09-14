@@ -22,12 +22,23 @@ _PRIORITY_LOW = frozenset(
 # "مهمّ" و"كل أسبوع" و"مستعجل" نظيراتها بلا تشكيل.
 _HARAKAT = re.compile(r"[\u064b-\u0652\u0670]")
 _ALEF_TABLE = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا"})
+_WS_RUN = re.compile(r"\s+")
 
 
 def _norm_token(value) -> str:
     """يوحّد مدخل نصي: تجريد التشكيل وتوحيد الألف ثم تطبيع حالة الأحرف."""
     s = _HARAKAT.sub("", (value or "").strip())
     return s.translate(_ALEF_TABLE).lower()
+
+
+def fold_text(value) -> str:
+    """يطوي نصًا للمطابقة الحرفية: ما تفعله _norm_token زائد جمع المسافات
+    المتتالية (فواصل/أسطر متعددة) في مسافة واحدة.
+
+    يستخدمها حارس حقن البرومبت (app/ai_service.py) لأنماط قد يكتبها المستخدم
+    بتشكيل أو بمسافات مختلفة عن قوائم الكلمات.
+    """
+    return _WS_RUN.sub(" ", _norm_token(value))
 
 
 def normalize_priority(value) -> str:

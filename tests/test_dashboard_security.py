@@ -7,6 +7,7 @@
 
 import base64
 import os
+import re
 from decimal import Decimal
 
 import pytest
@@ -30,6 +31,12 @@ XSS_CATEGORY = "<svg/onload=alert(2)>"
 def _auth_header(user: str = USER, password: str = PASSWORD) -> dict:
     token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
     return {"Authorization": f"Basic {token}"}
+
+
+def _extract_csrf(html: str) -> str:
+    match = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    assert match, "صفحة الأطراف يجب أن تُضمّن رمز CSRF مخفيًا في النموذج"
+    return match.group(1)
 
 
 @pytest.fixture
@@ -213,7 +220,8 @@ def test_new_ui_features_require_auth_and_render(client, db_session):
 
 
 def test_merge_replaces_person_across_records(client, db_session):
-    """دمج اسمين يعيد كتابة السجلّات كلها (معاملات/مهام/طلبيات/فواتير)."""
+    """دمج اسمين يعيد كتابة السجلّات كلها (معاملات/مهام/طلبيات/فواتير) —
+    عبر المسار الشرعي: تحميل الصفحة (تصدر الكوكي) ثم POST بالرمز المضمّن."""
     db_session.add(
         models.Transaction(
             telegram_user_id=1,
@@ -246,10 +254,14 @@ def test_merge_replaces_person_across_records(client, db_session):
     )
     db_session.commit()
 
+    page = client.get("/dashboard/customers", headers=_auth_header())
+    assert page.status_code == 200
+    csrf = _extract_csrf(page.text)
+
     resp = client.post(
         "/dashboard/customers/merge",
         headers=_auth_header(),
-        data={"source": "محل النور", "target": "محل النهار"},
+        data={"source": "محل النور", "target": "محل النهار", "csrf_token": csrf},
     )
     assert resp.status_code in (200, 303)
     resp = client.get("/dashboard/customers", headers=_auth_header())
@@ -270,6 +282,66 @@ def test_merge_replaces_person_across_records(client, db_session):
     )
     assert count == 1
     assert order_count == 1
+
+
+class TestCSRFProtection:
+    """حماية CSRF لـ POST الدمج: لا ينفَّذ شكل خارجي باعتماديات المستخدم."""
+
+    def _seed_party(self, db_session):
+        db_session.add(
+            models.Transaction(
+                telegram_user_id=1,
+                type="expense",
+                amount=Decimal("5.00"),
+                currency="ILS",
+                person="طرف_csrf",
+                category="اختبار",
+                description="row for CSRF form",
+                raw_message="x",
+            )
+        )
+        db_session.commit()
+
+    def test_customers_page_embeds_token_and_sets_cookie(self, client, db_session):
+        self._seed_party(db_session)
+        resp = client.get("/dashboard/customers", headers=_auth_header())
+        assert resp.status_code == 200
+        token = _extract_csrf(resp.text)
+        assert len(token) >= 20
+        set_cookie = next(
+            (v for k, v in resp.headers.items() if k.lower() == "set-cookie"), ""
+        )
+        assert "sb_csrf" in set_cookie
+        assert "samesite=strict" in set_cookie.lower()
+        assert "httponly" in set_cookie.lower()
+
+    def test_merge_without_csrf_rejected(self, client):
+        resp = client.post(
+            "/dashboard/customers/merge",
+            headers=_auth_header(),
+            data={"source": "أ", "target": "ب"},
+        )
+        assert resp.status_code == 403
+
+    def test_merge_with_mismatched_token_rejected(self, client, db_session):
+        resp = client.post(
+            "/dashboard/customers/merge",
+            headers=_auth_header(),
+            data={
+                "source": "أ",
+                "target": "ب",
+                "csrf_token": "forged-token-value-that-is-quite-long-12345",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_merge_from_foreign_origin_rejected(self, client, db_session):
+        resp = client.post(
+            "/dashboard/customers/merge",
+            headers={**_auth_header(), "Origin": "https://evil.example"},
+            data={"source": "أ", "target": "ب"},
+        )
+        assert resp.status_code == 403
 
 
 def test_generated_dashboard_password_never_logged(tmp_path, monkeypatch, caplog):

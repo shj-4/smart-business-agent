@@ -40,6 +40,7 @@
                     <td class="nowrap">{{ p.last_seen or '' }}</td>
                     <td>
                         <form class="merge-form" method="post" action="/dashboard/customers/merge">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <input type="hidden" name="source" value="{{ p.person }}">
                             <input type="text" name="target" placeholder="ادمج في..." required>
                             <button type="submit">دمج</button>

@@ -21,11 +21,16 @@ from tenacity import (
 )
 
 from app.config import GEMINI_API_KEY
+from app.normalize import fold_text
 
 logger = logging.getLogger(__name__)
 
-# أنماط حقن البرومبت (prompt injection) تُكتشف قبل الاتصال بـ Gemini،
-# وتُحوَّل الرسالة إلى محادثة عامة بدل السماح لها بتنفيذ/تسجيل.
+# حارس حقن البرومبت — خط الدفاع الأول فقط، وليس حماية حقيقية:
+#   - المطابقة جزئية (substring) بعد طيّ النص (تشكيل/همزات/مسافات).
+#   - صياغة مختلفة (مرادف خارج القائمة، حرف زائد، علامة ترقيم داخل العبارة)
+#     قد تتجاوزه. الأمان الفعلي يأتي من أن نص المستخدم لا ينفّذ أوامر أبدًا:
+#     مخرج Gemini يفسَّر إلى intent محدود مسبقًا (record/chat/...)، ولا يُنفَّذ
+#     نص حر كمعلّمات. لا نعتمد على هذا الحارس وحده في أي قرار أمني.
 INJECTION_PATTERNS = (
     "ignore all previous",
     "ignore previous",
@@ -61,11 +66,20 @@ INJECTION_PATTERNS = (
     "jailbreak",
 )
 
+# الأنماط مطويّة مرّة واحدة عند التحميل (نفس معيار الطيّ المطبَّق على كلام
+# المستخدم) كي يطابق «تجاهلْ كل  التعليماتِ» نظيرها المخزون.
+_FOLDED_INJECTION_PATTERNS = tuple(fold_text(p) for p in INJECTION_PATTERNS)
+
 
 def has_injection_pattern(text: str | None) -> bool:
-    """يكشف وجود أنماط حقن برومبت شائعة في رسالة المستخدم (بمطابقة جزئية وحرفية)."""
-    needle = (text or "").lower()
-    return any(pattern in needle for pattern in INJECTION_PATTERNS)
+    """يكشف أنماط حقن برومبت شائعة في رسالة المستخدم (خط دفاع أول استدلالي).
+
+    يطابق جزئيًا بعد طي النص (تجريد التشكيل، توحيد الألف، جمع المسافات).
+    ليست حماية مضمونة: صياغة مختلفة/مرادف خارج القائمة قد تتجاوزها، فلا
+    تُعتمد وحدها لقرار أمني (انظر ملاحظة INJECTION_PATTERNS أعلاه).
+    """
+    needle = fold_text(text)
+    return any(pattern in needle for pattern in _FOLDED_INJECTION_PATTERNS)
 
 
 client = genai.Client(api_key=GEMINI_API_KEY)

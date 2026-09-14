@@ -191,9 +191,11 @@ def remove_from_workspace(
     )
     if row is None or row.workspace_id != wid:
         return False
+    members = workspace_member_ids(db, wid)
     db.delete(row)
     db.commit()
-    _invalidate_caches(db, wid)
+    for uid in members:
+        _invalidate_caches(db, uid)
     return True
 
 def leave_workspace(db: Session, telegram_user_id: int) -> bool:
@@ -212,9 +214,11 @@ def leave_workspace(db: Session, telegram_user_id: int) -> bool:
     )
     if row is None:
         return False
+    members = workspace_member_ids(db, wid)
     db.delete(row)
     db.commit()
-    _invalidate_caches(db, wid)
+    for uid in members:
+        _invalidate_caches(db, uid)
     return True
 
 def list_workspace(db: Session, telegram_user_id: int) -> dict | None:

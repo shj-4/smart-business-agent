@@ -261,6 +261,7 @@ async def _handle_record(
     if rtype not in RECORD_HINTS:
         await query.edit_message_text("اختر نوع العملية:", reply_markup=build_menu(RECORD_MENU))
         return
+    _clear_all_pending(context)
     context.user_data["record_seed_type"] = rtype
     await query.edit_message_text(
         f"{RECORD_HINTS[rtype]}\n\n(أرسل /cancel لإلغاء)",
@@ -397,6 +398,7 @@ async def _handle_task_edit(
             "لم أجد هذه المهمة (ربما حُذفت).", reply_markup=_home_keyboard()
         )
         return
+    _clear_all_pending(context)
     context.user_data["pending_task_edit_id"] = task.id
     await query.edit_message_text(
         f"أرسل الوصف الجديد للمهمة:\nالوصف الحالي: {task.description}\n\n(أرسل /cancel للإلغاء)"
@@ -556,6 +558,7 @@ async def _handle_budget_list(
 async def _handle_budget_add(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, scope: str
 ) -> None:
+    _clear_all_pending(context)
     context.user_data["pending_budget"] = {"scope": scope}
     if scope == "person":
         prompt = "أرسل اسم الشخص والمبلغ:\nمثال — محمد 1500\n\n(أرسل /cancel للإلغاء)"
@@ -701,6 +704,7 @@ async def _workspace_create(
 async def _workspace_add(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    _clear_all_pending(context)
     context.user_data["pending_ws_invite"] = True
     await query.edit_message_text(
         "أرسل المعرّف الرقمي (Telegram ID) للشريك الذي تريد مشاركته:\n"
@@ -834,6 +838,7 @@ async def _handle_tool_chart(
 async def _handle_tool_convert(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    _clear_all_pending(context)
     context.user_data["pending_convert"] = True
     await query.edit_message_text(
         "أرسل التحويل بصيغة:\n"

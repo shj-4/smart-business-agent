@@ -762,6 +762,28 @@ class TestCreditLimits:
         row = list_credit_limits(db_session, USER_A)[0]
         assert credit_usage(db_session, row)["over"] is True
 
+    def test_usage_receivable_side_for_customer(self, db_session):
+        """عميل يزيد رصيده عليك (income > expense): side=receivable ويُقاس بالسقف."""
+        set_credit_limit(db_session, USER_A, "سامر", "1000")
+        create_transaction(
+            db_session, USER_A, {"type": "income", "amount": 900, "currency": "ILS", "person": "سامر"}, "بيع بالأجل"
+        )
+        row = list_credit_limits(db_session, USER_A)[0]
+        usage = credit_usage(db_session, row)
+        assert usage["side"] == "receivable"
+        assert usage["outstanding"] == Decimal("-900.00")
+        assert usage["amount"] == Decimal("900.00")
+        assert usage["percent"] == 90.0
+        assert usage["over"] is False
+
+    def test_usage_balanced(self, db_session):
+        set_credit_limit(db_session, USER_A, "خالد", "1000")
+        row = list_credit_limits(db_session, USER_A)[0]
+        usage = credit_usage(db_session, row)
+        assert usage["side"] == "balanced"
+        assert usage["amount"] == Decimal("0.00")
+        assert usage["over"] is False
+
 
 # ---------- الديون والأشخاص (#21) ----------
 
@@ -832,6 +854,25 @@ class TestBudgetCategoryScope:
         from app.database.crud import create_budget
 
         assert create_budget(db_session, USER_A, "category", "   ", "2000") is None
+
+    def test_category_does_not_match_partial(self, db_session):
+        """تصنيف «صيانة» لا يلتقط معاملة تصنيفها «صيانة سيارة» — مطابقة تامة كالشخص."""
+        from app.database.crud import budget_usage, create_budget
+
+        budget = create_budget(db_session, USER_A, "category", "صيانة", "1000")
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 300, "currency": "ILS", "category": "صيانة"},
+            "صيانة مباشرة",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 200, "currency": "ILS", "category": "صيانة سيارة"},
+            "تصنيف يحتوي الكلمة كجزء — يجب ألا يُحتسب",
+        )
+        assert budget_usage(db_session, budget)["spent"] == Decimal("300.00")
 
 
 # ---------- ميزانية الشخص: لا تُخلط العملات معًا ----------
@@ -926,7 +967,8 @@ class TestPersonMatchPrecision:
         budget = create_budget(db_session, USER_A, "person", self.PRECISE, "5000")
         assert budget_usage(db_session, budget)["spent"] == Decimal("400.00")
 
-    def test_budget_category_escapes_wildcards(self, db_session):
+    def test_budget_category_exact_match(self, db_session):
+        """مطابقة التصنيف تامة: «خصم_50%» لا يطابق «خصمX50Y»، والمحارف البدل نصّ حرفي."""
         from app.database.crud import budget_usage, create_budget
 
         budget = create_budget(db_session, USER_A, "category", "خصم_50%", "5000")
@@ -941,6 +983,12 @@ class TestPersonMatchPrecision:
             USER_A,
             {"type": "expense", "amount": 200, "currency": "ILS", "category": "خصمX50Y"},
             "تصنيف مختلف",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 300, "currency": "ILS", "category": "خصم_50%_إضافي"},
+            "تصنيف أطول من ميزانية التصنيف",
         )
         assert budget_usage(db_session, budget)["spent"] == Decimal("100.00")
 

@@ -263,6 +263,43 @@ class TestSharedWorkspace:
         _add_tx(db_session, 90, 50)
         assert get("run_query:91:total_expenses:this_month:None") == {"ILS": 6.0}
 
+    def test_remove_invalidates_cache_of_removed_member(self, db_session):
+        """عند إخراج عضو: يُبطل كاشه الفردي (حيث بدّلته الإجماليات المشتركة)."""
+        from app.cache import _UNSET, get
+        from app.cache import set as cache_set
+
+        owner, member = 710, 720
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, member)
+        accept_workspace_invite(db_session, member, owner)
+
+        # الكاش المخزن يُمثّل إجماليات المساحة (مبنية على accessible_user_ids)
+        for uid in (owner, member):
+            cache_set(f"run_query:{uid}:total_expenses:this_month:None", {"ILS": 300.0})
+
+        assert remove_from_workspace(db_session, owner, member) is True
+        # العضو المُخرَج لا يبقى يرى إجمالي المساحة حتى انتهاء TTL
+        assert get(f"run_query:{member}:total_expenses:this_month:None") is _UNSET
+        # المالك أيضًا (تغيّرت مجموعة المساحة)
+        assert get(f"run_query:{owner}:total_expenses:this_month:None") is _UNSET
+
+    def test_leave_invalidates_cache_of_leaver(self, db_session):
+        """عند مغادرة العضو: يُبطل كاشه الفردي وكاش الباقين في المساحة."""
+        from app.cache import _UNSET, get
+        from app.cache import set as cache_set
+
+        owner, member = 730, 740
+        create_workspace(db_session, owner)
+        invite_to_workspace(db_session, owner, member)
+        accept_workspace_invite(db_session, member, owner)
+
+        for uid in (owner, member):
+            cache_set(f"run_query:{uid}:total_expenses:this_month:None", {"ILS": 300.0})
+
+        assert leave_workspace(db_session, member) is True
+        assert get(f"run_query:{member}:total_expenses:this_month:None") is _UNSET
+        assert get(f"run_query:{owner}:total_expenses:this_month:None") is _UNSET
+
 
 class TestWorkspaceOwnershipTransfer:
     def test_transfer_ownership(self, db_session):

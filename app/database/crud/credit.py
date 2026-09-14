@@ -72,10 +72,13 @@ def get_credit_limit(db: Session, telegram_user_id: int, person: str) -> CreditL
     )
 
 def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
-    """استخدام السقف الائتماني لشخص: outstanding = المصروفات - الإيرادات.
+    """استخدام السقف الائتماني لشخص في كلا الاتجاهين.
 
-    موجب = الدين عليك لهذا الشخص؛ سلبي = يستفيد هو منك. يعيد:
-    {outstanding, limit, percent, over} حيث percent نسبة الدين الفعلي (الموجب فقط).
+    outstanding = المصروفات - الإيرادات: موجبة = ما عليك له، سالبة = ما هو مدين لك.
+    amount = القيمة المطلقة التي يُقاس عليها السقف؛ percent/over مبنيان عليها —
+    فيُنبي النظام عند تجاوز السقف سواء كان الدين عليك له (مورّد) أو عليه لك (عميل).
+    يعيد: {outstanding, amount, side, limit, percent, over}
+    side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced".
     """
     from app.database.crud import accessible_user_ids
 
@@ -92,13 +95,16 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     expense = sum(
         (r.amount for r in rows if r.amount is not None and r.type == "expense"), Decimal("0")
     )
-    outstanding = expense - income
-    total = outstanding.quantize(Decimal("0.01"))
+    outstanding = (expense - income).quantize(Decimal("0.01"))
+    amount = abs(outstanding)
     limit = (limit_row.limit_amount or Decimal("0")).quantize(Decimal("0.01"))
-    percent = float(total / limit * 100) if limit and total > 0 else 0.0
+    percent = float(amount / limit * 100) if limit and amount > 0 else 0.0
+    side = "payable" if outstanding > 0 else ("receivable" if outstanding < 0 else "balanced")
     return {
-        "outstanding": total,
+        "outstanding": outstanding,
+        "amount": amount,
+        "side": side,
         "limit": limit,
         "percent": round(percent, 1),
-        "over": total >= limit,
+        "over": amount >= limit,
     }

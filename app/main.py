@@ -10,8 +10,10 @@ setup_services.ps1. لوحة التحكم محتاجة ملفات قوالب ف�
 
 import base64
 import io
+import json
 import logging
 import os
+import re
 import secrets
 import urllib.parse
 from datetime import UTC, datetime, timedelta
@@ -120,6 +122,91 @@ def require_dashboard_auth(request: Request) -> None:
             detail="Unauthorized",
             headers={"WWW-Authenticate": 'Basic realm="Smart Business Agent"'},
         )
+
+
+# ---------- حماية CSRF (طلبات تغيير البيانات) ----------
+#
+# المصادقة على اللوحة Basic Auth فقط، والمتصفح يرسل اعتمادياتها تلقائيًا
+# لنفس origin دون تدخل المستخدم، فصفحة خبيثة قد تقدّم نموذجًا
+# <form action="http://host:8000/dashboard/customers/merge" method="post">
+# وتُنفَّذ باعتماديات المسجّل مسبقًا. الدفاعات الثلاثة:
+#   1) كوكي منفصلة SameSite=Strict + HttpOnly — لا تُرسل عبر مواقع أخرى
+#      ولا تُقرأ من JavaScript.
+#   2) رمز مزدوج (double-submit): قيمة المخفي في النموذج == قيمة الكوكي
+#      التي يضمّنها الخادم نفسه في الصفحة.
+#   3) فحص Origin/Referer لمطابقة مضيف اللوحة (صفة إضافية، غياب الترويسة
+#      لا يُفشل الطلب — الدفاع الأساسي هو الرمز).
+
+_CSRF_COOKIE = "sb_csrf"
+_CSRF_RE = re.compile(r"^[A-Za-z0-9_\-]{20,64}$")
+
+
+def _valid_csrf_token(token: str) -> bool:
+    return isinstance(token, str) and bool(_CSRF_RE.match(token))
+
+
+def _csrf_token_or_new(request: Request) -> str:
+    """رمز CSRF للصفحة: يُبقي رمز الكوكي القائم أو يولّد واحدًا جديدًا."""
+    token = request.cookies.get(_CSRF_COOKIE, "")
+    if not _valid_csrf_token(token):
+        token = secrets.token_urlsafe(32)
+    return token
+
+
+def _set_csrf_cookie(response: Response, token: str, request: Request) -> None:
+    response.set_cookie(
+        key=_CSRF_COOKIE,
+        value=token,
+        max_age=30 * 24 * 60 * 60,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+
+
+def _foreign_origin(request: Request) -> bool:
+    """هل صرّحت ترويسة Origin/Referer بمضيف خارج اللوحة؟ (غياب الترويسة → نعتمد على الرمز)."""
+    origin = request.headers.get("Origin")
+    if origin:
+        netloc = urllib.parse.urlparse(origin).netloc
+        return bool(netloc) and netloc != request.headers.get("host", "")
+    referer = request.headers.get("Referer")
+    if referer:
+        netloc = urllib.parse.urlparse(referer).netloc
+        return bool(netloc) and netloc != request.headers.get("host", "")
+    return False
+
+
+async def require_dashboard_csrf(request: Request) -> None:
+    """حماية CSRF لكل طلب يغيّر البيانات على /dashboard/* و /api/*.
+
+    أي endpoint مستقبلي method من نوع POST/PUT/DELETE عليها إضافة
+    `_csrf: None = Depends(require_dashboard_csrf)` بجانب require_dashboard_auth.
+    """
+    if _foreign_origin(request):
+        raise HTTPException(status_code=403, detail="CSRF check failed: foreign origin")
+
+    cookie_token = request.cookies.get(_CSRF_COOKIE, "")
+    posted_token = request.headers.get("X-CSRF-Token", "")
+    if not posted_token:
+        content_type = request.headers.get("content-type", "").lower()
+        raw = await request.body()  # Starlette يخفّف قراءة الجسم — يُعاد للـ handler كما هو
+        if "json" in content_type:
+            try:
+                posted_token = (json.loads(raw or b"{}") or {}).get("csrf_token", "") or ""
+            except Exception:
+                posted_token = ""
+        elif raw:
+            posted_token = urllib.parse.parse_qs(
+                raw.decode("utf-8", errors="replace")
+            ).get("csrf_token", [""])[0]
+
+    if not (
+        _valid_csrf_token(cookie_token)
+        and _valid_csrf_token(posted_token)
+        and secrets.compare_digest(cookie_token, posted_token)
+    ):
+        raise HTTPException(status_code=403, detail="CSRF check failed: token mismatch")
 
 
 def _period_start(period: str) -> datetime:
@@ -953,11 +1040,12 @@ async def dashboard_customers(
 ):
     """سجلّ الأطراف (عملاء/موردون): أسماء مجمّعة من المعاملات والطلبيات والمهام."""
     base = (settings.base_currency or "ILS").upper()
+    csrf_token = _csrf_token_or_new(request)
     rows = _party_rows(db, base)
     for row in rows:
         row["net_cls"] = "positive" if _to_pos(row["net"]) >= 0 else "negative"
     merged = request.query_params.get("merged")
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request,
         "customers.html",
         {
@@ -965,8 +1053,11 @@ async def dashboard_customers(
             "base_currency": base,
             "rows": rows,
             "merged": merged,
+            "csrf_token": csrf_token,
         },
     )
+    _set_csrf_cookie(resp, csrf_token, request)
+    return resp
 
 
 def _to_pos(value: str) -> float:
@@ -981,6 +1072,7 @@ async def dashboard_customers_merge(
     request: Request,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
+    _csrf: None = Depends(require_dashboard_csrf),
 ):
     """دمج اسمين لنفس الطرف: استبدال source بـ target في كل السجلات."""
     raw = (await request.body()).decode("utf-8", errors="replace")

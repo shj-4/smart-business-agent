@@ -334,7 +334,7 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             limits = list_credit_limits(db, uid)
             for lim in limits:
                 usage = credit_usage(db, lim)
-                if usage["outstanding"] <= 0 or usage["limit"] <= 0:
+                if usage["amount"] <= 0 or usage["limit"] <= 0:
                     continue
                 await _notify_credit(context, db, lim, usage)
         except Exception:
@@ -346,26 +346,33 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _notify_credit(
     context: ContextTypes.DEFAULT_TYPE, db: Session, limit_row: CreditLimit, usage: dict[str, object]
 ) -> None:
-    """ينبّه على اقتراب/تجاوز حد ائتماني واحد إن استحق (مرة لكل مستوى)."""
+    """ينبّه على اقتراب/تجاوز حد ائتماني واحد إن استحق (مرة لكل مستوى).
+
+    يعمل في الاتجاهين: «عليك له» (دَيْن مورد) أو «مدين لك» (رصيد عميل) —
+    نفس التَّرحيب مع تسمية الاتجاه حسب side.
+    """
     from app.database.crud import accessible_user_ids
 
     over = usage["over"]
     percent = usage["percent"]
     name = limit_row.person
+    if usage["side"] == "receivable":
+        relation = f"مدين لك {usage['amount']}"
+    elif usage["side"] == "payable":
+        relation = f"الدين عليك له {usage['outstanding']}"
+    else:
+        relation = "صفر"
 
     notify_status = None
     if over and limit_row.alerted_status < 2:
         name_line = f"⚠️ تجاوزت حدّك الائتماني مع **{name}**!"
-        detail = f"الدين عليك له: {usage['outstanding']} من أصل {usage['limit']} ({usage['percent']}%)"
         notify_status = 2
     elif percent >= WARNING_THRESHOLD * 100 and limit_row.alerted_status < 1:
         name_line = f"⚠️ اقتربت من حدّك الائتماني مع **{name}**"
-        detail = (
-            f"الدين عليك له: {usage['outstanding']} من أصل {usage['limit']} ({usage['percent']}%)"
-        )
         notify_status = 1
     else:
         return
+    detail = f"{relation} من أصل {usage['limit']} ({usage['percent']}%)"
 
     sent_any = False
     for uid in accessible_user_ids(db, limit_row.telegram_user_id):

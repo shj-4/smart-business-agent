@@ -205,6 +205,29 @@ class TestCreditCheck:
         _run(credit_check(context))
         context.bot.send_message.assert_not_called()
 
+    def test_alerts_receivable_side_for_customer(self, db_env):
+        """عميل مدين لك (income > expense) يتجاوز سقفه — يجب أن يُنبَّه (كان يتخطَّى سابقًا)."""
+        from app.database.crud import create_transaction, set_credit_limit
+
+        db = db_env()
+        set_credit_limit(db, USER_A, "سامر", "1000")
+        create_transaction(
+            db, USER_A, {"type": "income", "amount": 1500, "currency": "ILS", "person": "سامر"}, "بيع بالأجل"
+        )
+        db.close()
+
+        context = _make_context()
+        _run(credit_check(context))
+        assert context.bot.send_message.called
+        sent = context.bot.send_message.call_args.kwargs["text"]
+        assert "سامر" in sent
+        assert "مدين لك" in sent
+
+        db = db_env()
+        row = db.query(models.CreditLimit).filter_by(person="سامر").first()
+        assert row.alerted_status == 2
+        db.close()
+
 
 class TestSetupReminderB3:
     def test_registers_invoice_and_credit_jobs(self):

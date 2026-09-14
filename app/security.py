@@ -137,9 +137,13 @@ class EncryptedNumeric(TypeDecorator):
             return None
         try:
             dec = Decimal(str(value)).quantize(Decimal("0.01"))
-            plain = str(dec)
-        except (InvalidOperation, ValueError):
-            return None
+        except (InvalidOperation, ValueError) as exc:
+            # بدل كتابة NULL بصمت (فقدان بيانات بلا أثر في السجلات): نفشل الطلب
+            # كي يُلتقط الخطأ في سجل الدعوة/المستدعي بدل إخفائه.
+            raise ValueError(f"مبلغ غير صالح للعمود المشفَّر: {value!r}") from exc
+        if not dec.is_finite():
+            raise ValueError(f"مبلغ غير صالح (NaN/Infinity) للعمود المشفَّر: {value!r}")
+        plain = str(dec)
         enc = encrypt_text(plain)
         return enc if enc is not None else plain
 

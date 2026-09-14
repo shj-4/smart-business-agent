@@ -117,7 +117,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
 
     يعيد: {spent: Decimal, limit: Decimal, percent: float, over: bool}
     """
-    from app.database.crud import _like_escape, accessible_user_ids
+    from app.database.crud import accessible_user_ids
 
 
     local_now = now_local()
@@ -133,7 +133,9 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     if budget.scope == "currency":
         q = q.filter(Transaction.currency == budget.currency)
     elif budget.scope == "category":
-        q = q.filter(Transaction.category.like(f"%{_like_escape(budget.category)}%", escape="\\"))
+        # مطابقة تامة — كبقية النطاقات: تصنيف «صيانة» لا يلتقط معاملة
+        # تصنيفها «صيانة سيارة» (أرقام إنفاق مضلِّلة في تنبيهات التجاوز).
+        q = q.filter(Transaction.category == budget.category)
     else:
         q = q.filter(Transaction.person == budget.person)
 

@@ -807,3 +807,52 @@ class TestHistorySearchAndLang:
         kb = menus._tools_keyboard("ar")
         assert _find_button(kb, "his:p:1")
         assert _find_button(kb, "sb:start")
+
+
+class TestPendingClearedOnNewFlow:
+    """بدء أي تدفق معلّق جديد يمسح كل الأعلام المعلّقة القديمة أولًا.
+
+    يمنع هذا تضارب أعلام pending_* المتزامنة: لو بقي علم تدفق قديم (مثل
+    pending_convert) وضُبط رسم جديد (مثل pending_task_edit_id) لابتُلع نص
+    المستخدم التالي في المسار الخاطئ — وقد يُستبدل وصف مهمة فعلية بنص غير
+    مقصود (تلف بيانات). القاعدة: كل زر يضبط pending_* يستدعي
+    _clear_all_pending(context) قبل ضبط علمه.
+    """
+
+    def assert_single_pending(self, ctx, key, value):
+        pending = {k: v for k, v in ctx.user_data.items() if k.startswith("pending_")}
+        pending.pop("pending_search_term", None)
+        assert pending == {key: value}
+
+    def test_task_edit_clears_stale_convert(self, db_session, monkeypatch):
+        task = _seed_task(db_session)
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        q, edited = _build_query(f"tsk:edit:{task.id}")
+        ctx = _context({"pending_convert": True})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        self.assert_single_pending(ctx, "pending_task_edit_id", task.id)
+
+    def test_convert_clears_stale_task_edit(self):
+        q, edited = _build_query("tool:convert")
+        ctx = _context({"pending_task_edit_id": 5})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        self.assert_single_pending(ctx, "pending_convert", True)
+
+    def test_budget_add_clears_stale_convert(self):
+        q, edited = _build_query("bg:add:currency")
+        ctx = _context({"pending_convert": True})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        self.assert_single_pending(ctx, "pending_budget", {"scope": "currency"})
+
+    def test_workspace_add_clears_stale_convert(self):
+        q, edited = _build_query("ws:add")
+        ctx = _context({"pending_convert": True})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        self.assert_single_pending(ctx, "pending_ws_invite", True)
+
+    def test_record_seed_clears_stale_convert(self):
+        q, edited = _build_query("rec:expense")
+        ctx = _context({"pending_convert": True})
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), ctx))
+        assert all(k.startswith("pending_") is False for k in ctx.user_data)
+        assert ctx.user_data.get("record_seed_type") == "expense"

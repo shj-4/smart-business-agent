@@ -13,6 +13,7 @@
   3. python migrate_to_mysql.py   (ينسخ البيانات من SQLite الحالية)
 """
 
+import os
 import sys
 
 from alembic import command
@@ -23,6 +24,10 @@ from app.database import models  # noqa: F401  (يسجّل الجداول على
 from app.database.db import Base
 
 SQLALCHEMY_URL = "sqlalchemy.url"
+
+# مسار مطلق (كما يفعل app/database/init_db.py) — حتى يعمل السكربت من أي مجلد
+# عمل، لا من جذر المشروع فقط.
+MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
 
 
 def main() -> int:
@@ -50,7 +55,7 @@ def main() -> int:
 
     # نُثبّت رقم هجرة "head" حتى يعتبر alembic الشجرة محقّقة
     cfg = Config()
-    cfg.set_main_option("script_location", "migrations")
+    cfg.set_main_option("script_location", MIGRATIONS_DIR)
     cfg.set_main_option(SQLALCHEMY_URL, url)
     command.stamp(cfg, "head")
     print("تم تثبيت رقم الهجرة head على alembic_version.")

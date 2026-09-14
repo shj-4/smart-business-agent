@@ -466,8 +466,14 @@ def format_credit_limits(payload: list[dict]) -> str:
             status = "⚠️ قريب من السقف"
         else:
             status = "ضمن الحدود"
+        if u["side"] == "receivable":
+            value_txt = f"لك عليه {_fmt_amount(u['amount'])}"
+        elif u["side"] == "payable":
+            value_txt = f"عليك له {_fmt_amount(u['outstanding'])}"
+        else:
+            value_txt = "صفر"
         lines.append(
-            f"• {name}: الدين {_fmt_amount(u['outstanding'])} / {_fmt_amount(u['limit'])} "
+            f"• {name}: {value_txt} / {_fmt_amount(u['limit'])} "
             f"({u['percent']}%) — {status}"
         )
     return "\n".join(lines)
