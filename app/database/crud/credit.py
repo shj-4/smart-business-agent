@@ -9,7 +9,7 @@ from app.database.models import (
     CreditLimit,
     Transaction,
 )
-from app.timeutil import now_utc
+from app.timeutil import now_local, now_utc, to_local_naive
 
 
 def set_credit_limit(
@@ -48,6 +48,29 @@ def set_credit_limit(
     db.refresh(row)
     _invalidate_caches(db, telegram_user_id)
     return row
+
+def credit_monthly_reset(db: Session, limit_row: CreditLimit) -> bool:
+    """يرجّع True إذا تغيّر الشهر المحلي ويجب إعادة ضبط حالة التنبيه.
+
+    الميزانيات تحمل month_key صريحًا؛ الائتمان لا — نستخدم علامة آخر نشاط
+    (updated_at، أو created_at إن لم يُحدَّث بعد) لنعرف شهر آخر نشاط:
+    إن كان من شهر سابق تُصفَّر حالة التنبيه، فيصل تنبيه جديد في الشهر الجديد
+    حتى لو بقي التجاوز قائمًا (كان التجاوز يُنبه مرة واحدة للأبد بلا إعادة
+    ضبط إلا بتحديد الحد يدويًا). العلامة تُقدَّم للشهر الجاري حتى لا يُعاد
+    التصفير في كل فحص من نفس الشهر.
+    """
+    stamp = limit_row.updated_at or limit_row.created_at
+    if stamp is None:
+        return False
+    current = now_local()
+    stamp_local = to_local_naive(stamp)
+    if (stamp_local.year, stamp_local.month) == (current.year, current.month):
+        return False
+    limit_row.alerted_status = 0
+    limit_row.updated_at = now_utc()
+    db.commit()
+    return True
+
 
 def list_credit_limits(db: Session, telegram_user_id: int) -> list[CreditLimit]:
     from app.database.crud import accessible_user_ids

@@ -276,6 +276,14 @@ def _format_comparison(query_result: dict) -> str:
         lines.append(f"💰 الإيرادات — {cur_label}: {_totals_line(cur_inc) or 'لا توجد'}")
         lines.append(f"{prev_label}: {_totals_line(prev_inc) or 'لا توجد'}")
 
+    if query_result.get("partial"):
+        pct = query_result.get("elapsed_pct")
+        hint = f"مضى نحو {pct}%" if pct is not None else "لم تكتمل بعد"
+        lines.append(
+            f"\n⚠️ {cur_label} {hint} فقط — مقارنته بفترة سابقة كاملة مضلِّلة:"
+            " المبالغ تبدو أقل/أعلى لمجرد أن الفترة الحالية لم تنتهِ بعد."
+        )
+
     return "\n".join(lines)
 
 
@@ -600,4 +608,11 @@ def format_deviation(payload: dict) -> str:
             f"({d['pct']}%) — {arrow} {'⚠️' if d['significant'] else ''}"
         )
     lines.append(f"\nحدّ الإشارة: انحراف ≥ {payload.get('threshold_pct', 30)}%.")
+    if payload.get("month_partial"):
+        pct = payload.get("month_elapsed_pct")
+        hint = f"مضى نحو {pct}%" if pct is not None else "لم يكتمل بعد"
+        lines.append(
+            f"\n⚠️ الشهر الحالي {hint} — المقارنة مع متوسط أشهر كاملة تقريبية"
+            " وقد تكون مضلِّلة حتى اكتمال الشهر."
+        )
     return "\n".join(lines)

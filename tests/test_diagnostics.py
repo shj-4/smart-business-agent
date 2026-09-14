@@ -6,6 +6,7 @@ Unit tests للفحص الصحي (/health) وأمر /stats — بلا أي شب�
 """
 
 import asyncio
+import base64
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from app.database.db import Base
 from bot import handlers
 from bot.diagnostics import run_health_checks
 from bot.formatters import format_health_report, format_user_stats
+
+_VALID_B64_KEY = base64.b64encode(b"0" * 32).decode("ascii")
 
 
 @pytest.fixture
@@ -97,6 +100,30 @@ class TestHealthChecks:
         text = format_health_report(run_health_checks(db_env))
         assert "🩺" in text
         assert "✅" in text
+
+
+class TestEncryptionCheck:
+    def _encryption(self, db_env):
+        return [c for c in run_health_checks(db_env) if c["label"] == "التشفير"][0]
+
+    def test_valid_key_is_ok(self, db_env, monkeypatch):
+        monkeypatch.setattr("app.config.settings.encryption_key", _VALID_B64_KEY)
+        check = self._encryption(db_env)
+        assert check["ok"] is True
+        assert not check.get("warn")
+
+    def test_missing_key_is_warn_not_failure(self, db_env, monkeypatch):
+        monkeypatch.setattr("app.config.settings.encryption_key", "")
+        check = self._encryption(db_env)
+        assert check["ok"] is True
+        assert check["warn"] is True
+
+    def test_invalid_key_flags_check(self, db_env, monkeypatch):
+        monkeypatch.setattr("app.config.settings.encryption_key", "abcd")
+        check = self._encryption(db_env)
+        assert check["ok"] is False
+        assert check["warn"] is True
+        assert "غير صالح" in check["detail"]
 
 
 class TestHealthCommand:

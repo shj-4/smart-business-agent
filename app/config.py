@@ -140,6 +140,15 @@ def validate_env() -> list[str]:
         missing.append(
             "  ENCRYPTION_KEY — إجباري في الإنتاج لتشفير الحقول الحساسة (بدونه لن يبدأ البوت)."
         )
+    elif (settings.encryption_key or "").strip():
+        # مفتاح مضبوط لكن غير صالح: ممنوع في الإنتاج (كان يُكتشف فقط عند أول
+        # كتابة — بانهيار — أو يكتب نصًا واضحًا صامتًا). استيراد محلي لتجنب
+        # الدورة: app.security يستورد settings من هذا الملف.
+        from app.security import encryption_key_problem
+
+        problem = encryption_key_problem(settings.encryption_key)
+        if problem:
+            missing.append(f"  ENCRYPTION_KEY — {problem}")
     return missing
 
 

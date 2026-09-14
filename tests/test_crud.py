@@ -13,6 +13,7 @@ from app.database.crud import (
     create_note,
     create_task,
     create_transaction,
+    credit_monthly_reset,
     credit_usage,
     list_credit_limits,
     list_invoices,
@@ -31,8 +32,8 @@ from app.database.crud import (
     set_order_status,
     undo_last_record,
 )
-from app.database.models import Note, Task, Transaction
-from app.timeutil import now_utc, to_local_naive
+from app.database.models import CreditLimit, Note, Task, Transaction
+from app.timeutil import now_utc, to_local_naive, to_utc_naive
 
 USER_A = 111
 USER_B = 222
@@ -783,6 +784,40 @@ class TestCreditLimits:
         assert usage["side"] == "balanced"
         assert usage["amount"] == Decimal("0.00")
         assert usage["over"] is False
+
+    def test_monthly_reset_clears_status_from_previous_month(self, db_session):
+        row = set_credit_limit(db_session, USER_A, "نادر", "1000")
+        row.alerted_status = 2
+        row.updated_at = to_utc_naive(datetime(2020, 1, 15))  # شهر سابق
+        db_session.commit()
+
+        assert credit_monthly_reset(db_session, row) is True
+        assert row.alerted_status == 0
+        assert not credit_monthly_reset(db_session, row)  # العلامة تقدّمت للشهر الجاري
+
+    def test_monthly_reset_same_month_no_change(self, db_session):
+        row = set_credit_limit(db_session, USER_A, "نادر", "1000")
+        row.alerted_status = 2
+        row.updated_at = now_utc()  # نفس الشهر
+        db_session.commit()
+
+        assert credit_monthly_reset(db_session, row) is False
+        assert row.alerted_status == 2
+
+    def test_monthly_reset_falls_back_to_created_at(self, db_session):
+        row = CreditLimit(
+            telegram_user_id=USER_A,
+            person="قديم",
+            limit_amount=Decimal("500"),
+            alerted_status=2,
+            updated_at=None,
+            created_at=to_utc_naive(datetime(2019, 5, 1)),
+        )
+        db_session.add(row)
+        db_session.commit()
+
+        assert credit_monthly_reset(db_session, row) is True
+        assert row.alerted_status == 0
 
 
 # ---------- الديون والأشخاص (#21) ----------

@@ -1,6 +1,7 @@
 """
 التقارير الشهرية، إعدادات التقارير، الإحصائيات، التنبؤ الخطي، انحراف التوقعات.
 """
+import calendar
 import os
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -394,12 +395,25 @@ def deviation_summary(
 ) -> dict:
     """مقارنة شهرية: إنفاق/إيراد الشهر الحالي مقابل متوسط آخر 3 أشهر لكل عملة.
 
-    يعيد: {as_of, threshold_pct, deviations: [{currency, kind, current, average, pct}]}
+    يعيد: {as_of, threshold_pct, deviations: [{currency, kind, current, average, pct}],
+           month_partial, month_elapsed_pct}
     حيث pct نسبة الانحراف (موجب/سالب) — يُنتظر من المتصل فلترة الأهم.
+    month_partial=True إذا كان الشهر الحالي لم يكتمل بعد (نُقارن جزءًا بأشهر
+    كاملة) — تُنبه الواجهة أن القارنة تقريبية وقد تكون مضلِّلة.
     """
+    local_now = now_local()
+    days_in_month = calendar.monthrange(local_now.year, local_now.month)[1]
+    month_partial = local_now.day < days_in_month
+    month_elapsed_pct = round(local_now.day / days_in_month * 100)
     entries = monthly_totals(db, telegram_user_id, months=4, include_stored=False)
     if not entries:
-        return {"as_of": now_local().strftime("%Y-%m-%d"), "threshold_pct": threshold_pct, "deviations": []}
+        return {
+            "as_of": local_now.strftime("%Y-%m-%d"),
+            "threshold_pct": threshold_pct,
+            "deviations": [],
+            "month_partial": month_partial,
+            "month_elapsed_pct": month_elapsed_pct,
+        }
     current = entries[-1]
     prev = entries[:-1]
     byc_cur = current.get("by_currency") or {}
@@ -430,4 +444,10 @@ def deviation_summary(
                     "significant": abs(pct) >= threshold_pct and cur_val > 0,
                 }
             )
-    return {"as_of": now_local().strftime("%Y-%m-%d"), "threshold_pct": threshold_pct, "deviations": deviations}
+    return {
+        "as_of": local_now.strftime("%Y-%m-%d"),
+        "threshold_pct": threshold_pct,
+        "deviations": deviations,
+        "month_partial": month_partial,
+        "month_elapsed_pct": month_elapsed_pct,
+    }

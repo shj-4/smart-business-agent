@@ -1,6 +1,7 @@
 """
 العمليات المالية والملاحظات والاستعلام والتاريخ والتعديل والبحث (مع مسار الاستعلام المُجمَّع).
 """
+import calendar
 from datetime import timedelta
 from decimal import Decimal
 
@@ -153,7 +154,12 @@ def get_comparison_ranges(period: str) -> dict:
 
     example: period="this_month" → current=[أول الشهر حتى الآن]،
     previous=[أول الشهر الماضي حتى أول الشهر الحالي].
-    يعيد dict: {"current": (start, end), "previous": (start, end)}.
+
+    يعيد dict: {"current": (start, end), "previous": (start, end),
+                "partial": bool, "elapsed_pct": int}
+    حيث partial=True إذا كانت الفترة الحالية ما زالت جارية (end = الآن، أي أقصر
+    من فترة سابقة كاملة) — تُنبه الواجهة أن المقارنة الناتجة قد تكون مضلِّلة
+    (يبدو الإنفاق أقل لمجرد أن الوقت لم يكتمل بعد). elapsed_pct نسبة ما مضى.
     """
     local_now = _timeutil.now_local()
 
@@ -163,13 +169,20 @@ def get_comparison_ranges(period: str) -> dict:
             to_utc_naive(local_end_dt),
         )
 
-    if period == "today":
-        cur_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        prev_start = cur_start - timedelta(days=1)
+    def _payload(cur_start, prev_start, total_seconds):
+        elapsed = (local_now - cur_start).total_seconds()
+        elapsed_pct = min(100, max(0, round(elapsed / total_seconds * 100)))
         return {
             "current": _bounds(cur_start, local_now),
             "previous": _bounds(prev_start, cur_start),
+            "partial": elapsed_pct < 100,
+            "elapsed_pct": elapsed_pct,
         }
+
+    if period == "today":
+        cur_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        prev_start = cur_start - timedelta(days=1)
+        return _payload(cur_start, prev_start, 86400)
 
     if period == "this_week":
         fd = _timeutil.first_day_of_week()
@@ -177,10 +190,7 @@ def get_comparison_ranges(period: str) -> dict:
         cur_start = local_now - timedelta(days=(weekday - fd) % 7)
         cur_start = cur_start.replace(hour=0, minute=0, second=0, microsecond=0)
         prev_start = cur_start - timedelta(days=7)
-        return {
-            "current": _bounds(cur_start, local_now),
-            "previous": _bounds(prev_start, cur_start),
-        }
+        return _payload(cur_start, prev_start, 7 * 86400)
 
     if period == "this_month":
         cur_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -189,18 +199,14 @@ def get_comparison_ranges(period: str) -> dict:
             prev_start = cur_start.replace(year=cur_start.year - 1, month=12)
         else:
             prev_start = cur_start.replace(month=cur_start.month - 1)
-        return {
-            "current": _bounds(cur_start, local_now),
-            "previous": _bounds(prev_start, cur_start),
-        }
+        days_in_month = calendar.monthrange(local_now.year, local_now.month)[1]
+        return _payload(cur_start, prev_start, days_in_month * 86400)
 
     if period == "this_year":
         cur_start = local_now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
         prev_start = cur_start.replace(year=cur_start.year - 1)
-        return {
-            "current": _bounds(cur_start, local_now),
-            "previous": _bounds(prev_start, cur_start),
-        }
+        days_in_year = calendar.monthrange(local_now.year, 12)[1]  # 365 أو 366
+        return _payload(cur_start, prev_start, days_in_year * 86400)
 
     # all_time أو غير معروف: لا مقارنة
     return None
@@ -394,6 +400,8 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             "person": person,
             "result": result,
             "kind": "comparison",
+            "partial": ranges.get("partial", False),
+            "elapsed_pct": ranges.get("elapsed_pct", 100),
         }
 
     else:

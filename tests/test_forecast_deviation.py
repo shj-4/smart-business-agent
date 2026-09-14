@@ -122,6 +122,11 @@ class TestDeviationSummary:
     def test_empty_db_no_deviations(self, db_session):
         assert deviation_summary(db_session, USER_A)["deviations"] == []
 
+    def test_reports_partial_month_metadata(self, db_session):
+        payload = deviation_summary(db_session, USER_A)
+        assert isinstance(payload["month_partial"], bool)
+        assert 0 < payload["month_elapsed_pct"] <= 100
+
 
 class TestForecastFormatters:
     def test_format_forecast_empty(self):
@@ -170,6 +175,40 @@ class TestForecastFormatters:
         assert "USD" in text
         assert "100.0%" in text
         assert "⚠️" in text
+
+    def test_format_deviation_partial_notice(self):
+        text = format_deviation(
+            {
+                "threshold_pct": 30,
+                "month_partial": True,
+                "month_elapsed_pct": 46,
+                "deviations": [
+                    {
+                        "currency": "USD",
+                        "kind": "expense",
+                        "current": Decimal("1000"),
+                        "average": Decimal("500"),
+                        "pct": 100.0,
+                        "significant": True,
+                    }
+                ],
+            }
+        )
+        assert "month_partial" not in text
+        assert "46%" in text
+        assert "⚠️" in text
+
+    def test_format_deviation_no_notice_when_complete(self):
+        text = format_deviation(
+            {
+                "threshold_pct": 30,
+                "month_partial": False,
+                "month_elapsed_pct": 100,
+                "deviations": [],
+            }
+        )
+        assert "لا توجد انحرافات" in text
+        assert "⚠️" not in text
 
 
 @pytest.fixture

@@ -315,8 +315,12 @@ def setup_invoice_check(app: Application) -> None:
 
 
 async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى)."""
-    from app.database.crud import credit_usage, list_credit_limits
+    """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى).
+
+    مثل الميزانيات: يُعاد ضبط حالة التنبيه عند تغيّر الشهر المحلي
+    (credit_monthly_reset) — فلا يعلّق السقف المارَّ التنبيهات للأبد.
+    """
+    from app.database.crud import credit_monthly_reset, credit_usage, list_credit_limits
     from app.database.models import CreditLimit
 
     db = SessionLocal()
@@ -333,6 +337,7 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             limits = list_credit_limits(db, uid)
             for lim in limits:
+                credit_monthly_reset(db, lim)
                 usage = credit_usage(db, lim)
                 if usage["amount"] <= 0 or usage["limit"] <= 0:
                     continue

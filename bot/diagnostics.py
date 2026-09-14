@@ -106,15 +106,25 @@ def _env_check() -> dict:
 
 def _encryption_check() -> dict:
     from app.config import settings
+    from app.security import encryption_key_problem
 
-    if (settings.encryption_key or "").strip():
-        return {"ok": True, "label": "التشفير", "detail": "مفتاح التشفير مضبوط"}
-    return {
-        "ok": True,
-        "warn": True,
-        "label": "التشفير",
-        "detail": "ENCRYPTION_KEY غير مضبوط — تُخزَّن الحقول كما هي (وضع توافق/تطوير)",
-    }
+    raw = (settings.encryption_key or "").strip()
+    if not raw:
+        return {
+            "ok": True,
+            "warn": True,
+            "label": "التشفير",
+            "detail": "ENCRYPTION_KEY غير مضبوط — تُخزَّن الحقول كما هي (وضع توافق/تطوير)",
+        }
+    problem = encryption_key_problem(raw)
+    if problem:
+        return {
+            "ok": False,
+            "warn": True,
+            "label": "التشفير",
+            "detail": f"ENCRYPTION_KEY {problem}",
+        }
+    return {"ok": True, "label": "التشفير", "detail": "مفتاح التشفير مضبوط وصالح"}
 
 
 def _size_check() -> dict:

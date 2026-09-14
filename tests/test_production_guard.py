@@ -49,6 +49,22 @@ class TestProductionEncryptionGuard:
         _isolate_env(monkeypatch, app_env="production", encryption_key=_TEST_KEY)
         ensure_env_or_exit()
 
+    def test_invalid_key_flagged_in_production(self, monkeypatch):
+        _isolate_env(monkeypatch, app_env="production", encryption_key="abcd")
+        missing = validate_env()
+        assert any("ENCRYPTION_KEY" in m for m in missing)
+
+    def test_wrong_length_decoded_key_flagged_in_production(self, monkeypatch):
+        # يُفك بنجاح بطول غير 16/24/32 بايت (متساهل) ثم يُرفض
+        _isolate_env(monkeypatch, app_env="production", encryption_key="YWJjZGVmZ2hpamtsbW5vcHFyc3R1")
+        missing = validate_env()
+        assert any("ENCRYPTION_KEY" in m for m in missing)
+
+    def test_ensure_env_or_exit_refuses_invalid_key_in_production(self, monkeypatch):
+        _isolate_env(monkeypatch, app_env="production", encryption_key="abcd")
+        with pytest.raises(SystemExit):
+            ensure_env_or_exit()
+
 
 class TestAdminIdsParsing:
     def test_parses_comma_separated(self):

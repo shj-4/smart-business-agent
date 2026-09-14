@@ -26,21 +26,70 @@ logger = logging.getLogger(__name__)
 
 _ENCRYPTED_PREFIX = "v1$"
 UNREADABLE_VALUE = "غير قابلة للقراءة"
+_VALID_AES_KEY_LENGTHS = (16, 24, 32)
 _warned_unset = False
+_warned_invalid = False
+
+
+def _decode_key_bytes(raw: str) -> bytes | None:
+    """يفك مفتاحًا إلى بايتات AES-GCM صالحة (16/24/32) أو None.
+
+    متسامح في صيغة الإدخال (Standard/URL-safe base64 أو نص مباشر) لكن صارم
+    في الطول: `base64.b64decode` وحده متساهل ويَفُك أي نص "شبه base64" بطول
+    تعسّفي، وتمرير طول غير صالح لـ AESGCM يرفع ValueError — لذا نتحقق هنا قبل
+    الاستخدام بدل انهيار أول كتابة (create_transaction/create_note/create_task).
+
+    القواعد:
+    - إن تأوّل المفتاح كـ base64 صالح: يُقبل فقط بطول 16/24/32 بايت وإلا رُفض
+      كاملًا (لا إعادة تأويل نصية — مفتاح base64 مضبوط خاطئًا يُكشف ولا يُخطئ).
+    - إن لم يكن base64 صالحًا إطلاقًا: يُقبل كنص مباشر بطول 16/24/32 بايت
+      (توافق المفاتيح النصية القديمة خارج الأبجدية، مثل العربية).
+    """
+    decoded: bytes | None = None
+    try:
+        decoded = base64.b64decode(raw, validate=True)
+    except Exception:
+        try:
+            decoded = base64.urlsafe_b64decode(raw, validate=True)
+        except Exception:
+            decoded = None
+    if decoded is not None:
+        if len(decoded) in _VALID_AES_KEY_LENGTHS:
+            return decoded
+        return None
+    key = raw.encode("utf-8")
+    if len(key) in _VALID_AES_KEY_LENGTHS:
+        return key
+    return None
 
 
 def _key_bytes() -> bytes | None:
-    """يعيد مفتاح التشفير كـ bytes أو None إذا لم يُضبط (وضع واضح)."""
+    """يعيد مفتاح التشفير كـ bytes صالحة أو None (غير مضبوط / غير صالح)."""
     raw = (settings.encryption_key or "").strip()
     if not raw:
         return None
-    try:
-        return base64.b64decode(raw)
-    except Exception:
-        # نسخة مرنة: يقبل أيضًا نصًا طوله 32 بايت مباشرة
-        if len(raw.encode("utf-8")) >= 32:
-            return raw.encode("utf-8")[:32]
+    key = _decode_key_bytes(raw)
+    if key is not None:
+        return key
+    _warn_invalid_key()
+    return None
+
+
+def encryption_key_problem(raw: str) -> str | None:
+    """يعيد وصف مشكلة ENCRYPTION_KEY أو None إن كان غائبًا/صالحًا.
+
+    مفيد للتحقق عند الإقلاع (validate_env) وفي فحوصات /diag — مفتاح مضبوط
+    لكن غير صالح لن يُكتشف بدونه إلا عند أول عملية كتابة (سابقًا بانهيار).
+    """
+    raw = (raw or "").strip()
+    if not raw:
         return None
+    if _decode_key_bytes(raw) is not None:
+        return None
+    return (
+        "مضبوط لكن غير صالح — يجب أن يُفك إلى 16/24/32 بايت (AES-GCM)؛ "
+        "الحقول الحساسة ستُخزَّن كنص واضح ما لم يُصحَّح."
+    )
 
 
 def _warn_if_unset() -> None:
@@ -50,18 +99,37 @@ def _warn_if_unset() -> None:
         logger.warning("ENCRYPTION_KEY غير مضبوط في .env — الحقول الحساسة تُخزَّن كنص واضح!")
 
 
+def _warn_invalid_key() -> None:
+    global _warned_invalid
+    if not _warned_invalid:
+        _warned_invalid = True
+        logger.warning(
+            "ENCRYPTION_KEY مضبوط لكن غير صالح (يجب أن يُفك إلى 16/24/32 بايت). "
+            "الحقول الحساسة تُخزَّن كنص واضح — راجع فحص التشفير في /diag."
+        )
+
+
 def encrypt_text(plain: str) -> str | None:
-    """يشفّر نصًا ويعيد التوكن المخزن، أو None في الوضع الواضح."""
+    """يشفّر نصًا ويعيد التوكن المخزن، أو None في الوضع الواضح.
+
+    لا يرمي أي استثناء نحو الطبقة العليا: مفتاح غير صالح أو خطأ داخلي يسقط
+    آمنًا للوضع الواضح مع تسجيل خطأ — بدل انهيار أول كتابة (create_transaction/
+    create_note/create_task) كما كان يحصل مع مفتاح يُفك لطول غير صالح.
+    """
     if plain is None:
         return None
     key = _key_bytes()
     if key is None:
         _warn_if_unset()
         return None
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    nonce = __import__("os").urandom(12)
-    token = AESGCM(key).encrypt(nonce, str(plain).encode("utf-8"), None)
+        nonce = __import__("os").urandom(12)
+        token = AESGCM(key).encrypt(nonce, str(plain).encode("utf-8"), None)
+    except Exception:
+        logger.exception("فشل تشفير قيمة حساسة — سقطت للوضع الواضح")
+        return None
     return "{}{}.{}".format(
         _ENCRYPTED_PREFIX,
         base64.b64encode(nonce).decode("ascii"),

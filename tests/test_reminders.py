@@ -228,6 +228,40 @@ class TestCreditCheck:
         assert row.alerted_status == 2
         db.close()
 
+    def test_re_alerts_over_credit_after_month_change(self, db_env):
+        """التجاوز يُنبه كل شهر بعد التصفير — لا يُعلَّق التنبيه بعد أول مرة للأبد."""
+        from datetime import datetime
+
+        from app.database.crud import create_transaction, set_credit_limit
+        from app.timeutil import to_utc_naive
+
+        db = db_env()
+        set_credit_limit(db, USER_A, "لؤي", "1000")
+        create_transaction(
+            db, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "لؤي"}, "دفعة"
+        )
+        db.close()
+
+        context = _make_context()
+        _run(credit_check(context))
+        assert context.bot.send_message.called
+
+        db = db_env()
+        row = db.query(models.CreditLimit).filter_by(person="لؤي").first()
+        row.alerted_status = 2
+        row.updated_at = to_utc_naive(datetime(2020, 1, 15))  # شهر سابق → تصفير شهري
+        db.commit()
+        db.close()
+
+        context2 = _make_context()
+        _run(credit_check(context2))
+        assert context2.bot.send_message.called
+
+        db = db_env()
+        row = db.query(models.CreditLimit).filter_by(person="لؤي").first()
+        assert row.alerted_status == 2
+        db.close()
+
 
 class TestSetupReminderB3:
     def test_registers_invoice_and_credit_jobs(self):

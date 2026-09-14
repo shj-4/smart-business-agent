@@ -103,6 +103,19 @@ class TestComparisonRanges:
         prev_lo, prev_hi = ranges["previous"]
         assert prev_hi == expected
 
+    def test_partial_tracks_elapsed(self, monkeypatch):
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        ranges = get_comparison_ranges("this_month")
+        assert ranges["partial"] is True
+        # Sept 15 12:00 → 14.5/30 ≈ 48%
+        assert 40 < ranges["elapsed_pct"] < 60
+
+    def test_full_end_of_month_not_partial(self, monkeypatch):
+        _freeze_now(monkeypatch, datetime(2026, 12, 31, 23, 59))
+        ranges = get_comparison_ranges("this_month")
+        assert ranges["partial"] is False
+        assert ranges["elapsed_pct"] == 100
+
     def test_all_time_returns_none(self):
         assert get_comparison_ranges("all_time") is None
 
@@ -148,6 +161,16 @@ class TestComparePeriods:
         )
         assert result["error"] == "unsupported_period"
 
+    def test_propagates_partial_flags(self, db_session, monkeypatch):
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        result = run_query(
+            db_session,
+            USER_A,
+            {"metric": "compare_periods", "period": "this_month", "person": None},
+        )
+        assert result["partial"] is True
+        assert 40 < result["elapsed_pct"] < 60
+
 
 class TestComparisonFormatting:
     def test_format_comparison_mentions_lists(self, db_session, monkeypatch):
@@ -167,6 +190,35 @@ class TestComparisonFormatting:
         assert "مقارنة" in text
         assert "هذا الشهر" in text
         assert "الشهر الماضي" in text
+
+    def test_partial_period_shows_warning(self, db_session, monkeypatch):
+        from bot.formatters import format_query_result
+
+        _freeze_now(monkeypatch, datetime(2026, 9, 15, 12, 0))
+        cur_lo, _ = get_comparison_ranges("this_month")["current"]
+        _add_transaction(
+            db_session, USER_A, tx_type="expense", amount=300, dt_utc=cur_lo + timedelta(hours=1)
+        )
+        result = run_query(
+            db_session,
+            USER_A,
+            {"metric": "compare_periods", "period": "this_month", "person": None},
+        )
+        text = format_query_result(result)
+        assert "⚠️" in text
+        assert "مضى" in text
+
+    def test_full_period_no_warning(self, db_session, monkeypatch):
+        from bot.formatters import format_query_result
+
+        _freeze_now(monkeypatch, datetime(2026, 12, 31, 23, 59))
+        result = run_query(
+            db_session,
+            USER_B,
+            {"metric": "compare_periods", "period": "this_month", "person": None},
+        )
+        text = format_query_result(result)
+        assert "⚠️" not in text
 
 
 # ---------- ReportPref CRUD ----------
