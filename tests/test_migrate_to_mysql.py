@@ -89,6 +89,34 @@ def _seed(session):
             ),
             M.ReportPref(telegram_user_id=111, frequency="daily", deliver_time="19:00"),
             M.UserPref(telegram_user_id=111, lang="ar"),
+            M.BonusEvent(
+                telegram_user_id=111,
+                name="عروض رمضان",
+                budget=Decimal("500.00"),
+                currency="ILS",
+                status="planned",
+            ),
+            M.EmployeeBonusPlan(
+                telegram_user_id=111,
+                person="موظف 1",
+                amount=Decimal("200.00"),
+                currency="ILS",
+                frequency="monthly",
+                enabled=True,
+            ),
+            M.LoyaltyAccount(
+                telegram_user_id=111,
+                person="عميل 1",
+                points_balance=10,
+                total_earned=20,
+                total_redeemed=10,
+            ),
+            M.LoyaltyConfig(
+                telegram_user_id=111,
+                points_rate=Decimal("1"),
+                points_value=Decimal("0.01"),
+                min_redeem_points=0,
+            ),
         ]
     )
     session.commit()
@@ -110,10 +138,14 @@ class TestMigration:
         _seed(src)
         counts = _migrate(src, dst, MODELS)
         assert counts == {
+            "BonusEvent": 1,
             "Budget": 1,
             "CorrectionFeedback": 1,
             "CreditLimit": 1,
+            "EmployeeBonusPlan": 1,
             "Invoice": 1,
+            "LoyaltyAccount": 1,
+            "LoyaltyConfig": 1,
             "Note": 1,
             "ReportPref": 1,
             "Task": 1,

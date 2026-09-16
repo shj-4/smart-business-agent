@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -29,6 +30,7 @@ DEFAULT_CATEGORIES = [
     "صيانة",
     "تسويق وإعلان",
     "ضرائب",
+    "بونس",
     "أخرى",
 ]
 
@@ -296,4 +298,103 @@ class UserPref(Base):
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
     lang = Column(String(2), nullable=False, default="ar")  # ar | en
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class BonusEvent(Base):
+    """فعالية ترويجية/بونس: فترة بعنوان وميزانية تُسجَّل ضمنها المبيعات والخصومات.
+
+    status: "planned" (مجدولة) | "active" (جارية) | "ended" (منتهية).
+    السلوك: تُقارَن مبالغ البونس المسجّلة (معاملات تصنيف "بونس") خلال فترة
+    الفعالية بميزانيتها في تقرير الفعالية.
+    """
+
+    __tablename__ = "bonus_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+
+    name = Column(String(255), nullable=False)  # عنوان الفعالية
+    start_at = Column(DateTime, nullable=True)  # بداية الفعالية
+    end_at = Column(DateTime, nullable=True)  # نهاية الفعالية
+    budget = Column(Numeric(12, 2), nullable=True)  # ميزانية البونس المقترحة
+    currency = Column(String(16), nullable=True)
+    note = Column(String(255), nullable=True)  # وصف/تعليق
+    status = Column(String(16), nullable=False, default="planned")  # planned|active|ended
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class EmployeeBonusPlan(Base):
+    """خطة مكافأة موظف دورية/ثابتة مع تذكير بمنحها وحدّ شهري اختياري.
+
+    frequency: "monthly" | "quarterly" | "one_off".
+    next_due_at: الموعد القادم لمنح المكافأة — يُقدَّم تلقائيًا بعد كل تذكير
+    (شهريًا/ربع سنويًا)، وواحد-مرة تُعطَّل الخطة عند الاستحقاق.
+    monthly_cap: سقف شهري اختياري لهذا الموزّف — يُقارَن بصرف بونس الشهر له.
+
+    منح المكافأة يُسجَّل كمعاملة expense بتصنيف "بونس" مع person=اسم الموظف
+    (فيتدفق تلقائيًا إلى التقارير والتصدير والديون).
+    """
+
+    __tablename__ = "employee_bonus_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+
+    person = Column(String(255), nullable=False)  # اسم الموظف
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(16), nullable=True)
+    frequency = Column(String(16), nullable=False, default="monthly")  # monthly|quarterly|one_off
+    next_due_at = Column(DateTime, nullable=True)  # موعد المنح القادم
+    monthly_cap = Column(Numeric(12, 2), nullable=True)  # سقف شهري اختياري
+    note = Column(String(255), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class LoyaltyAccount(Base):
+    """محفظة نقاط ولاء لعميل (شخص): تراكم نقاط عند المبيعات واستبدالها خصمًا.
+
+    كل نقاط تُضاف عند تسجيل إيراد (مبيع) باسم العميل بمعدّل LoyaltyConfig.points_rate
+    (نقطة لكل وحدة عملة أساس). النقاط تُستهلك بالاستبدال/الخصم.
+    """
+
+    __tablename__ = "loyalty_accounts"
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", "person", name="uq_loyalty_user_person"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    person = Column(String(255), nullable=False)
+
+    points_balance = Column(Integer, nullable=False, default=0)
+    total_earned = Column(Integer, nullable=False, default=0)
+    total_redeemed = Column(Integer, nullable=False, default=0)
+
+    updated_at = Column(DateTime, nullable=True)
+
+
+class LoyaltyConfig(Base):
+    """إعدادات نقاط الولاء (صف واحد لكل مستخدم — مفعّلة عند إنشائها).
+
+    points_rate: عدد النقاط لكل وحدة عملة أساس (مثال: 1 نقطة لكل شيكل).
+    points_value: قيمة النقطة الواحدة بعملة أساس (مثال: 0.01 — أي 100 نقطة = 1).
+    min_redeem_points: أقل عدد نقاط يسمح بالاستبدال.
+    """
+
+    __tablename__ = "loyalty_configs"
+    __table_args__ = (UniqueConstraint("telegram_user_id", name="uq_loyalty_user"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+
+    points_rate = Column(Numeric(12, 4), nullable=False, default=1)
+    points_value = Column(Numeric(12, 6), nullable=False, default=Decimal("0.01"))
+    min_redeem_points = Column(Integer, nullable=False, default=0)
+
     updated_at = Column(DateTime, nullable=True)

@@ -88,6 +88,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/invoices — الفواتير الآجلة\n"
         "/orders — الطلبيات وحالتها\n"
         "/credit — الحدود الائتمانية للأشخاص\n"
+        "/bonus — البونس والمكافآت ونقاط الولاء\n"
         "/stats — إحصائيات استخدامك\n"
         "/health — فحص صحة النظام\n"
         "/export pdf — تصدير PDF بكل السجلات\n"
@@ -1090,6 +1091,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("forecast", forecast_command))
     app.add_handler(CommandHandler("deviation", deviation_command))
 
+    from bot.bonus import register_bonus_handlers
+    register_bonus_handlers(app)
+
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation
     from bot.menus import menu_callback_router
@@ -1104,6 +1108,7 @@ def register_handlers(app: Application) -> None:
     # التذكيرات التلقائية: المهام المتأخرة، الميزانيات، الفواتير، الحدود
     # الائتمانية، التقارير الدورية، انحراف الإنفاق، النسخ الاحتياطي
     from bot.reminders import (
+        setup_bonus_check,
         setup_budget_check,
         setup_credit_check,
         setup_daily_backup,
@@ -1120,3 +1125,4 @@ def register_handlers(app: Application) -> None:
     setup_periodic_reports(app)
     setup_deviation_check(app)
     setup_daily_backup(app)
+    setup_bonus_check(app)

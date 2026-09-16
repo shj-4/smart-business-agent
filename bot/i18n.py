@@ -41,6 +41,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "btn_summary": {"ar": "🧾 تقرير شامل", "en": "🧾 Summary report"},
     "btn_convert": {"ar": "💱 تحويل عملة", "en": "💱 Convert currency"},
     "btn_workspace": {"ar": "🏢 المساحة المشتركة", "en": "🏢 Shared workspace"},
+    "btn_bonus": {"ar": "🎁 البونس والنقاط", "en": "🎁 Bonus & points"},
     "btn_search": {"ar": "🔍 بحث", "en": "🔍 Search"},
     "btn_history": {"ar": "🕘 آخر العمليات", "en": "🕘 Recent records"},
     "btn_back": {"ar": "⬅️ رجوع", "en": "⬅️ Back"},

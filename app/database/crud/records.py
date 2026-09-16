@@ -15,7 +15,9 @@ from app.config import settings
 from app.database.models import (
     Budget,
     CreditLimit,
+    EmployeeBonusPlan,
     Invoice,
+    LoyaltyAccount,
     Note,
     Task,
     Transaction,
@@ -80,7 +82,25 @@ def create_transaction(
         return None
     db.refresh(transaction)
     _invalidate_caches(db, telegram_user_id)
+    _accrue_loyalty_after_transaction(db, transaction)
     return transaction
+
+
+def _accrue_loyalty_after_transaction(db: Session, transaction: Transaction | None) -> None:
+    """تراكم تلقائي لنقاط الولاء عند تسجيل مبيع باسم عميل (ميزة حدث البون).
+
+    يُستدعى بعد حفظ المعاملة؛ يفشل بصمت حتى لا يكسر تسجيل المعاملة نفسه
+    (نقاط الولاء ترفيهية إضافية — ليست جوهرية لسجل العمليات).
+    """
+    if transaction is None:
+        return
+    try:
+        from app.database.crud.bonus import accrue_loyalty_for_transaction
+
+        accrue_loyalty_for_transaction(db, transaction)
+    except Exception:
+        db.rollback()
+        return
 
 def create_note(
     db: Session,
@@ -901,6 +921,14 @@ def merge_person(db: Session, source: str, target: str) -> int:
         Budget,
         {uid for (uid,) in db.query(Budget.telegram_user_id).filter(Budget.person == source, Budget.scope == "person").all()},
         extra=Budget.scope == "person",
+    )
+    _resolve_unique_per_user(
+        LoyaltyAccount,
+        {uid for (uid,) in db.query(LoyaltyAccount.telegram_user_id).filter(LoyaltyAccount.person == source).all()},
+    )
+    _resolve_unique_per_user(
+        EmployeeBonusPlan,
+        {uid for (uid,) in db.query(EmployeeBonusPlan.telegram_user_id).filter(EmployeeBonusPlan.person == source).all()},
     )
 
     db.commit()

@@ -8,7 +8,6 @@
 
 import ast
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -30,14 +29,15 @@ def _module_names(py_file: Path) -> tuple[str, list[str]]:
 
 
 def test_crud_module_is_package_not_monolithic_file():
+    import app.database.crud as crud
 
-    assert sys.modules["app.database.crud"].__file__.endswith(
+    assert crud.__file__.endswith(
         ("crud" + "\\__init__.py", "crud" + "/__init__.py")
     )
     assert (PKG.parent / "crud.py").exists() is False
 
 
-@pytest.mark.parametrize("module", ["common", "workspace", "tasks", "records", "budgets", "invoices", "credit", "reports", "prefs", "feedback"])
+@pytest.mark.parametrize("module", ["common", "workspace", "tasks", "records", "budgets", "invoices", "credit", "reports", "prefs", "feedback", "bonus"])
 def test_submodule_importable(module):
     importlib.import_module(f"app.database.crud.{module}")
 

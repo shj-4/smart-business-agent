@@ -187,6 +187,7 @@ def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [("his:p:1", t("btn_history", lang))],
         [("sb:start", t("btn_search", lang))],
         [("bg:list", t("btn_budget", lang))],
+        [("bn:overview", t("btn_bonus", lang))],
         [("tool:chart", t("btn_chart", lang))],
         [("tool:summary", t("btn_summary", lang))],
         [("tool:pdf", t("btn_export_pdf", lang))],
