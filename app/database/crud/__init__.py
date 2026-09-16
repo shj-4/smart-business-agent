@@ -71,8 +71,10 @@ from .common import (
     _is_duplicate_message,
     _like_escape,
     _to_decimal,
+    get_or_create_user_pref,
     normalize_currency,
     parse_date_local,
+    toggle_notification_pref,
 )
 from .credit import (
     credit_monthly_reset,

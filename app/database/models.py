@@ -297,6 +297,13 @@ class UserPref(Base):
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
     lang = Column(String(2), nullable=False, default="ar")  # ar | en
+    notif_task_reminder = Column(Boolean, default=True, nullable=False)
+    notif_budget_alert = Column(Boolean, default=True, nullable=False)
+    notif_credit_alert = Column(Boolean, default=True, nullable=False)
+    notif_invoice_alert = Column(Boolean, default=True, nullable=False)
+    notif_morning_summary = Column(Boolean, default=True, nullable=False)
+    notif_deviation = Column(Boolean, default=True, nullable=False)
+    notif_periodic_report = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=True)
 

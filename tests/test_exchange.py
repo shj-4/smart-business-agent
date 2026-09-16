@@ -95,6 +95,51 @@ class TestGetRate:
         assert result["from"] == "ILS"
 
 
+class TestRateCaching:
+    """ذاكرة التخزين المؤقت للأسعار — تُحدَّث مرة كل ساعة لا مع كل طلب."""
+
+    @patch("app.exchange._fetch_rates")
+    def test_rates_fetched_once_within_ttl(self, mock_fetch):
+        """عدة استعلامات متتالية تستخدم نفس السعر المسترجَع — شبكة واحدة فقط."""
+        mock_fetch.return_value = {"USD": 1.0, "ILS": 3.75}
+        get_rate("USD", "ILS")
+        get_rate("USD", "ILS")
+        get_rate("USD", "ILS")
+        assert mock_fetch.call_count == 1
+
+    @patch("app.exchange._fetch_rates")
+    def test_rate_refreshed_after_ttl(self, mock_fetch):
+        """انقضاء ساعة (TTL) يفرض جلبًا جديدًا من الشبكة."""
+        mock_fetch.return_value = {"USD": 1.0, "ILS": 3.75}
+        import time as _time
+
+        get_rate("USD", "ILS")
+        first_call_count = mock_fetch.call_count
+        # نُقدّم الطابع الزمني لانتهاء الصلاحية (بدل انتظار ساعة حقيقية)
+        # في التخزين العَنْز للزوج وفي التخزين الكبير للمصفوفة معًا.
+        for key in list(exchange._cache):
+            rate, ts = exchange._cache[key]
+            exchange._cache[key] = (rate, ts - 7200)
+        for key in list(exchange._last_rates):
+            rates, ts = exchange._last_rates[key]
+            exchange._last_rates[key] = (rates, ts - 7200)
+        get_rate("USD", "ILS")
+        assert mock_fetch.call_count > first_call_count
+
+    @patch("app.exchange._fetch_rates")
+    def test_inverse_pair_cached_independently(self, mock_fetch):
+        """كل زوج (من→إلى) يُجلب من عملة الأساس الخاصة به وبالنتيجة الصحيحة."""
+        mock_fetch.side_effect = lambda base: {
+            "USD": {"USD": 1.0, "ILS": 3.75},
+            "ILS": {"ILS": 1.0, "USD": 0.2667},
+        }[base]
+        rate_ui = get_rate("USD", "ILS")  # يبني مصفوفة USD
+        rate_iu = get_rate("ILS", "USD")  # يبني مصفوفة ILS
+        assert mock_fetch.call_count == 2
+        assert rate_ui == Decimal("3.7500")
+        assert rate_iu == Decimal("0.2667")
+
+
 class TestConvertTotalsToBaseStored:
     """convert_totals_to_base مع مبالغ مثبّتة بعملة الأساس وقت التسجيل (#25)."""
 

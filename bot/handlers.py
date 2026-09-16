@@ -485,6 +485,60 @@ async def report_off_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("تم إيقاف التقارير الدورية.")
 
 
+async def notif_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /notif — عرض وتعديل تفضيلات الإشعارات."""
+    from app.database.crud.common import get_or_create_user_pref, toggle_notification_pref
+
+    LABELS = {
+        "notif_task_reminder": ("⏰ تذكيرات المهام", True),
+        "notif_budget_alert": ("💰 تنبيهات الميزانية", True),
+        "notif_credit_alert": ("💳 تنبيهات الحد الائتماني", True),
+        "notif_invoice_alert": ("🧾 تنبيهات الفواتير", True),
+        "notif_morning_summary": ("☀️ الملخص الصباحي", True),
+        "notif_deviation": ("🚨 تنبيهات الانحراف", True),
+        "notif_periodic_report": ("📊 التقارير الدورية", True),
+    }
+
+    telegram_user_id = update.effective_user.id
+    args = context.args or []
+
+    if len(args) == 2:
+        field_name = args[0]
+        value = args[1].lower()
+        if field_name not in LABELS or value not in ("on", "off"):
+            await update.message.reply_text(
+                "الاستخدام: /notif <نوع> on|off\n"
+                "مثال: /notif notif_task_reminder off\n\n"
+                "الأنواع المتاحة:\n" +
+                "\n".join(f"• {k}" for k in LABELS)
+            )
+            return
+        db = SessionLocal()
+        try:
+            toggle_notification_pref(db, telegram_user_id, field_name, value == "on")
+        finally:
+            db.close()
+        label = LABELS[field_name][0]
+        status = "✅ مفعّل" if value == "on" else "❌ معطّل"
+        await update.message.reply_text(f"{label}: {status}")
+        return
+
+    # عرض الحالة الحالية
+    db = SessionLocal()
+    try:
+        pref = get_or_create_user_pref(db, telegram_user_id)
+    finally:
+        db.close()
+
+    lines = ["⚙️ تفضيلات الإشعارات الحالية:\n"]
+    for field, (label, _) in LABELS.items():
+        enabled = getattr(pref, field, True)
+        icon = "✅" if enabled else "❌"
+        lines.append(f"{icon} {label}: {'مفعّل' if enabled else 'معطّل'}")
+    lines.append("\nلتعديل: /notif <نوع> on|off")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /budget — ميزانيات شهرية للمصاريف حسب العملة أو الشخص.
 
@@ -1107,6 +1161,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("report_on", report_on_command))
     app.add_handler(CommandHandler("report_off", report_off_command))
+    app.add_handler(CommandHandler("notif", notif_command))
     app.add_handler(CommandHandler("admin_stats", admin_stats_command))
     app.add_handler(CommandHandler("feedback", feedback_command))
     app.add_handler(CommandHandler("feedback_ack", feedback_ack_command))

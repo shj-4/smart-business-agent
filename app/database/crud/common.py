@@ -150,3 +150,33 @@ def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
     for uid in accessible_user_ids(db, telegram_user_id):
         clear_cache(f"run_query:{uid}")
     emit("data_written")  # admin يستمع لهذا الحدث لمسح كاش الإحصائيات
+
+
+def get_or_create_user_pref(db: Session, telegram_user_id: int):
+    from app.database.models import UserPref
+
+    pref = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
+    if pref is None:
+        pref = UserPref(telegram_user_id=telegram_user_id)
+        db.add(pref)
+        db.commit()
+        db.refresh(pref)
+    return pref
+
+
+def toggle_notification_pref(db: Session, telegram_user_id: int, field: str, enabled: bool) -> str:
+    """يُحدّث إعداد إشعار واحد. يعيد اسم الإعداد بعد التعديل."""
+    VALID = {
+        "notif_task_reminder", "notif_budget_alert", "notif_credit_alert",
+        "notif_invoice_alert", "notif_morning_summary", "notif_deviation", "notif_periodic_report",
+    }
+    if field not in VALID:
+        return f"إعداد غير معروف: {field}"
+    pref = get_or_create_user_pref(db, telegram_user_id)
+    setattr(pref, field, enabled)
+    from app.timeutil import now_utc
+
+    pref.updated_at = now_utc()
+    db.commit()
+    db.refresh(pref)
+    return field

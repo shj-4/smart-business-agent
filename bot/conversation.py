@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 COLLECT = 1  # ننتظر إكمال بيانات ناقصة
 CONFIRM = 2  # ننتظر تأكيد/إلغاء (أزرار InlineKeyboard)
 
+QUICK_ACTIONS = InlineKeyboardMarkup([
+    [InlineKeyboardButton("➕ تسجيل عملية", callback_data="menu:record")],
+    [InlineKeyboardButton("📊 أسئلة مالية", callback_data="menu:reports"), InlineKeyboardButton("💱 تحويل عملة", callback_data="tool:convert")],
+])
 
 _AMOUNT_RE = re.compile(r"(?P<num>\d+(?:[.,]\d+)?)\s*(?P<cur>[\u0600-\u06FF\w]+)?")
 
@@ -693,7 +697,7 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             if is_greeting(user_text)
             else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
         )
-        await update.message.reply_text(chat_reply)
+        await update.message.reply_text(chat_reply, reply_markup=QUICK_ACTIONS)
     else:
         await update.message.reply_text(
             "أعتذر، ما فهمت رسالتك. جرّب:\n"
@@ -953,7 +957,7 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             if is_greeting(text)
             else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
         )
-        await update.message.reply_text(chat_reply)
+        await update.message.reply_text(chat_reply, reply_markup=QUICK_ACTIONS)
     else:
         await update.message.reply_text(
             "أعتذر، ما فهمت رسالتك. جرّب:\n"

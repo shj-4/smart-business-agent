@@ -27,6 +27,17 @@ from bot.icons import WARNING
 
 logger = logging.getLogger(__name__)
 
+
+def _user_pref_flag(db, uid: int, field: str) -> bool:
+    """يعيد True إذا لم يكن الإعداد مُعطَّلًا (True أو لا يوجد سجل)."""
+    from app.database.models import UserPref
+
+    pref = db.query(UserPref).filter(UserPref.telegram_user_id == uid).first()
+    if pref is None:
+        return True
+    return getattr(pref, field, True)
+
+
 # الفاصل الزمني بين كل فحص (بالدقائق)
 CHECK_INTERVAL_MINUTES = 15
 
@@ -59,6 +70,8 @@ async def overdue_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         for (uid,) in user_ids:
             # تحديث المهام المتأخرة
+            if not _user_pref_flag(db, uid, "notif_task_reminder"):
+                continue
             mark_overdue_tasks(db, uid)
 
             # المهام المتأخرة التي لم تُرسل لها تذكير بعد
@@ -170,6 +183,8 @@ async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             budget = db.query(Budget).filter(Budget.id == bid).first()
             if budget is None:
+                continue
+            if not _user_pref_flag(db, budget.telegram_user_id, "notif_budget_alert"):
                 continue
             budget_monthly_reset(db, budget)
             usage = budget_usage(db, budget)
@@ -285,6 +300,8 @@ async def invoice_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     for inv in overdue:
         db = SessionLocal()
         try:
+            if not _user_pref_flag(db, inv.telegram_user_id, "notif_invoice_alert"):
+                continue
             if inv.alerted:
                 db.close()
                 continue
@@ -358,6 +375,8 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             limit_row = db.query(CreditLimit).filter(CreditLimit.id == lid).first()
             if limit_row is None:
+                continue
+            if not _user_pref_flag(db, limit_row.telegram_user_id, "notif_credit_alert"):
                 continue
             credit_monthly_reset(db, limit_row)
             usage = credit_usage(db, limit_row)
@@ -502,6 +521,8 @@ async def periodic_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for pref in prefs:
         try:
+            if not _user_pref_flag(db, pref.telegram_user_id, "notif_periodic_report"):
+                continue
             if not _report_due(pref, now_dt):
                 continue
             message = build_periodic_summary(
@@ -546,6 +567,8 @@ async def deviation_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         today = now_utc().strftime("%Y-%m-%d")
         for uid in user_ids_with_data(db):
             try:
+                if not _user_pref_flag(db, uid, "notif_deviation"):
+                    continue
                 summary = deviation_summary(db, uid)
                 flagged = [d for d in summary["deviations"] if d.get("significant")]
                 if not flagged or _LAST_DEVIATION_SENT.get(uid) == today:
@@ -687,6 +710,8 @@ async def morning_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         for uid in user_ids_with_data(db):
             try:
+                if not _user_pref_flag(db, uid, "notif_morning_summary"):
+                    continue
                 summary = build_morning_summary(db, uid)
                 await context.bot.send_message(chat_id=uid, text=summary)
             except Exception:  # noqa: BLE001

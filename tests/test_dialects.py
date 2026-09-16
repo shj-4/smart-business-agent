@@ -52,6 +52,18 @@ class TestDetectDialect:
         assert detect_dialect("وين شلونك") == GULF
         assert detect_dialect("شو بدك") == MSA  # تطابق واحد فقط → لا تُعلن
 
+    def test_egyptian_expanded_words(self):
+        assert detect_dialect("يلا يلا تمام بجد") == EGYPTIAN
+
+    def test_levantine_expanded_words(self):
+        assert detect_dialect("كتير هلأ خليني أكيد") == LEVANTINE
+
+    def test_gulf_expanded_words(self):
+        assert detect_dialect("صراحة العافية بخصوص الشغل") == GULF
+
+    def test_maghrebi_expanded_words(self):
+        assert detect_dialect("هاك نعام غادي دوك") == MAGHREBI
+
 
 class TestDialectHelpers:
     def test_instruction_not_empty_and_scoped(self):
