@@ -369,7 +369,8 @@ def _party_rows(db: Session, base: str) -> list[dict]:
     مشفّرة فلا يمكن جمعها عبر SQL، لذا يجب سحب كل المعاملات وجمعها في Python
     لضمان ظهور أرصدة الأطراف كاملة بلا أخطاء صامتة.
     """
-    notes_count = dict(
+    notes_count: dict[str, int] = {}
+    for p, c in (
         db.query(Note.person, func.count(Note.id))
         .filter(
             Note.deleted_at.is_(None),
@@ -378,13 +379,20 @@ def _party_rows(db: Session, base: str) -> list[dict]:
         )
         .group_by(Note.person)
         .all()
-    )
-    tasks_count = dict(
+    ):
+        key = (p or "").strip()
+        if key:
+            notes_count[key] = notes_count.get(key, 0) + c
+    tasks_count: dict[str, int] = {}
+    for p, c in (
         db.query(Task.person, func.count(Task.id))
         .filter(Task.deleted_at.is_(None), Task.person.isnot(None))
         .group_by(Task.person)
         .all()
-    )
+    ):
+        key = (p or "").strip()
+        if key:
+            tasks_count[key] = tasks_count.get(key, 0) + c
     tx_rows = (
         db.query(
             Transaction.person,
@@ -421,11 +429,11 @@ def _party_rows(db: Session, base: str) -> list[dict]:
             )
             se[kind] += Decimal(str(stored_amt))
     for p in notes_count:
-        if p and p.strip() and p.strip() not in agg:
-            agg[p.strip()] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+        if p not in agg:
+            agg[p] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
     for p in tasks_count:
-        if p and p.strip() and p.strip() not in agg:
-            agg[p.strip()] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+        if p not in agg:
+            agg[p] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
     rows = []
     for p, bucket in agg.items():
         res = _convert_month_currency_groups(

@@ -50,6 +50,7 @@ from bot.formatters import (
     format_record_result,
     safe_reply,
 )
+from bot.icons import BACK, SUCCESS
 from bot.ratelimit import is_rate_limited
 
 logger = logging.getLogger(__name__)
@@ -242,7 +243,7 @@ async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "category": f"التصنيف {budget.category}",
     }.get(budget.scope, budget.scope)
     await update.message.reply_text(
-        f"✅ أُنشئت ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
+        f"{SUCCESS} أُنشئت ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
         "سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه.",
         reply_markup=MAIN_HOME_KEYBOARD,
     )
@@ -301,7 +302,7 @@ async def workspace_invite_value(update: Update, context: ContextTypes.DEFAULT_T
         db.close()
     if ok:
         await update.message.reply_text(
-            f"✅ أُرسلت دعوة للعضو {digits} إلى مساحتك المشتركة.\n"
+            f"{SUCCESS} أُرسلت دعوة للعضو {digits} إلى مساحتك المشتركة.\n"
             "لن تُدمج بياناتكما حتى يقبل الطرف الدعوة بنفسه "
             "(سيراها في قائمة المساحة المشتركة أو عبر /work).",
             reply_markup=MAIN_HOME_KEYBOARD,
@@ -542,11 +543,14 @@ async def _handle_record_result(
     if data_type == "complete_task":
         from bot.menus import MAIN_HOME_KEYBOARD
 
-        db = SessionLocal()
-        try:
-            reply = save_record(db, update.effective_user.id, result, raw_text, msg_id)
-        finally:
-            db.close()
+        def _save():
+            db = SessionLocal()
+            try:
+                return save_record(db, update.effective_user.id, result, raw_text, msg_id)
+            finally:
+                db.close()
+
+        reply = await asyncio.to_thread(_save)
         await update.message.reply_text(
             reply or "لم أستطع فهم مهمة محددة لإنجازها.", reply_markup=MAIN_HOME_KEYBOARD
         )
@@ -883,11 +887,14 @@ async def _confirm_resolve(
                 "لم أفهم نوع العملية بوضوح، لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD
             )
         else:
-            db = SessionLocal()
-            try:
-                reply = save_record(db, telegram_user_id, result, raw, msg_id)
-            finally:
-                db.close()
+            def _save():
+                db = SessionLocal()
+                try:
+                    return save_record(db, telegram_user_id, result, raw, msg_id)
+                finally:
+                    db.close()
+
+            reply = await asyncio.to_thread(_save)
             await query.edit_message_text(
                 reply or "أعتذر، لم أستطع حفظ هذه العملية.", reply_markup=MAIN_HOME_KEYBOARD
             )
@@ -904,6 +911,65 @@ async def confirm_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     return await _confirm_resolve(update, context, accept=False)
 
 
+async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """زر «تكرار العملية» — يحفظ الحالي ثم يبدأ عملية جديدة بنفس التفاصيل.
+
+    يبقي النوع/العملة/الشخص/التصنيف من السجل المحفوظ ويسأل عن المبلغ فقط،
+    مفيد للمصاريف المتكررة (إيجار، اشتراكات).
+    """
+    query = update.callback_query
+    await query.answer()
+
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    result = context.user_data.get("confirm_result") or {}
+    raw = context.user_data.get("confirm_raw")
+    msg_id = context.user_data.get("confirm_message_id")
+    telegram_user_id = query.from_user.id
+    data_type = result.get("type")
+
+    if not data_type or data_type == "unknown" or data_type not in TYPE_NAMES:
+        await query.edit_message_text(
+            "لم أفهم نوع العملية بوضوح، لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        _clear_all_pending(context)
+        return None
+
+    def _save():
+        db = SessionLocal()
+        try:
+            return save_record(db, telegram_user_id, result, raw, msg_id)
+        finally:
+            db.close()
+
+    reply = await asyncio.to_thread(_save)
+    if not reply:
+        await query.edit_message_text(
+            "أعتذر، لم أستطع حفظ هذه العملية.", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        _clear_all_pending(context)
+        return None
+
+    # نسخة مكررة بنفس النوع والعملة والشخص والتفاصيل، لكن بلا مبلغ
+    repeat = {k: v for k, v in result.items() if k in ("type", "currency", "person", "category", "description")}
+    repeat["intent"] = "record"
+
+    context.user_data["pending_record"] = repeat
+    context.user_data["pending_type"] = data_type
+    context.user_data["pending_missing"] = ["amount"]
+    context.user_data["pending_raw"] = None
+    context.user_data["pending_message_id"] = msg_id
+
+    prompt = (
+        f"{SUCCESS} حُفظت العملية.\n"
+        "🔁 سأكرّر نفس التفاصيل — أرسل المبلغ فقط (مثال: 300 أو 300 شيكل)"
+    )
+    await query.edit_message_text(
+        prompt, reply_markup=MAIN_HOME_KEYBOARD
+    )
+    return COLLECT
+
+
 async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """زر تعديل حقل في شاشة التأكيد → يعرض قائمة الحقول القابلة للتعديل."""
     query = update.callback_query
@@ -914,7 +980,7 @@ async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         [InlineKeyboardButton(FIELD_LABELS.get(f, f), callback_data=f"confirm:edit:{f}")]
         for f in fields
     ]
-    buttons.append([InlineKeyboardButton("⬅️ رجوع للتأكيد", callback_data="confirm:edit:back")])
+    buttons.append([InlineKeyboardButton(f"{BACK} رجوع للتأكيد", callback_data="confirm:edit:back")])
     await query.edit_message_text(
         "اختر الحقل الذي تريد تعديله:", reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -1075,7 +1141,7 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     from bot.editing import FIELD_LABELS_AR
 
     label = FIELD_LABELS_AR.get(field, field)
-    await update.message.reply_text(f"تم تحديث {label} بنجاح ✅", reply_markup=MAIN_HOME_KEYBOARD)
+    await update.message.reply_text(f"تم تحديث {label} بنجاح {SUCCESS}", reply_markup=MAIN_HOME_KEYBOARD)
     return None
 
 
@@ -1140,6 +1206,7 @@ conversation_handler = ConversationHandler(
         CONFIRM: [
             CallbackQueryHandler(confirm_yes, pattern="^confirm:yes$"),
             CallbackQueryHandler(confirm_no, pattern="^confirm:no$"),
+            CallbackQueryHandler(confirm_repeat, pattern="^confirm:repeat$"),
             CallbackQueryHandler(confirm_edit, pattern="^confirm:edit$"),
             CallbackQueryHandler(confirm_edit_field, pattern=r"^confirm:edit:.+$"),
             # رسالة جديدة خلال التأكيد → إعادة بدء المحادثة (allow_reentry) بمسح الحالة

@@ -200,8 +200,12 @@ def detect_dialect(text: str) -> str:
 
     best_label, best_score = max(scores.items(), key=lambda kv: (kv[1], _WEIGHT[kv[0]]))
 
-    # لا نُعلن لهجة إلا بتطابق موثوق — كلمة شائعة واحدة لا تكفي أحيانًا
-    threshold = 2 if best_score <= 1 and total >= 6 else (1 if total >= 3 else best_score)
+    # لا نُعلن لهجة إلا بتطابق موثوق:
+    # - رسالة طويلة (6+): كلمة شائعة واحدة لا تكفي وسط الكثير → نطلب 2.
+    # - رسالة متوسطة (3-5): كلمة مميزة واحدة تكفي عندما تكون الرسالة فعلًا لهجوية.
+    # - رسالة قصيرة جدًا (<3): الكلمة الوحيدة قد تكون عامة/صدفة → نطلب 2 أيضًا
+    #   آخر إعلانًا لهجة كاملة من كلمة واحدة على نص قصير غير موثوق.
+    threshold = 2 if (total < 3 or total >= 6) else 1
     if best_score >= threshold and best_score > 0:
         return best_label
     return MSA

@@ -43,6 +43,7 @@ from app.timeutil import to_local_naive
 from bot.conversation import _clear_all_pending
 from bot.formatters import format_query_result
 from bot.i18n import remember_lang, t, user_lang
+from bot.icons import BACK, EXPENSE, FORWARD, HOME, INCOME, NEW, SUCCESS, TASK, WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,9 @@ MAIN_MENU_TEXT = (
 )
 
 MAIN_MENU = [
-    [("💰 تسجيل عملية", "menu:record")],
+    [(f"{NEW} تسجيل عملية", "menu:record")],
     [("📊 التقارير", "menu:reports")],
-    [("📋 مهامي", "menu:tasks")],
+    [(f"{TASK} مهامي", "menu:tasks")],
     [("🧰 أدوات", "menu:tools")],
     [("⚙️ الإعدادات", "menu:settings")],
 ]
@@ -73,25 +74,25 @@ MAIN_MENU = [
 MAIN_HOME_KEYBOARD = build_menu(MAIN_MENU)
 
 RECORD_MENU = [
-    [("💸 مصروف", "rec:expense"), ("💵 إيراد", "rec:income")],
+    [(f"{EXPENSE} مصروف", "rec:expense"), (f"{INCOME} إيراد", "rec:income")],
     [("🛒 طلبية", "rec:order"), ("📝 ملاحظة", "rec:note")],
-    [("⏰ مهمة جديدة", "rec:task")],
-    [("⬅️ رجوع", "menu:main")],
+    [(f"{TASK} مهمة جديدة", "rec:task")],
+    [(f"{BACK} رجوع", "menu:main")],
 ]
 
 RECORD_HINTS = {
-    "expense": "💸 مصروف — أرسل التفاصيل.\nمثال: 300 شيكل لمحمد مقابل مواد",
-    "income": "💵 إيراد — أرسل التفاصيل.\nمثال: استلمت 500 دولار من أحمد",
+    "expense": f"{EXPENSE} مصروف — أرسل التفاصيل.\nمثال: 300 شيكل لمحمد مقابل مواد",
+    "income": f"{INCOME} إيراد — أرسل التفاصيل.\nمثال: استلمت 500 دولار من أحمد",
     "order": "🛒 طلبية — أرسل التفاصيل.\nمثال: طلبية 5 صناديق من مورّد الرياض",
     "note": "📝 ملاحظة — أرسل التفاصيل.\nمثال: ملاحظة: سيأتي العمال يوم السبت",
-    "task": "⏰ مهمة جديدة — أرسل التفاصيل.\nمثال: مهمة الاتصال بسامر غدًا الساعة 10",
+    "task": f"{TASK} مهمة جديدة — أرسل التفاصيل.\nمثال: مهمة الاتصال بسامر غدًا الساعة 10",
 }
 
 TASK_STATUS_MENU = [
-    [("⏳ المعلّقة", "tsk:list:pending")],
-    [("⚠️ المتأخرة", "tsk:list:overdue")],
-    [("✅ المنجزة", "tsk:list:done")],
-    [("⬅️ رجوع", "menu:main")],
+    [(f"{TASK} المعلّقة", "tsk:list:pending")],
+    [(f"{WARNING} المتأخرة", "tsk:list:overdue")],
+    [(f"{SUCCESS} المنجزة", "tsk:list:done")],
+    [(f"{BACK} رجوع", "menu:main")],
 ]
 
 PERIOD_LABELS = {
@@ -106,26 +107,26 @@ REPORT_PERIODS = [
     [("📅 اليوم", "rpt:p:today"), ("🗓 هذا الأسبوع", "rpt:p:this_week")],
     [("🗓 هذا الشهر", "rpt:p:this_month"), ("🗓 هذه السنة", "rpt:p:this_year")],
     [("🌐 كل الفترات", "rpt:p:all_time")],
-    [("⬅️ رجوع", "menu:main")],
+    [(f"{BACK} رجوع", "menu:main")],
 ]
 
 REPORT_METRICS = [
-    [("💸 المصاريف", "rpt:m:total_expenses:__PERIOD__")],
-    [("💰 الإيرادات", "rpt:m:total_income:__PERIOD__")],
+    [(f"{EXPENSE} المصاريف", "rpt:m:total_expenses:__PERIOD__")],
+    [(f"{INCOME} الإيرادات", "rpt:m:total_income:__PERIOD__")],
     [("🔢 عدد العمليات", "rpt:m:count_transactions:__PERIOD__")],
-    [("⬅️ فترة أخرى", "rpt:period")],
+    [(f"{BACK} فترة أخرى", "rpt:period")],
 ]
 
 METRIC_LABELS = {
-    "total_expenses": "المصاريف 💸",
-    "total_income": "الإيرادات 💰",
+    "total_expenses": f"المصاريف {EXPENSE}",
+    "total_income": f"الإيرادات {INCOME}",
     "count_transactions": "عدد العمليات 🔢",
 }
 
 SETTINGS_MENU = [
     [("📅 تفعيل التقرير الدوري", "set:on")],
     [("🔕 إيقاف التقرير الدوري", "set:off")],
-    [("⬅️ رجوع", "menu:main")],
+    [(f"{BACK} رجوع", "menu:main")],
 ]
 
 SETTINGS_DOCS = {
@@ -140,18 +141,19 @@ TOOLS_MENU = [
     [("✏️ تعديل آخر سجل", "el:last")],
     [("🕘 آخر العمليات", "his:p:1")],
     [("🔍 بحث", "sb:start")],
-    [("💰 الميزانيات", "bg:list")],
+    [(f"{EXPENSE} الميزانيات", "bg:list")],
+    [("💳 بطاقة الذمم الموحّدة", "tool:finance")],
     [("💳 الديون والأرصدة", "tool:debts")],
     [("🧾 الفواتير الآجلة", "tool:invoices")],
     [("🛒 طلبياتي", "tool:orders")],
-    [("⚠️ الحدود الائتمانية", "tool:credit")],
+    [(f"{WARNING} الحدود الائتمانية", "tool:credit")],
     [("📈 الرسم البياني", "tool:chart")],
     [("🧾 تقرير شامل", "tool:summary")],
     [("📄 تصدير PDF", "tool:pdf")],
     [("📦 تصدير Excel", "ex:menu")],
     [("💱 تحويل عملة", "tool:convert")],
     [("🏢 المساحة المشتركة", "ws:status")],
-    [("⬅️ رجوع", "menu:main")],
+    [(f"{BACK} رجوع", "menu:main")],
 ]
 
 EXPORT_MENU = [
@@ -159,7 +161,7 @@ EXPORT_MENU = [
     [("📅 اليوم", "ex:p:today")],
     [("🗓 الأسبوع", "ex:p:week")],
     [("🗓 الشهر", "ex:p:month")],
-    [("⬅️ رجوع", "menu:tools")],
+    [(f"{BACK} رجوع", "menu:tools")],
 ]
 
 EXPORT_CAPTIONS = {
@@ -170,15 +172,53 @@ EXPORT_CAPTIONS = {
 }
 
 
-def _main_menu_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
+def _main_menu_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardMarkup:
     rows = [
         [(t("btn_record", lang), "menu:record")],
         [(t("btn_reports", lang), "menu:reports")],
-        [(t("btn_tasks", lang), "menu:tasks")],
+        [(_tasks_button_label(lang, uid), "menu:tasks")],
         [(t("btn_tools", lang), "menu:tools")],
         [(t("btn_settings", lang), "menu:settings")],
     ]
     return build_menu(rows)
+
+
+def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
+    """نص زر «مهامي» مع شارة عددية: (N متأخرة) عند تأخّر، وإلا (N معلّقة)."""
+    label = t("btn_tasks", lang)
+    try:
+        db = SessionLocal()
+        try:
+            from app.database.models import Task
+
+            overdue = (
+                db.query(Task.telegram_user_id)
+                .filter(
+                    Task.telegram_user_id == uid,
+                    Task.status == "overdue",
+                    Task.deleted_at.is_(None),
+                )
+                .count()
+            )
+            if overdue:
+                return f"{label} ({overdue} {WARNING} متأخرة)"
+            pending = (
+                db.query(Task.telegram_user_id)
+                .filter(
+                    Task.telegram_user_id == uid,
+                    Task.status == "pending",
+                    Task.deleted_at.is_(None),
+                )
+                .count()
+            )
+            if pending:
+                return f"{label} ({pending})"
+            return label
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("تعذّر حساب شارة المهام للمستخدم %s", uid)
+        return label
 
 
 def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
@@ -188,6 +228,7 @@ def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [("sb:start", t("btn_search", lang))],
         [("bg:list", t("btn_budget", lang))],
         [("bn:overview", t("btn_bonus", lang))],
+        [("tool:finance", t("btn_finance", lang))],
         [("tool:chart", t("btn_chart", lang))],
         [("tool:summary", t("btn_summary", lang))],
         [("tool:pdf", t("btn_export_pdf", lang))],
@@ -203,13 +244,13 @@ def _report_metrics_keyboard(period: str) -> InlineKeyboardMarkup:
     rows = [
         [(label, cb.replace("__PERIOD__", period)) for label, cb in row] for row in REPORT_METRICS
     ]
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     return build_menu(rows)
 
 
 def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows = [list(row) for row in extra_rows]
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     return build_menu(rows)
 
 
@@ -224,7 +265,9 @@ async def send_main_menu(
         else "ar"
     )
     body = text or t("main_title", lang)
-    await message.reply_text(body, reply_markup=_main_menu_keyboard(lang))
+    from_user = getattr(message, "from_user", None)
+    uid = from_user.id if from_user else None
+    await message.reply_text(body, reply_markup=_main_menu_keyboard(lang, uid=uid))
 
 
 # ---------- رصف القوائم إداريًا ----------
@@ -245,7 +288,9 @@ async def _handle_menu(
     target = parts[0] if parts else "main"
     if target == "main":
         _clear_all_pending(context)
-        await query.edit_message_text(t("main_title", lang), reply_markup=_main_menu_keyboard(lang))
+        await query.edit_message_text(
+            t("main_title", lang), reply_markup=_main_menu_keyboard(lang, uid=query.from_user.id)
+        )
         return
     if target == "tools":
         title = t("tools_title", lang)
@@ -273,9 +318,9 @@ async def _handle_record(
 # ---------- مهامي: قائمة + أزرار لكل عنصر ----------
 
 TASK_STATUS_TITLES = {
-    "pending": "المعلّقة ⏳",
-    "overdue": "المتأخرة ⚠️",
-    "done": "المنجزة ✅",
+    "pending": f"المعلّقة {TASK}",
+    "overdue": f"المتأخرة {WARNING}",
+    "done": f"المنجزة {SUCCESS}",
 }
 
 
@@ -293,7 +338,7 @@ def _task_line(task: Task) -> str:
         )
         parts.append(badge)
     if getattr(task, "status", None) == "done":
-        parts.append("✅")
+        parts.append(SUCCESS)
     return " — ".join(parts)
 
 
@@ -305,12 +350,12 @@ def build_task_list(
         text = f"لا توجد مهام {TASK_STATUS_TITLES.get(status, '')} 🎉"
         return text, _home_keyboard()
 
-    lines = [f"📋 المهام {TASK_STATUS_TITLES.get(status, '')}:"]
+    lines = [f"{TASK} المهام {TASK_STATUS_TITLES.get(status, '')}:"]
     rows = []
     for i, task in enumerate(tasks[:10], start=1):
         lines.append(f"{i}. {_task_line(task)}")
         buttons = [
-            InlineKeyboardButton("✅", callback_data=f"tsk:done:{task.id}"),
+            InlineKeyboardButton(SUCCESS, callback_data=f"tsk:done:{task.id}"),
             InlineKeyboardButton("✏️", callback_data=f"tsk:edit:{task.id}"),
             InlineKeyboardButton("🗑️", callback_data=f"tsk:del:{task.id}"),
         ]
@@ -318,9 +363,8 @@ def build_task_list(
             buttons = [InlineKeyboardButton("🗑️", callback_data=f"tsk:del:{task.id}")]
         rows.append(buttons)
 
-    rows.append([InlineKeyboardButton("⬅️ رجوع للقائمة", callback_data="menu:tasks")])
-    rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu:main")])
-    return "\n".join(lines) + "\n\n(✅ إنجاز • ✏️ تعديل • 🗑️ حذف)", InlineKeyboardMarkup(rows)
+    rows.append([InlineKeyboardButton(f"{BACK} رجوع للقائمة", callback_data="menu:tasks")])
+    return "\n".join(lines) + f"\n\n({SUCCESS} إنجاز • ✏️ تعديل • 🗑️ حذف)", InlineKeyboardMarkup(rows)
 
 
 async def _handle_task_list(
@@ -363,7 +407,7 @@ async def _handle_task_done(
     finally:
         db.close()
     if task:
-        await _task_save_ack(query, context, "✅ تم إنجاز المهمة:\n", task)
+        await _task_save_ack(query, context, f"{SUCCESS} تم إنجاز المهمة:\n", task)
     else:
         await query.edit_message_text(
             "لم أجد هذه المهمة (ربما حُذفت).", reply_markup=_home_keyboard()
@@ -457,7 +501,7 @@ async def _handle_report(
 
         await query.edit_message_text(
             await asyncio.to_thread(_report_payload),
-            reply_markup=_home_keyboard([("⬅️ فترة أخرى", "rpt:period")]),
+            reply_markup=_home_keyboard([(f"{BACK} فترة أخرى", "rpt:period")]),
         )
         return
     await query.edit_message_text(
@@ -552,7 +596,7 @@ async def _handle_budget_list(
     ]
     for b in budgets:
         rows.append([("🗑️ حذف #" + str(b.id), f"bg:del:{b.id}")])
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
 
 
@@ -619,7 +663,7 @@ async def _workspace_status(
                 "لا يُنفَّذ أي دمج قبل موافقتك الصريحة."
             )
             rows = [
-                [("✅ قبول الدعوة", f"ws:accept:{invite_wid}")],
+                [(f"{SUCCESS} قبول الدعوة", f"ws:accept:{invite_wid}")],
                 [("❌ رفض الدعوة", f"ws:decline:{invite_wid}")],
             ]
         elif info is None:
@@ -651,7 +695,7 @@ async def _workspace_status(
                 rows.append([("🚪 مغادرة المساحة", "ws:leave")])
     finally:
         db.close()
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
@@ -680,10 +724,10 @@ async def _workspace_members(
                         + "\n".join(f"• {m}" for m in info["pending"])
                     )
                     rows += [[("🕒 إلغاء " + str(m), f"ws:rm:{m}")] for m in info["pending"]]
-            rows.append([("⬅️ رجوع للمساحة", "ws:status")])
+            rows.append([(f"{BACK} رجوع للمساحة", "ws:status")])
     finally:
         db.close()
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
@@ -696,7 +740,7 @@ async def _workspace_create(
     db = SessionLocal()
     try:
         create_workspace(db, uid)
-        await query.answer("✅ أُنشئت المساحة المشتركة.")
+        await query.answer(f"{SUCCESS} أُنشئت المساحة المشتركة.")
     finally:
         db.close()
     await _workspace_status(query, context)
@@ -754,7 +798,7 @@ async def _workspace_accept(
     try:
         ok = accept_workspace_invite(db, uid, int(workspace_id))
         await query.answer(
-            "✅ انضممت إلى المساحة المشتركة — بياناتكما أصبحت مشتركة الآن."
+            f"{SUCCESS} انضممت إلى المساحة المشتركة — بياناتكما أصبحت مشتركة الآن."
             if ok
             else "لا توجد دعوة بهذا المعرّف."
         )
@@ -833,7 +877,7 @@ async def _handle_tool_chart(
         photo=buf,
         caption="📈 الإيرادات مقابل المصاريف — آخر 6 أشهر",
     )
-    await query.edit_message_text("تم إرسال الرسم البياني ✅", reply_markup=_home_keyboard())
+    await query.edit_message_text(f"تم إرسال الرسم البياني {SUCCESS}", reply_markup=_home_keyboard())
 
 
 async def _handle_tool_convert(
@@ -863,6 +907,8 @@ async def _handle_tool(
         await _handle_tool_convert(query, context)
     elif act in ("debts", "invoices", "orders", "credit"):
         await _tool_lists(query, context, act)
+    elif act == "finance":
+        await _handle_tool_finance(query, context)
     else:
         await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
 
@@ -949,7 +995,7 @@ async def _handle_tool_summary(
         f"📝 المهام: {task_count} ({overdue} متأخرة)\n"
         f"🛒 الطلبيات: {order_count}\n"
         "──────────\n"
-        f"💰 خلاصة الشهر ({base}):\n"
+        f"🧾 خلاصة الشهر ({base}):\n"
         f"المصروفات: {float(expense):,.2f}\n"
         f"الإيرادات: {float(income):,.2f}\n"
         f"الصافي: {float(income - expense):,.2f}"
@@ -992,7 +1038,7 @@ async def _handle_tool_pdf(
         filename="تقرير شامل.pdf",
         caption="📄 تقرير PDF شامل — معاملات + مهام + طلبيات وملاحظات",
     )
-    await query.edit_message_text("تم إرسال ملف PDF ✅", reply_markup=_home_keyboard())
+    await query.edit_message_text(f"تم إرسال ملف PDF {SUCCESS}", reply_markup=_home_keyboard())
 
 
 async def _tool_lists(
@@ -1018,31 +1064,64 @@ async def _tool_lists(
     try:
         if which == "debts":
             text = format_debts(person_debts(db, uid))
-            rows = [[("🏠 القائمة الرئيسية", "menu:main")]]
+            rows = [[(f"{HOME} القائمة الرئيسية", "menu:main")]]
         elif which == "invoices":
             invoices = list_invoices(db, uid, status=None, limit=30)
             text = format_invoices(invoices)
             rows = [
                 [
-                    ("💰 سداد #" + str(inv.id), f"inv:pay:{inv.id}")
+                    (f"{EXPENSE} سداد #" + str(inv.id), f"inv:pay:{inv.id}")
                     for inv in invoices[:6]
                 ]
             ] if invoices else []
-            rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+            rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
         elif which == "orders":
             orders = list_orders(db, uid, status="open", limit=30)
             text = format_orders(orders)
-            rows = [[("✅ إنجاز #" + str(o.id), f"ord:done:{o.id}") for o in orders[:6]]]
+            rows = [[(f"{SUCCESS} إنجاز #" + str(o.id), f"ord:done:{o.id}") for o in orders[:6]]]
             if not rows or not rows[0]:
                 rows = []
-            rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+            rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
         else:  # credit
             limits = list_credit_limits(db, uid)
             payload = [{"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits]
             text = format_credit_limits(payload)
-            rows = [[("🏠 القائمة الرئيسية", "menu:main")]]
+            rows = [[(f"{HOME} القائمة الرئيسية", "menu:main")]]
     finally:
         db.close()
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _handle_tool_finance(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """بطاقة الذمم الموحّدة: ديون + فواتير + حدود ائتمانية."""
+    from app.database.crud import (
+        credit_usage,
+        list_credit_limits,
+        list_invoices,
+        person_debts,
+    )
+    from bot.formatters import format_finance_card
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        debts = person_debts(db, uid)
+        invoices = list_invoices(db, uid, status=None, limit=50)
+        limits = list_credit_limits(db, uid)
+        credit_payload = [
+            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
+        ]
+        text = format_finance_card(debts, invoices, credit_payload)
+    finally:
+        db.close()
+    rows = [
+        [(f"{EXPENSE} سداد فاتورة", "tool:invoices")],
+        [("💳 الديون والأرصدة", "tool:debts")],
+        [(f"{WARNING} الحدود الائتمانية", "tool:credit")],
+        [(f"{HOME} القائمة الرئيسية", "menu:main")],
+    ]
     await query.edit_message_text(text, reply_markup=build_menu(rows))
 
 
@@ -1061,7 +1140,7 @@ async def _handle_invoice_pay(
     finally:
         db.close()
     text = (
-        f"✅ سُدّدت الفاتورة {invoice_id}."
+        f"{SUCCESS} سُدّدت الفاتورة {invoice_id}."
         if ok
         else "لم أجد هذه الفاتورة أو سُدّدت مسبقًا."
     )
@@ -1082,7 +1161,7 @@ async def _handle_order_done(
         ok = False
     finally:
         db.close()
-    text = f"✅ أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية."
+    text = f"{SUCCESS} أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية."
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
@@ -1115,7 +1194,7 @@ async def _handle_export(
         filename=f"export_{label}_{now_str}.xlsx",
         caption=f"{EXPORT_CAPTIONS.get(period, 'تصدير')}\nيحتوي: معاملات + مهام + طلبيات وملاحظات",
     )
-    await query.edit_message_text("تم إرسال ملف التصدير ✅", reply_markup=_home_keyboard())
+    await query.edit_message_text(f"تم إرسال ملف التصدير {SUCCESS}", reply_markup=_home_keyboard())
 
 
 # ---------- تعديل السجلات (el / rf) ----------
@@ -1204,7 +1283,9 @@ async def _handle_record_field(
 
     if not parts or parts[0] == "end":
         _clear_all_pending(context)
-        await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=_main_menu_keyboard())
+        await query.edit_message_text(
+            MAIN_MENU_TEXT, reply_markup=_main_menu_keyboard(uid=query.from_user.id)
+        )
         return
     field = parts[-1]
     record = context.user_data.get("pending_record_edit_obj")
@@ -1258,12 +1339,12 @@ def _records_page_payload(
         )
     nav: list[tuple[str, str]] = []
     if page > 1:
-        nav.append((f"⬅️ ص{page - 1}", f"{prefix}:p:{page - 1}"))
+        nav.append((f"{BACK} ص{page - 1}", f"{prefix}:p:{page - 1}"))
     if page < pages:
-        nav.append((f"ص{page + 1} ➡️", f"{prefix}:p:{page + 1}"))
+        nav.append((f"ص{page + 1} {FORWARD}", f"{prefix}:p:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([("🏠 القائمة الرئيسية", "menu:main")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
     return "\n".join(lines), build_menu(rows)
 
 
@@ -1305,7 +1386,7 @@ async def _handle_record_action(
         finally:
             db.close()
         if deleted:
-            await query.answer("حُذف السجل ✅")
+            await query.answer(f"حُذف السجل {SUCCESS}")
         else:
             await query.answer("تعذّر الحذف (صلاحيات أو سجل غير موجود).")
         await _handle_history(query, context, ["p", "1"])
@@ -1357,7 +1438,7 @@ def _lang_keyboard() -> InlineKeyboardMarkup:
     return build_menu(
         [
             [("🌐 العربية", "ln:ar"), ("🌐 English", "ln:en")],
-            [("🏠 القائمة الرئيسية", "menu:main")],
+            [(f"{HOME} القائمة الرئيسية", "menu:main")],
         ]
     )
 

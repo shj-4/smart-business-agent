@@ -42,9 +42,10 @@ def create_invoice(
             due_date = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
         except ValueError:
             due_date = None
-        if due_date is not None and due_date.tzinfo is not None:
-            due_date = to_utc_naive(due_date)
-    if isinstance(due_date, datetime) and due_date.tzinfo is not None:
+    if isinstance(due_date, datetime):
+        # القيمة المحلية (بلا معلومات منطقة زمنية) تُعتبر توقيتًا محليًا ثم تُحوَّل
+        # إلى UTC — لا تُخزَّن حرفيًا كـ UTC. متسق مع parse_date_local لمواعيد
+        # المهام (to_utc_naive يعامل naive كتوقيت محلي و aware بالتحويل الصريح).
         due_date = to_utc_naive(due_date)
 
     invoice = Invoice(

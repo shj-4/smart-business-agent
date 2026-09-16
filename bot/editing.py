@@ -29,6 +29,7 @@ from app.database.crud import (
 from app.database.db import SessionLocal
 from app.database.models import Note, Task, Transaction
 from app.normalize import normalize_priority
+from bot.icons import EXPENSE, INCOME, TASK
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,9 @@ def _build_records_keyboard(records: list[dict]) -> InlineKeyboardMarkup:
     buttons = []
     for i, rec in enumerate(records):
         kind_emoji = {
-            "expense": "💸",
-            "income": "💰",
-            "task": "📋",
+            "expense": EXPENSE,
+            "income": INCOME,
+            "task": TASK,
             "order": "🛒",
             "note": "📝",
         }.get(rec["kind"], "📄")

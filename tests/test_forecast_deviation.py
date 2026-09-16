@@ -119,6 +119,25 @@ class TestDeviationSummary:
         incomes = [d for d in payload["deviations"] if d["kind"] == "income"]
         assert incomes == []
 
+    def test_full_decrease_to_zero_is_significant(self, db_session):
+        """انخفاض الإنفاق إلى صفر تمامًا (-100%) أكبر انحراف ممكن — يجب أن
+        يُصنَّف ملحوظًا مثل نظيره من الزيادة (متماثل)."""
+        y, m = now_local().year, now_local().month
+        for offset in (1, 2, 3):
+            yy, mm = y, m - offset
+            while mm < 1:
+                mm += 12
+                yy -= 1
+            _seed_tx(db_session, USER_A, "expense", 500, yy, mm)
+        # لا معاملة مصروف في الشهر الحالي → current 0 مقابل متوسط 500
+
+        payload = deviation_summary(db_session, USER_A)
+        exp = [d for d in payload["deviations"] if d["kind"] == "expense" and d["currency"] == CUR]
+        assert exp and exp[0]["current"] == Decimal("0")
+        assert exp[0]["average"] == Decimal("500.00")
+        assert exp[0]["pct"] == -100.0
+        assert exp[0]["significant"] is True
+
     def test_empty_db_no_deviations(self, db_session):
         assert deviation_summary(db_session, USER_A)["deviations"] == []
 

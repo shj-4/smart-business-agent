@@ -97,6 +97,35 @@ class TestBuildMenu:
         assert _find_button(kb, "menu:tools")
         assert _find_button(kb, "menu:settings")
 
+    def test_main_menu_dynamic_task_badge(self, db_session, monkeypatch):
+        """زر المهام يظهر badge بعدد المتأخرة عند وجود مهام متأخرة."""
+        from datetime import datetime
+
+        from app.timeutil import to_utc_naive
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        past = to_utc_naive(datetime(2020, 1, 1, 8, 0))
+        task = create_task(
+            db_session,
+            USER_A,
+            {"description": "متأخرة قديمة", "date": past.strftime("%Y-%m-%d %H:%M")},
+            raw_message="متأخرة",
+        )
+        task.status = "overdue"
+        db_session.commit()
+
+        kb = menus._main_menu_keyboard(uid=USER_A)
+        btn = _find_button(kb, "menu:tasks")
+        assert "متأخرة" in btn.text
+
+    def test_main_menu_task_badge_hides_without_overdue(self, db_session, monkeypatch):
+        """لا تظهر أي شارة عند عدم وجود مهام للمستخدم."""
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        kb = menus._main_menu_keyboard(uid=USER_A)
+        btn = _find_button(kb, "menu:tasks")
+        assert "مهام" in btn.text
+        assert "متأخرة" not in btn.text
+
 
 class TestCallbackRouter:
     def test_unknown_action_passes_through(self):
@@ -284,7 +313,7 @@ class TestTaskEditAndDoneHandlers:
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
         assert "الاتصال بسامر" in edited[0][0]
-        assert _find_button(edited[0][1], "menu:main")
+        assert _find_button(edited[0][1], "menu:tasks")
 
 
 class TestBudgetConvertParsing:

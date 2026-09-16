@@ -601,6 +601,25 @@ class TestInvoiceCrud:
         assert len(lst) == 1
         assert lst[0].id == inv.id
 
+    def test_naive_due_date_treated_as_local_and_stored_utc(self, db_session):
+        # نص بلا معلومات منطقة زمنية يُعتبر توقيتًا محليًا (Asia/Gaza) ثم
+        # يُخزَّن UTC — كما في parse_date_local لمواعيد المهام — لا حرفيًا.
+        inv = self._invoice(db_session, due_date="2026-09-10 10:00")
+        expected = to_utc_naive(datetime.fromisoformat("2026-09-10 10:00"))
+        assert inv.due_date is not None
+        assert inv.due_date == expected
+        assert inv.due_date != datetime.fromisoformat("2026-09-10 10:00")
+
+    def test_aware_due_date_converted_to_utc(self, db_session):
+        inv = self._invoice(db_session, due_date="2026-09-10 10:00+00:00")
+        assert inv.due_date == datetime.fromisoformat("2026-09-10 10:00")
+        inv2 = self._invoice(db_session, due_date="2026-09-10 10:00+03:00")
+        assert inv2.due_date == datetime.fromisoformat("2026-09-10 07:00")
+
+    def test_naive_datetime_object_treated_as_local(self, db_session):
+        inv = self._invoice(db_session, due_date=datetime(2026, 9, 10, 10, 0))
+        assert inv.due_date == to_utc_naive(datetime(2026, 9, 10, 10, 0))
+
     def test_create_rejects_non_positive_amount(self, db_session):
         assert self._invoice(db_session, amount=0) is None
         assert self._invoice(db_session, amount=-5) is None

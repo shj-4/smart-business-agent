@@ -287,6 +287,27 @@ class TestEmployeeBonusPlans:
         spent = employee_bonus_monthly_spent(db_session, plan)
         assert spent == Decimal("300")
 
+    def test_monthly_spent_boundary_is_local_not_utc(self, db_session):
+        """بداية الشهر تُحسب بالتوقيت المحلي (Asia/Gaza) كبقية حسابات الشهر الحالي.
+
+        لحظة منتصف الليل المحلي (أول يوم) تتقدم ساعةً/ساعتين على UTC، أي أنها
+        لا تزال في نهاية الشهر السابق بتوقيت UTC. عملية عند تلك اللحظة بالضبط
+        يجب أن تُحتسب ضمن هذا الشهر، لا أن تُستبعد بقرار UTC.
+        """
+        from app.timeutil import now_local, to_utc_naive
+
+        plan = create_employee_bonus_plan(db_session, USER_A, "محمد", "1000")
+        local_now = now_local().replace(day=1, hour=0, minute=1)
+        month_start_utc = to_utc_naive(
+            local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        tx = _grant(db_session, amount="250", person="محمد")
+        tx.created_at = month_start_utc
+        db_session.commit()
+
+        spent = employee_bonus_monthly_spent(db_session, plan, now=local_now)
+        assert spent == Decimal("250")
+
     def test_overview_detects_due_count_and_cap_status(self, db_session):
         now = datetime.utcnow()
         create_employee_bonus_plan(db_session, USER_A, "محمد", "1000", monthly_cap="2000", next_due_at=now - timedelta(days=1))
@@ -434,6 +455,25 @@ class TestBotBonusHelpers:
         assert parsed == {"currency": "ILS", "person": "محمد", "desc": "منحة شهرية"}
         parsed = _parse_optional_args(["100"])
         assert parsed["currency"] is None and parsed["person"] == "100"
+
+    def test_parse_optional_args_arabic_person_not_currency(self):
+        # يصل فقط ما بعد المبلغ (args[2:]) — كما في _cmd_add
+        for name in ("علي", "خالد", "سامر", "أحمد", "هدى"):
+            parsed = _parse_optional_args([name])
+            assert parsed["currency"] is None, name
+            assert parsed["person"] == name, name
+            assert parsed["desc"] is None
+        parsed = _parse_optional_args(["علي", "منحة"])
+        assert parsed["currency"] is None and parsed["person"] == "علي"
+        assert parsed["desc"] == "منحة"
+
+    def test_parse_optional_args_known_currency_still_parsed(self):
+        parsed = _parse_optional_args(["شيكل", "محمد"])
+        assert parsed == {"currency": "ILS", "person": "محمد", "desc": None}
+        parsed = _parse_optional_args(["USD", "أحمد", "بونس"])
+        assert parsed == {"currency": "USD", "person": "أحمد", "desc": "بونس"}
+        parsed = _parse_optional_args(["دولار"])
+        assert parsed["currency"] == "USD" and parsed["person"] is None
 
     def test_format_bonus_report(self):
         report = {

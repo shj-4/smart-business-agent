@@ -16,6 +16,8 @@
 
 from collections import OrderedDict
 
+from bot.icons import BACK, EXPENSE, HOME, NEW, TASK
+
 _STRINGS: dict[str, dict[str, str]] = {
     "main_title": {
         "ar": (
@@ -27,14 +29,15 @@ _STRINGS: dict[str, dict[str, str]] = {
             "Or just type a transaction or question (e.g. 300 ILS to Mohammed for materials)."
         ),
     },
-    "btn_record": {"ar": "💰 تسجيل عملية", "en": "💰 New record"},
+"btn_record": {"ar": f"{NEW} تسجيل عملية", "en": f"{NEW} New record"},
     "btn_reports": {"ar": "📊 التقارير", "en": "📊 Reports"},
-    "btn_tasks": {"ar": "📋 مهامي", "en": "📋 My tasks"},
+    "btn_tasks": {"ar": f"{TASK} مهامي", "en": f"{TASK} My tasks"},
     "btn_tools": {"ar": "🧰 أدوات", "en": "🧰 Tools"},
     "btn_settings": {"ar": "⚙️ الإعدادات", "en": "⚙️ Settings"},
     "tools_title": {"ar": "🧰 أدوات — اختر:", "en": "🧰 Tools — choose:"},
     "btn_edit_last": {"ar": "✏️ تعديل آخر سجل", "en": "✏️ Edit last record"},
-    "btn_budget": {"ar": "💰 الميزانيات", "en": "💰 Budgets"},
+    "btn_budget": {"ar": f"{EXPENSE} الميزانيات", "en": f"{EXPENSE} Budgets"},
+    "btn_finance": {"ar": "💳 بطاقة الذمم الموحّدة", "en": "💳 Unified ledger card"},
     "btn_chart": {"ar": "📈 الرسم البياني", "en": "📈 Chart"},
     "btn_export": {"ar": "📦 تصدير Excel", "en": "📦 Export Excel"},
     "btn_export_pdf": {"ar": "📄 تصدير PDF", "en": "📄 Export PDF"},
@@ -44,8 +47,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "btn_bonus": {"ar": "🎁 البونس والنقاط", "en": "🎁 Bonus & points"},
     "btn_search": {"ar": "🔍 بحث", "en": "🔍 Search"},
     "btn_history": {"ar": "🕘 آخر العمليات", "en": "🕘 Recent records"},
-    "btn_back": {"ar": "⬅️ رجوع", "en": "⬅️ Back"},
-    "btn_home": {"ar": "🏠 القائمة الرئيسية", "en": "🏠 Main menu"},
+    "btn_back": {"ar": f"{BACK} رجوع", "en": f"{BACK} Back"},
+    "btn_home": {"ar": f"{HOME} القائمة الرئيسية", "en": f"{HOME} Main menu"},
     "lang_prompt": {
         "ar": "اختر لغة الواجهة:",
         "en": "Choose interface language:",

@@ -186,6 +186,31 @@ class TestConvertAddValue:
         assert replies and "1050" in replies[0]
 
 
+class TestConfirmYes:
+    def test_save_record_runs_off_event_loop(self, monkeypatch):
+        recorded = {}
+
+        def fake_save(db, uid, result, raw, msg_id=None):
+            recorded["thread"] = threading.get_ident()
+            return "تم حفظ العملية."
+
+        monkeypatch.setattr(conversation, "save_record", fake_save)
+        monkeypatch.setattr(conversation, "SessionLocal", _fake_session)
+
+        query, edited = _build_query("confirm:yes")
+        update = SimpleNamespace(callback_query=query)
+        ctx = _context(
+            {
+                "confirm_result": {"type": "expense", "amount": "100", "currency": "ILS"},
+                "confirm_raw": "100 شيكل",
+                "confirm_message_id": 1,
+            }
+        )
+        _run_live(recorded, conversation.confirm_yes(update, ctx))
+        assert recorded["thread"] != recorded["loop"]
+        assert edited and "تم حفظ" in edited[0][0]
+
+
 class TestQueryIntent:
     def test_query_intent_runs_off_event_loop(self, monkeypatch):
         recorded = {}

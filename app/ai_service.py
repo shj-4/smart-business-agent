@@ -391,10 +391,11 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         else:
             parsed = {"intent": "record", "type": "unknown", "error": "failed_to_parse"}
 
-    # فاتورة = عملية تسجيل دائمًا؛ نضمن intent=record والنوع الافتراضي expense
+    # فاتورة = عملية تسجيل دائمًا؛ نضمن intent=record والنوع الافتراضي expense.
+    # حتى لو أعادت Gemini JSON ناقص الحقلين معًا (type + intent) يظل الطرف قابلًا
+    # للتسجيل بدل أن يُهمَله media_router كرسالة عامة.
     parsed = dict(parsed)
-    if parsed.get("type") not in ("unknown", None):
-        parsed["intent"] = "record"
+    parsed.setdefault("intent", "record")
     if parsed.get("type") is None:
         parsed["type"] = "expense"
 

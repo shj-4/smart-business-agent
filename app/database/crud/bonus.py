@@ -435,9 +435,10 @@ def advance_employee_bonus_due(db: Session, plan: EmployeeBonusPlan, now: dateti
 def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: datetime | None = None) -> Decimal:
     """صرف بونس هذا الشهر للموظّف (expense بتصنيف بونس باسمه) عبر مساحة العمل."""
     from app.database.crud import accessible_user_ids
+    from app.timeutil import now_local, to_utc_naive
 
-    now = now or datetime.utcnow()
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    local_now = now if now is not None else now_local()
+    month_start = to_utc_naive(local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
     rows = (
         db.query(Transaction)
         .filter(

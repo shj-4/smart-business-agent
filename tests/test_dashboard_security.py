@@ -409,6 +409,46 @@ def test_party_rows_computes_full_aggregates_without_cap(db_session):
     assert target[0]["expense"] == "5,200.00"
 
 
+def test_party_rows_counts_whitespace_variant_names_together(db_session):
+    """_party_rows يجب أن يوحّد اسم الطرف بتقليص المسافات: Note/Task بمسافات
+    زائدة تُحسب ضمن نفس طرف Transaction — لا تُفقد من العدّاد."""
+    db_session.add(
+        models.Transaction(
+            telegram_user_id=1,
+            type="expense",
+            amount=Decimal("50.00"),
+            currency="ILS",
+            person="محمد",
+            description="دفعة",
+            raw_message="x",
+        )
+    )
+    db_session.add(
+        models.Note(
+            telegram_user_id=1,
+            note_type="order",
+            person="محمد ",
+            description="طلبية باسم بمسافة زائدة",
+            raw_message="x",
+        )
+    )
+    db_session.add(
+        models.Task(
+            telegram_user_id=1,
+            person=" محمد",
+            description="مهمة باسم بمسافة سابقة",
+            raw_message="x",
+            status="pending",
+        )
+    )
+    db_session.commit()
+
+    rows = api._party_rows(db_session, "ILS")
+    target = [r for r in rows if r["person"] == "محمد"]
+    assert len(target) == 1
+    assert target[0]["records"] == 3
+
+
 def test_dashboard_tasks_logs_overdue_mark_failure(client, db_session, monkeypatch, caplog):
     """خطأ mark_overdue_tasks يُسجَّل في السجل ولا يُبتلع بصمت."""
     import logging

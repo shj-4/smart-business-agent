@@ -4,6 +4,12 @@
 تستخدم job_queue من python-telegram-bot (APScheduler خلفية) لإرسال
 إشعارات للمستخدمين عند وجود مهام متأخرة لم تُرسل لها تذكير بعد.
 
+تتضمن:
+- فحص المهام المتأخرة (كل 15 دقيقة)
+- ملخص صباحي مختصر (يومي)
+- تقارير دورية (يومي/أسبوعي/شهري)
+- تنبيهات الميزانيات / الحدود الائتمانية / الانحراف
+
 يُفعَّل تلقائيًا عند تشغيل البوت عبر bot.py → register_handlers.
 """
 
@@ -15,8 +21,9 @@ from telegram.ext import Application, ContextTypes
 
 from app.database.crud import mark_overdue_tasks
 from app.database.db import SessionLocal
-from app.database.models import Budget, CreditLimit, ReportPref, Task
-from app.timeutil import now_utc
+from app.database.models import Budget, CreditLimit, Invoice, ReportPref, Task
+from app.timeutil import now_local, now_utc
+from bot.icons import WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -605,3 +612,105 @@ def setup_daily_backup(app: Application) -> None:
         name="daily_backup",
     )
     logger.info("تم تسجيل النسخ الاحتياطي اليومي (%d ساعة)", BACKUP_INTERVAL_HOURS)
+
+
+# ---------- الملخص الصباحي المختصر ----------
+
+MORNING_SUMMARY_HOUR = 8  # الساعة 08:00 بالتوقيت المحلي
+
+
+def build_morning_summary(db: Session, uid: int) -> str:
+    """يبني ملخصًا صباحيًا مختصرًا (سطر واحد)."""
+    from app.timeutil import to_local_naive, to_utc_naive
+
+    today = now_local()
+    today_start_local = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = to_utc_naive(today_start_local)
+    today_end_utc = to_utc_naive(today_start_local + timedelta(days=1))
+
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.telegram_user_id == uid,
+            Task.status.in_(["pending", "overdue"]),
+            Task.deleted_at.is_(None),
+        )
+        .all()
+    )
+    overdue = [t for t in tasks if t.status == "overdue"]
+    total_pending = len(tasks)
+
+    def _in_today(dt) -> bool:
+        if not dt:
+            return False
+        return today_start_utc <= dt < today_end_utc
+
+    due_today = [t for t in tasks if _in_today(t.due_date)]
+
+    invoices = (
+        db.query(Invoice)
+        .filter(
+            Invoice.telegram_user_id == uid,
+            Invoice.status.in_(["pending", "overdue"]),
+        )
+        .all()
+    )
+    invoices_due_today = [i for i in invoices if _in_today(i.due_date)]
+
+    parts: list[str] = []
+
+    if total_pending == 0:
+        parts.append("لا توجد مهام معلّقة")
+    else:
+        task_txt = f"{total_pending} مهام"
+        if overdue:
+            task_txt += f" ({len(overdue)} {WARNING} متأخرة)"
+        parts.append(task_txt)
+
+    if due_today:
+        times = sorted(to_local_naive(t.due_date).strftime("%H:%M") for t in due_today if t.due_date)
+        parts.append(f"آخر موعد الساعة {times[0]}")
+
+    if not invoices:
+        parts.append("لا فواتير مستحقة")
+    elif invoices_due_today:
+        parts.append(f"{len(invoices_due_today)} فاتورة تستحق اليوم")
+
+    return f"☀️ اليوم: {'، '.join(parts)}."
+
+
+async def morning_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يرسل ملخصًا صباحيًا مختصرًا لكل مستخدم لديه بيانات."""
+    from app.database.crud.reports import user_ids_with_data
+
+    db = SessionLocal()
+    try:
+        for uid in user_ids_with_data(db):
+            try:
+                summary = build_morning_summary(db, uid)
+                await context.bot.send_message(chat_id=uid, text=summary)
+            except Exception:  # noqa: BLE001
+                logger.exception("فشل إرسال الملخص الصباحي للمستخدم %s", uid)
+    finally:
+        db.close()
+
+
+def setup_morning_summary(app: Application) -> None:
+    """يُسجّل مهمة يومية لإرسال ملخص صباحي."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — الملخص الصباحي لن يعمل.")
+        return
+
+    now_dt = now_local()
+    target = now_dt.replace(hour=MORNING_SUMMARY_HOUR, minute=5, second=0, microsecond=0)
+    if target <= now_dt:
+        target += timedelta(days=1)
+    delay = target - now_dt
+
+    app.job_queue.run_repeating(
+        morning_summary_job,
+        interval=timedelta(hours=24),
+        first=delay,
+        name="morning_summary",
+    )
+    logger.info("تم تسجيل الملخص الصباحي (يوميًا الساعة %d:05)", MORNING_SUMMARY_HOUR)

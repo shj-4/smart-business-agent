@@ -16,6 +16,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from app.database.crud import complete_task, find_pending_task, undo_last_record
 from app.database.db import SessionLocal
 from app.exchange import CURRENCY_NAMES, convert
+from bot.icons import EXPENSE, INCOME, NEW, SUCCESS, TASK
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +68,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• صرفت 500 دولار فاتورة كهرباء\n"
         "• كم صرفت هذا الشهر؟ / كم لي على سامر؟\n\n"
         "🧭 الأزرار الرئيسية:\n"
-        "• 💰 تسجيل عملية — مصاريف/إيراد/طلبية/ملاحظة/مهمة\n"
+        f"• {NEW} تسجيل عملية — مصاريف/إيراد/طلبية/ملاحظة/مهمة\n"
         "• 📊 التقارير — ملخصات، روسم، مقارنة فترات\n"
-        "• 📋 مهامي — قوائم المهام وإنجازها وحذفها\n"
+        f"• {TASK} مهامي — قوائم المهام وإنجازها وحذفها\n"
         "• 🧰 أدوات — آخر سجل، ميزانيات، رسم بياني، تصدير، تحويل، بحث، مساحة مشتركة\n\n"
         "⌨️ الأوامر السريعة:\n"
         "/menu — القائمة الرئيسية\n"
@@ -85,6 +86,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report_off — إيقاف التقرير الدوري\n"
         "/work — إدارة المساحة المشتركة\n"
         "/debts — من يدين لك ومن تدين له\n"
+        "/finance — بطاقة ذمم موحّدة (ديون/فواتير/ائتمان)\n"
         "/invoices — الفواتير الآجلة\n"
         "/orders — الطلبيات وحالتها\n"
         "/credit — الحدود الائتمانية للأشخاص\n"
@@ -638,6 +640,25 @@ async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(format_debts(payload))
 
 
+async def finance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /finance — بطاقة موحّدة: ديون + فواتير + حدود ائتمانية."""
+    from app.database.crud import credit_usage, list_credit_limits, list_invoices, person_debts
+    from bot.formatters import format_finance_card
+
+    telegraph_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        debts = person_debts(db, telegraph_id)
+        invoices = list_invoices(db, telegraph_id, status=None, limit=50)
+        limits = list_credit_limits(db, telegraph_id)
+        credit_payload = [
+            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
+        ]
+    finally:
+        db.close()
+    await update.message.reply_text(format_finance_card(debts, invoices, credit_payload))
+
+
 async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /invoices — قائمة الفواتير الآجلة (معلّقة/متأخرة)."""
     from app.database.crud import list_invoices
@@ -656,7 +677,7 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         db.close()
 
     title = {
-        "paid": "✅ الفواتير المسددة:",
+        "paid": f"{SUCCESS} الفواتير المسددة:",
         "overdue": "⚠️ الفواتير المتأخرة:",
         "pending": "🧾 الفواتير الآجلة:",
     }.get(status or "pending")
@@ -684,7 +705,7 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     finally:
         db.close()
 
-    title = "✅ الطلبيات المنجزة:" if status == "done" else "🛒 الطلبيات المفتوحة:"
+    title = f"{SUCCESS} الطلبيات المنجزة:" if status == "done" else "🛒 الطلبيات المفتوحة:"
     await update.message.reply_text(format_orders(orders, title=title))
 
 
@@ -712,7 +733,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا.")
                 return
             await update.message.reply_text(
-                f"✅ حُدّد سقف ائتماني لـ {row.person}: {row.limit_amount}\n"
+                f"{SUCCESS} حُدّد سقف ائتماني لـ {row.person}: {row.limit_amount}\n"
                 "سأرسل تنبيهًا عند الاقتراب من السقف أو تجاوزه."
             )
             return
@@ -804,7 +825,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "🔐 إحصائيات عامة (بدون بيانات فردية):",
         f"👥 المستخدمون الكلي: {stats['users_count']}",
         f"📊 المعاملات: {stats['transactions_count']}",
-        f"✅ مهام معلّقة: {stats['pending_tasks']}",
+        f"{TASK} مهام معلّقة: {stats['pending_tasks']}",
         f"⚠️ مهام متأخرة: {stats['overdue_tasks']}",
         f"🗒️ طلبيات/ملاحظات: {stats['notes_count']}",
         f"🎯 عدد الميزانيات: {stats['budgets_count']}",
@@ -817,8 +838,8 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         parts = ", ".join(f"{v} {c}" for c, v in totals.items())
         return f"{label}: {parts}"
 
-    lines.append(_sum_line("💸 إجمالي المصاريف", stats["total_expenses"]))
-    lines.append(_sum_line("💰 إجمالي الإيرادات", stats["total_incomes"]))
+    lines.append(_sum_line(f"{EXPENSE} إجمالي المصاريف", stats["total_expenses"]))
+    lines.append(_sum_line(f"{INCOME} إجمالي الإيرادات", stats["total_incomes"]))
 
     if stats.get("pending_feedback"):
         lines.append(
@@ -891,7 +912,7 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         db.close()
 
     if not items:
-        await update.message.reply_text("✅ لا توجد تحليلات خاطئة بانتظار المراجعة.")
+        await update.message.reply_text(f"{SUCCESS} لا توجد تحليلات خاطئة بانتظار المراجعة.")
         return
 
     lines = [f"🧾 تحليلات خاطئة بانتظار المراجعة ({len(items)}):", ""]
@@ -923,7 +944,7 @@ async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         db.close()
 
-    await update.message.reply_text("✅ عُلِّم السجل كمراجَع." if ok else "لم أجد سجلًا بهذا الرقم.")
+    await update.message.reply_text(f"{SUCCESS} عُلِّم السجل كمراجَع." if ok else "لم أجد سجلًا بهذا الرقم.")
 
 
 async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -958,7 +979,7 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if action == "جديد":
             create_workspace(db, telegram_user_id)
             await update.message.reply_text(
-                "✅ أُنشئت مساحة عملك. بياناتك الآن تُقرأ ضمن أعضاء مساحتك.\n"
+                f"{SUCCESS} أُنشئت مساحة عملك. بياناتك الآن تُقرأ ضمن أعضاء مساحتك.\n"
                 "لإضافة مشارك: /work اضافة <المعرّف الرقمي لتيليغرام>"
             )
             return
@@ -968,7 +989,7 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             ok = invite_to_workspace(db, telegram_user_id, target)
             if ok:
                 await update.message.reply_text(
-                    f"✅ أُرسلت دعوة للمعرّف {target} إلى مساحتك.\n"
+                    f"{SUCCESS} أُرسلت دعوة للمعرّف {target} إلى مساحتك.\n"
                     "لن تُدمج بياناتكما حتى يقبل الطرف الدعوة بنفسه."
                 )
             else:
@@ -982,7 +1003,7 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             invite_wid = pending_workspace_invite(db, telegram_user_id)
             ok = accept_workspace_invite(db, telegram_user_id, invite_wid) if invite_wid else False
             await update.message.reply_text(
-                "✅ قبلت الدعوة — بياناتكما أصبحت مشتركة الآن."
+                f"{SUCCESS} قبلت الدعوة — بياناتكما أصبحت مشتركة الآن."
                 if ok
                 else "لا توجد دعوة معلّقة للقبول."
             )
@@ -999,14 +1020,14 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             target = int(args[1])
             ok = remove_from_workspace(db, telegram_user_id, target)
             await update.message.reply_text(
-                f"✅ أُخرج المعرّف {target} من مساحة عملك." if ok else "لم أجد العضو أو لست المالك."
+                f"{SUCCESS} أُخرج المعرّف {target} من مساحة عملك." if ok else "لم أجد العضو أو لست المالك."
             )
             return
 
         if action == "مغادرة":
             ok = leave_workspace(db, telegram_user_id)
             await update.message.reply_text(
-                "✅ غادرت المساحة — بياناتك عادت فردية لك."
+                f"{SUCCESS} غادرت المساحة — بياناتك عادت فردية لك."
                 if ok
                 else "لا شيء للمغادرة (أو أنت المالك)."
             )
@@ -1063,7 +1084,15 @@ async def system_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 def register_handlers(app: Application) -> None:
-    """يُسجّل كل المعالجات في Application (بما فيها ConversationHandler)."""
+    """يُسجّل كل المعالجات في Application (بما فيها ConversationHandler).
+
+    يفعّل أيضًا غلاف Bidi الموحد على طرق إرسال النصوص (reply_text/
+    edit_message_text/send_message) بتمريرها عبر fix_bidi — لا يلمس اختبارات
+    الوحدة لأنها تستبدل الطرق على مستوى الـ instance بـ AsyncMock.
+    """
+    from app.rtl import install_bidi_patches
+
+    install_bidi_patches()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))
@@ -1083,6 +1112,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("feedback_ack", feedback_ack_command))
     app.add_handler(CommandHandler("work", work_command))
     app.add_handler(CommandHandler("debts", debts_command))
+    app.add_handler(CommandHandler("finance", finance_command))
     app.add_handler(CommandHandler("invoices", invoices_command))
     app.add_handler(CommandHandler("orders", orders_command))
     app.add_handler(CommandHandler("credit", credit_command))
@@ -1113,6 +1143,7 @@ def register_handlers(app: Application) -> None:
         setup_daily_backup,
         setup_deviation_check,
         setup_invoice_check,
+        setup_morning_summary,
         setup_overdue_reminder,
         setup_periodic_reports,
     )
@@ -1124,4 +1155,5 @@ def register_handlers(app: Application) -> None:
     setup_periodic_reports(app)
     setup_deviation_check(app)
     setup_daily_backup(app)
+    setup_morning_summary(app)
     setup_bonus_check(app)

@@ -441,7 +441,7 @@ def deviation_summary(
                     "current": cur_val,
                     "average": avg_val.quantize(Decimal("0.01")),
                     "pct": round(pct, 1),
-                    "significant": abs(pct) >= threshold_pct and cur_val > 0,
+                    "significant": abs(pct) >= threshold_pct,
                 }
             )
     return {

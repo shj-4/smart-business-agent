@@ -19,6 +19,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from app.database.db import SessionLocal
+from bot.icons import ERROR, EXPENSE, INCOME, SUCCESS, WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,22 @@ def _fmt_amount(amount, currency: str | None = None) -> str:
     return f"{val:,.2f}{cur}"
 
 
+def _known_currency(val: str) -> str | None:
+    """يعيد رمز العملة إن كان الوسيط عملة معروفة، وإلا None.
+
+    يعتمد على قوائم رموز/أسماء العملات (CURRENCY_ALIASES + CURRENCY_NAMES)
+    بدل المقارنات الشكلية (isalpha() و len<=5) التي كانت تخلط أسماء الأشخاص
+    العربية القصيرة (علي، خالد، سامر...) بالعملات وتخزّن عملات غير صالحة.
+    """
+    from app.database.crud import normalize_currency
+    from app.exchange import CURRENCY_NAMES
+
+    norm = normalize_currency(val.strip()).upper()
+    if norm in CURRENCY_NAMES:
+        return norm
+    return None
+
+
 def _parse_optional_args(args: list[str], defaults: dict | None = None) -> dict:
     """يحلّل وسيطات اختيارية (عملة/شخص/وصف/أرقام) بشكل ذكي."""
     defaults = defaults or {}
@@ -95,8 +112,9 @@ def _parse_optional_args(args: list[str], defaults: dict | None = None) -> dict:
         val = token.strip()
         if not val:
             continue
-        if val.isalpha() and len(val) <= 5 and currency is None:
-            currency = val.upper()
+        cur = _known_currency(val)
+        if cur and currency is None:
+            currency = cur
         elif person is None:
             person = val
         else:
@@ -122,8 +140,8 @@ def format_bonus_overview(data: dict) -> str:
     total_exp = sum(report["expense"].values()) if report["expense"] else Decimal("0")
     total_inc = sum(report["income"].values()) if report["income"] else Decimal("0")
     if total_exp or total_inc:
-        lines.append(f"💸 منح: {_fmt_amount(total_exp)}")
-        lines.append(f"💰 استلام: {_fmt_amount(total_inc)}")
+        lines.append(f"{EXPENSE} منح: {_fmt_amount(total_exp)}")
+        lines.append(f"{INCOME} استلام: {_fmt_amount(total_inc)}")
         lines.append(f"🔢 عدد العمليات: {report['count_expense'] + report['count_income']}")
     else:
         lines.append("لا توجد معاملات بونس هذا الشهر بعد.")
@@ -138,7 +156,7 @@ def format_bonus_overview(data: dict) -> str:
             if p["next_due_at"]:
                 lines.append(f"     ⏰ الموعد: {p['next_due_at'].strftime('%Y-%m-%d')}")
             if p["monthly_cap"]:
-                cap_status = {"over": "⚠️ تجاوز", "near": "⚠️ قريب", "ok": "✓"}.get(p["cap_status"], "—")
+                cap_status = {"over": f"{WARNING} تجاوز", "near": f"{WARNING} قريب", "ok": SUCCESS}.get(p["cap_status"], "—")
                 lines.append(f"     📊 الشهر: {_fmt_amount(p['spent_this_month'])} / {_fmt_amount(p['monthly_cap'])} {cap_status}")
     else:
         lines.append("\n👥 لا توجد خطط مكافآت بعد.")
@@ -163,12 +181,12 @@ def format_bonus_report(report: dict, person: str | None = None) -> str:
         title += f" — {person}"
     lines = [title + "\n"]
     if report["expense"]:
-        lines.append("💸 مصروفات بونس:")
+        lines.append(f"{EXPENSE} مصروفات بونس:")
         for cur, total in report["expense"].items():
             lines.append(f"   {cur}: {_fmt_amount(total, cur)}")
         lines.append(f"   الإجمالي: {_fmt_amount(sum(report['expense'].values()))}")
     if report["income"]:
-        lines.append("\n💰 إيرادات بونس:")
+        lines.append(f"\n{INCOME} إيرادات بونس:")
         for cur, total in report["income"].items():
             lines.append(f"   {cur}: {_fmt_amount(total, cur)}")
         lines.append(f"   الإجمالي: {_fmt_amount(sum(report['income'].values()))}")
@@ -177,7 +195,7 @@ def format_bonus_report(report: dict, person: str | None = None) -> str:
     if report["rows"]:
         lines.append(f"\n📝 آخر {min(len(report['rows']), 10)} معاملات:")
         for tx in report["rows"][:10]:
-            sign = "💸" if tx.type == "expense" else "💰"
+            sign = EXPENSE if tx.type == "expense" else INCOME
             person_txt = f" — {tx.person}" if tx.person else ""
             desc = tx.description or ""
             lines.append(f"  {sign} {_fmt_amount(tx.amount, tx.currency)}{person_txt}{' — ' + desc[:40] if desc else ''}")
@@ -197,7 +215,7 @@ def format_events_list(events: list) -> str:
             if ev.end_at:
                 dates += f" إلى {ev.end_at.strftime('%Y-%m-%d')}"
         lines.append(f"#{ev.id} {ev.name} [{status}]")
-        lines.append(f"   💰 الميزانية: {budget}{dates}")
+        lines.append(f"   {EXPENSE} الميزانية: {budget}{dates}")
         if ev.note:
             lines.append(f"   📝 {ev.note[:60]}")
     return "\n".join(lines)
@@ -213,7 +231,7 @@ def format_plans_list(plans_data: list) -> str:
         if p["next_due_at"]:
             lines.append(f"   ⏰ الموعد: {p['next_due_at'].strftime('%Y-%m-%d')}")
         if p["monthly_cap"]:
-            cap_status = {"over": "⚠️ تجاوز", "near": "⚠️ قريب", "ok": "✓"}.get(p["cap_status"], "")
+            cap_status = {"over": f"{WARNING} تجاوز", "near": f"{WARNING} قريب", "ok": ""}.get(p["cap_status"], "")
             lines.append(f"   📊 الشهر: {_fmt_amount(p['spent_this_month'])} / {_fmt_amount(p['monthly_cap'])} {cap_status}")
     return "\n".join(lines)
 
@@ -316,8 +334,8 @@ async def _cmd_add(update: Update, uid: int, args: list[str]) -> None:
     )))
     if tx:
         await update.message.reply_text(
-            f"✅ تم تسجيل البونس:\n"
-            f"   {'💸 مصروف' if direction == 'expense' else '💰 إيراد'}: {_fmt_amount(tx.amount, tx.currency)}"
+            f"{SUCCESS} تم تسجيل البونس:\n"
+            f"   {f'{EXPENSE} مصروف' if direction == 'expense' else f'{INCOME} إيراد'}: {_fmt_amount(tx.amount, tx.currency)}"
             f"{f' — {tx.person}' if tx.person else ''}"
         )
     else:
@@ -349,7 +367,7 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
         from app.database.crud import end_bonus_event
         ev = await asyncio.to_thread(lambda: _db_call(lambda db: end_bonus_event(db, uid, event_id)))
         if ev:
-            await update.message.reply_text(f"✅ تم إنهاء الفعالية: {ev.name}")
+            await update.message.reply_text(f"{SUCCESS} تم إنهاء الفعالية: {ev.name}")
         else:
             await update.message.reply_text("لم أجد هذه الفعالية.")
         return
@@ -371,16 +389,17 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
                     continue
                 except InvalidOperation:
                     pass
-            if val.isalpha() and len(val) <= 5:
-                currency = val.upper()
+            cur = _known_currency(val)
+            if cur:
+                currency = cur
 
         from app.database.crud import create_bonus_event
         ev = await asyncio.to_thread(lambda: _db_call(lambda db: create_bonus_event(db, uid, name, budget=budget, currency=currency)))
         if ev:
             budget_txt = _fmt_amount(ev.budget, ev.currency) if ev.budget else "—"
             await update.message.reply_text(
-                f"✅ أُنشئت الفعالية: {ev.name}\n"
-                f"   💰 الميزانية: {budget_txt}\n"
+                f"{SUCCESS} أُنشئت الفعالية: {ev.name}\n"
+                f"   {EXPENSE} الميزانية: {budget_txt}\n"
                 f"   📅 الحالة: {EVENT_STATUS_LABELS.get(ev.status, ev.status)}"
             )
         else:
@@ -415,7 +434,7 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
         from app.database.crud import disable_employee_bonus_plan
         plan = await asyncio.to_thread(lambda: _db_call(lambda db: disable_employee_bonus_plan(db, uid, plan_id)))
         if plan:
-            await update.message.reply_text(f"✅ تعطّلت خطة مكافأة {plan.person}.")
+            await update.message.reply_text(f"{SUCCESS} تعطّلت خطة مكافأة {plan.person}.")
         else:
             await update.message.reply_text("لم أجد هذه الخطة.")
         return
@@ -447,9 +466,9 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
             freq_label = PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)
             cap_txt = _fmt_amount(plan.monthly_cap, plan.currency) if plan.monthly_cap else "—"
             await update.message.reply_text(
-                f"✅ أُنشئت خطة مكافأة:\n"
+                f"{SUCCESS} أُنشئت خطة مكافأة:\n"
                 f"   👤 الشخص: {plan.person}\n"
-                f"   💰 المبلغ: {_fmt_amount(plan.amount, plan.currency)}\n"
+                f"   {EXPENSE} المبلغ: {_fmt_amount(plan.amount, plan.currency)}\n"
                 f"   🔄 الدورية: {freq_label}\n"
                 f"   📊 السقف الشهري: {cap_txt}"
             )
@@ -480,7 +499,7 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
         from app.database.crud import loyalty_config_enable
         cfg = await asyncio.to_thread(lambda: _db_call(lambda db: loyalty_config_enable(db, uid, points_rate, points_value, min_redeem)))
         await update.message.reply_text(
-            f"✅ فُعّلت نقاط الولاء:\n"
+            f"{SUCCESS} فُعّلت نقاط الولاء:\n"
             f"   المعدّل: {float(cfg.points_rate):g} نقطة/وحدة\n"
             f"   قيمة النقطة: {_fmt_amount(cfg.points_value)}\n"
             f"   الحد الأدنى للاستبدال: {cfg.min_redeem_points} نقطة"
@@ -490,7 +509,7 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
     if sub in ("disable", "تعطيل", "إيقاف"):
         from app.database.crud import disable_loyalty
         ok = await asyncio.to_thread(lambda: _db_call(lambda db: disable_loyalty(db, uid)))
-        await update.message.reply_text("✅ تعطّلت نقاط الولاء." if ok else "نقاط الولاء غير مفعّلة أصلاً.")
+        await update.message.reply_text(f"{SUCCESS} تعطّلت نقاط الولاء." if ok else "نقاط الولاء غير مفعّلة أصلاً.")
         return
 
     if sub in ("add", "منح", "إضافة"):
@@ -505,7 +524,7 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
             return
         from app.database.crud import loyalty_add_points
         account = await asyncio.to_thread(lambda: _db_call(lambda db: loyalty_add_points(db, uid, person, points)))
-        await update.message.reply_text(f"✅ أُضيف {points} نقطة لـ {account.person}.\n   الرصيد: {account.points_balance} نقطة")
+        await update.message.reply_text(f"{SUCCESS} أُضيف {points} نقطة لـ {account.person}.\n   الرصيد: {account.points_balance} نقطة")
         return
 
     if sub in ("redeem", "استبدال", "خصم"):
@@ -522,12 +541,12 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
         result = await asyncio.to_thread(lambda: _db_call(lambda db: loyalty_redeem_points(db, uid, person, points)))
         if result["ok"]:
             await update.message.reply_text(
-                f"✅ تم استبدال {result['points']} نقطة من {result['person']}.\n"
-                f"   💰 قيمة الخصم: {_fmt_amount(result['value'])}\n"
+                f"{SUCCESS} تم استبدال {result['points']} نقطة من {result['person']}.\n"
+                f"   {INCOME} قيمة الخصم: {_fmt_amount(result['value'])}\n"
                 f"   🪙 الرصيد المتبقي: {result['balance']} نقطة"
             )
         else:
-            await update.message.reply_text(f"❌ {result.get('error', 'حدث خطأ.')}")
+            await update.message.reply_text(f"{ERROR} {result.get('error', 'حدث خطأ.')}")
         return
 
     if sub in ("list", "قائمة", "حسابات", "عرض"):
@@ -637,7 +656,7 @@ async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 chat_id=uid,
                                 text=(
                                     f"🎁 تم منح مكافأة لـ {plan.person}!\n"
-                                    f"   💰 المبلغ: {float(plan.amount):,.2f} {plan.currency or ''}\n"
+                                    f"   {EXPENSE} المبلغ: {float(plan.amount):,.2f} {plan.currency or ''}\n"
                                     f"   📝 مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})"
                                 ),
                             )

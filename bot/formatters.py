@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from app.database.models import Invoice, Note
 from app.formatting import fmt_amount as _fmt_amount
 from app.formatting import totals_line as _totals_line
+from bot.icons import ERROR, EXPENSE, HOME, INCOME, SUCCESS, TASK, WARNING
 
 TYPE_NAMES = {
     "expense": "مصروف",
@@ -265,7 +266,7 @@ def _format_comparison(query_result: dict) -> str:
     if not cur_exp and not prev_exp:
         lines.append("لا توجد بيانات مصاريف في الفترتين.")
     else:
-        lines.append(f"💸 {cur_label}: {_totals_line(cur_exp) or 'لا توجد'}")
+        lines.append(f"{EXPENSE} {cur_label}: {_totals_line(cur_exp) or 'لا توجد'}")
         lines.append(f"📅 {prev_label}: {_totals_line(prev_exp) or 'لا توجد'}")
         delta = _compare_delta(cur_exp, prev_exp)
         if delta:
@@ -273,7 +274,7 @@ def _format_comparison(query_result: dict) -> str:
 
     if cur_inc or prev_inc:
         lines.append("")
-        lines.append(f"💰 الإيرادات — {cur_label}: {_totals_line(cur_inc) or 'لا توجد'}")
+        lines.append(f"{INCOME} الإيرادات — {cur_label}: {_totals_line(cur_inc) or 'لا توجد'}")
         lines.append(f"{prev_label}: {_totals_line(prev_inc) or 'لا توجد'}")
 
     if query_result.get("partial"):
@@ -352,12 +353,15 @@ def _build_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("✅ تأكيد", callback_data="confirm:yes"),
+                InlineKeyboardButton(f"{SUCCESS} تأكيد", callback_data="confirm:yes"),
                 InlineKeyboardButton("✏️ تعديل", callback_data="confirm:edit"),
             ],
             [
+                InlineKeyboardButton("🔁 تكرار العملية", callback_data="confirm:repeat"),
+                InlineKeyboardButton(f"{HOME} القائمة الرئيسية", callback_data="menu:main"),
+            ],
+            [
                 InlineKeyboardButton("❌ إلغاء", callback_data="confirm:no"),
-                InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu:main"),
             ],
         ]
     )
@@ -378,7 +382,7 @@ def format_debts(payload: list[dict]) -> str:
         net = d.get("balance_unified")
         if net is not None:
             if net > 0:
-                net_txt = f"✅ {_fmt_amount(net)} {base} لك (يدين لك)"
+                net_txt = f"{SUCCESS} {_fmt_amount(net)} {base} لك (يدين لك)"
             elif net < 0:
                 net_txt = f"⚠️ عليك له {_fmt_amount(abs(net))} {base}"
             else:
@@ -421,8 +425,8 @@ def format_invoices(invoices: list[Invoice], title: str = "🧾 الفواتير
         desc = (inv.description or "")[:40]
         status_txt = {
             "pending": "⏳",
-            "overdue": "⚠️",
-            "paid": "✅",
+            "overdue": WARNING,
+            "paid": SUCCESS,
         }.get(inv.status, inv.status)
         line = f"{status_txt} #{inv.id} {person}: {_fmt_amount(inv.amount)} {inv.currency or ''}"
         if due_txt:
@@ -446,7 +450,7 @@ def format_orders(orders: list[Note], title: str = "🛒 طلبياتك:") -> st
         person = o.person or ""
         desc = (o.description or "(بدون وصف)")[:60]
         status = o.status or "open"
-        flag = "⏳ مفتوحة" if status == "open" else "✅ منجزة"
+        flag = "⏳ مفتوحة" if status == "open" else f"{SUCCESS} منجزة"
         person_txt = f" — {person}" if person else ""
         lines.append(f"{o.id}. {desc}{person_txt} ({flag})")
     return "\n".join(lines)
@@ -484,6 +488,83 @@ def format_credit_limits(payload: list[dict]) -> str:
             f"• {name}: {value_txt} / {_fmt_amount(u['limit'])} "
             f"({u['percent']}%) — {status}"
         )
+    return "\n".join(lines)
+
+
+# ---------- البطاقة المالية الموحّدة (الذمم/فواتير/حدود ائتمانية) ----------
+
+
+def format_finance_card(
+    debts: list[dict],
+    invoices: list[Invoice],
+    credit_limits: list[dict],
+) -> str:
+    """بطاقة واحدة تجمع: من يدين لي/أنا مدين لمن + الفواتير + الحدود الائتمانية."""
+    lines = ["💳 بطاقة الذمم المالية:\n"]
+
+    # ١) الأرصدة مع الأشخاص (ديون)
+    owes_me = [d for d in debts if (d.get("balance_unified") or 0) > 0]
+    i_owe = [d for d in debts if (d.get("balance_unified") or 0) < 0]
+    if debts:
+        lines.append(f"من يدين لي ({len(owes_me)}):")
+        if owes_me:
+            for d in owes_me[:5]:
+                base = d.get("base") or ""
+                lines.append(f"  {SUCCESS} {d['person']} — {_fmt_amount(d['balance_unified'])} {base}")
+        else:
+            lines.append("  لا أحد")
+        lines.append(f"أنا مدين لـ ({len(i_owe)}):")
+        if i_owe:
+            for d in i_owe[:5]:
+                base = d.get("base") or ""
+                lines.append(f"  {EXPENSE} {d['person']} — {_fmt_amount(abs(d['balance_unified']))} {base}")
+        else:
+            lines.append("  لا أحد")
+    else:
+        lines.append("لا توجد أرصدة مع أشخاص بعد.")
+
+    # ٢) الفواتير الآجلة
+    active = [i for i in invoices if i.status in ("pending", "overdue")]
+    overdue_inv = [i for i in invoices if i.status == "overdue"]
+    lines.append("")
+    if active:
+        total_due = sum(i.amount for i in active)
+        lines.append(
+            f"الفواتير الآجلة: {len(active)} (منها {len(overdue_inv)} {WARNING} متأخرة) — "
+            f"الإجمالي {_fmt_amount(total_due)}"
+        )
+        for inv in active[:5]:
+            due_txt = ""
+            if inv.due_date:
+                from app.timeutil import to_local_naive
+
+                due_txt = to_local_naive(inv.due_date).strftime("%Y-%m-%d")
+            status_txt = WARNING if inv.status == "overdue" else "⏳"
+            lines.append(
+                f"  {status_txt} #{inv.id} {inv.person or 'بدون شخص'}: {_fmt_amount(inv.amount)} "
+                f"{inv.currency or ''}{' — يستحق ' + due_txt if due_txt else ''}"
+            )
+    else:
+        lines.append(f"لا فواتير مستحقة {SUCCESS}")
+
+    # ٣) الحدود الائتمانية
+    lines.append("")
+    if credit_limits:
+        over = [d for d in credit_limits if d["usage"]["over"]]
+        if over:
+            names = ", ".join(d["person"] for d in over[:3])
+            lines.append(f"{WARNING} تجاوز حدّ: {names}")
+        else:
+            near = [d for d in credit_limits if d["usage"]["percent"] >= 80]
+            if near:
+                names = ", ".join(d["person"] for d in near[:3])
+                lines.append(f"⚠️ قريب من السقف: {names}")
+            else:
+                lines.append(f"الحدود الائتمانية ضمن الحدود {SUCCESS}")
+    else:
+        lines.append("لا حدود ائتمانية مُعدّة (/credit إضافة <الشخص> <المبلغ>).")
+
+    lines.append("\nللتفصيل: /debts و /invoices و /credit")
     return "\n".join(lines)
 
 
@@ -534,7 +615,7 @@ def format_user_stats(stats: dict) -> str:
     lines += [
         f"🛒 الطلبيات: مفتوحة {stats['orders']['open']} · منجزة {stats['orders']['done']}",
         f"🧾 الفواتير: معلّقة {stats['invoices']['pending']} · مسددة {stats['invoices']['paid']} · متأخرة {stats['invoices']['overdue']}",
-        f"📋 المهام: معلّقة {stats['tasks']['pending']} · منجزة {stats['tasks']['done']}",
+        f"{TASK} المهام: معلّقة {stats['tasks']['pending']} · منجزة {stats['tasks']['done']}",
         f"🎯 الميزانيات: {stats['budgets']} · الحدود الائتمانية: {stats['credit_limits']}",
         f"⏰ ذروة نشاطك: {peak_line}",
         f"🗄️ حجم قاعدة البيانات: {_size_label(stats.get('db_size_bytes'))}",
@@ -551,7 +632,7 @@ def format_health_report(checks: list[dict]) -> str:
         return "لا توجد فحوصات."
     lines = ["🩺 الفحص الصحي للنظام:\n"]
     for c in checks:
-        mark = "✅" if c.get("ok") else ("⚠️" if c.get("warn") else "❌")
+        mark = SUCCESS if c.get("ok") else (WARNING if c.get("warn") else ERROR)
         detail = c.get("detail") or ""
         line = f"{mark} {c.get('label', '')}"
         if detail:

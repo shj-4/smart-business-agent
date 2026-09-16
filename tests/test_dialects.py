@@ -39,6 +39,19 @@ class TestDetectDialect:
     def test_ambiguous_words_do_not_force_false_positive(self):
         assert detect_dialect("مش عارف، بس ممكن بعدين") == MSA
 
+    def test_single_word_on_short_text_does_not_declare_dialect(self):
+        # رسالة قصيرة جدًا (<3 كلمات): كلمة واحدة عامة/مميزة لا تكفي لإعلان
+        # لهجة كاملة — النتيجة على نصوص عامة قصيرة غير موثوقة.
+        assert detect_dialect("شو") == MSA
+        assert detect_dialect("ابغى") == MSA
+        assert detect_dialect("كيفك") == MSA
+        assert detect_dialect("بزاف") == MSA
+
+    def test_short_text_with_two_strong_matches_declares(self):
+        # رسالة قصيرة لكنها لهجية بوضوح (أكثر من تطابق) تبقى تُصنَّف.
+        assert detect_dialect("وين شلونك") == GULF
+        assert detect_dialect("شو بدك") == MSA  # تطابق واحد فقط → لا تُعلن
+
 
 class TestDialectHelpers:
     def test_instruction_not_empty_and_scoped(self):

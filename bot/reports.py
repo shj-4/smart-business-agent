@@ -18,6 +18,7 @@ from app.database.models import Task, Transaction
 from app.formatting import fmt_amount as _fmt_amount
 from app.formatting import totals_line as _totals_line
 from app.timeutil import now_local, to_local_naive
+from bot.icons import EXPENSE, INCOME, TASK, WARNING
 
 # الدورية ↔ الفترة المستخدمة للمقارنة (لدى التقارير الأسبوعي/الشهري نعرض الفترة السابقة)
 FREQUENCY_PERIOD = {
@@ -174,23 +175,23 @@ def build_periodic_summary(
 
     lines = [f"📊 تقريرك {FREQUENCY_NAMES[frequency]} — {today_str}\n"]
 
-    lines.append(f"💸 المصاريف ({display_label}): {_totals_line(expenses) or 'لا توجد'}")
+    lines.append(f"{EXPENSE} المصاريف ({display_label}): {_totals_line(expenses) or 'لا توجد'}")
     if expenses:
         unified = _unified_line(expenses, stored=stored_expenses)
         if unified:
             lines.append(unified)
 
     lines.append("")
-    lines.append(f"💰 الإيرادات ({display_label}): {_totals_line(incomes) or 'لا توجد'}")
+    lines.append(f"{INCOME} الإيرادات ({display_label}): {_totals_line(incomes) or 'لا توجد'}")
     if incomes:
         unified = _unified_line(incomes, stored=stored_incomes)
         if unified:
             lines.append(unified)
 
     lines.append("")
-    lines.append(f"📋 مهامك: {pending_count} قيد الانتظار")
+    lines.append(f"{TASK} مهامك: {pending_count} قيد الانتظار")
     if overdue_count:
-        lines.append(f"⚠️ {overdue_count} متأخرة:")
+        lines.append(f"{WARNING} {overdue_count} متأخرة:")
         for t in overdue_top:
             due_txt = f" (موعد: {t['due_date']})" if t["due_date"] else ""
             lines.append(f"• {t['description']}{due_txt}")

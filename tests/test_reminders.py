@@ -21,14 +21,17 @@ from app.database.crud import create_invoice, create_task
 from app.timeutil import now_utc
 from bot.reminders import (
     budget_check,
+    build_morning_summary,
     credit_check,
     daily_backup_job,
     deviation_check,
     invoice_check,
+    morning_summary_job,
     overdue_check,
     periodic_report_job,
     setup_credit_check,
     setup_invoice_check,
+    setup_morning_summary,
     setup_overdue_reminder,
 )
 
@@ -344,6 +347,7 @@ class TestJobCallbacksAreCoroutines:
             periodic_report_job,
             deviation_check,
             daily_backup_job,
+            morning_summary_job,
         ]
         for cb in callbacks:
             assert inspect.iscoroutinefunction(cb), f"{cb.__name__} ليست async"
@@ -353,3 +357,78 @@ class TestJobCallbacksAreCoroutines:
         context = _make_context()
         _run(overdue_check(context))
         context.bot.send_message.assert_not_called()
+
+
+class TestMorningSummary:
+    def test_empty_state_one_liner(self, db_env):
+        db = db_env()
+        text = build_morning_summary(db, USER_A)
+        db.close()
+        assert "لا توجد مهام معلّقة" in text
+        assert "لا فواتير مستحقة" in text
+        assert text.startswith("☀️")
+
+    def test_counts_tasks_and_overdue(self, db_env):
+        db = db_env()
+        past = (now_utc() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
+        t1 = create_task(db, USER_A, {"description": "متأخرة", "date": past}, raw_message="م")
+        t1.status = "overdue"
+        t2 = create_task(db, USER_A, {"description": "غدًا", "date": "2099-12-31 10:00"}, raw_message="م2")
+        assert t2 is not None
+        db.commit()
+        db.close()
+
+        db = db_env()
+        text = build_morning_summary(db, USER_A)
+        db.close()
+        assert "2 مهام" in text
+        assert "متأخرة" in text
+
+    def test_mentions_latest_due_time(self, db_env):
+        from app.timeutil import to_local_naive
+
+        db = db_env()
+        today_local = to_local_naive(now_utc())
+        base_day = today_local.strftime("%Y-%m-%d")
+        create_task(db, USER_A, {"description": "مهمة صباح", "date": f"{base_day} 10:00"}, raw_message="م")
+        create_task(db, USER_A, {"description": "مهمة مساء", "date": f"{base_day} 18:00"}, raw_message="م2")
+        db.close()
+
+        db = db_env()
+        text = build_morning_summary(db, USER_A)
+        db.close()
+        assert "آخر موعد الساعة" in text
+
+    def test_does_not_report_other_user_tasks(self, db_env):
+        db = db_env()
+        create_task(db, USER_B, {"description": "مهمة الآخر", "date": "2099-12-31 10:00"}, raw_message="م")
+        db.close()
+
+        db = db_env()
+        text = build_morning_summary(db, USER_A)
+        db.close()
+        assert "لا توجد مهام معلّقة" in text
+
+    def test_job_sends_one_message_per_user_with_data(self, db_env):
+        db = db_env()
+        create_task(db, USER_A, {"description": "مهمة", "date": "2099-12-31 10:00"}, raw_message="م")
+        db.close()
+
+        context = _make_context()
+        _run(morning_summary_job(context))
+        # فقط USER_A لديه بيانات → رسالة واحدة، لا رسائل لـ USER_B
+        assert context.bot.send_message.call_count == 1
+        sent = context.bot.send_message.call_args.kwargs
+        assert sent["chat_id"] == USER_A
+        assert "مهام" in sent["text"]
+
+    def test_setup_registers_daily_job(self):
+        app = MagicMock()
+        app.job_queue = MagicMock()
+        setup_morning_summary(app)
+        assert app.job_queue.run_repeating.called
+
+    def test_setup_skips_without_queue(self):
+        app = MagicMock()
+        app.job_queue = None
+        setup_morning_summary(app)  # لا استثناء

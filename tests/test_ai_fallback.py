@@ -104,6 +104,28 @@ class TestAnalyzeReceiptImage:
         assert result["type"] == "unknown"
 
     @patch("app.ai_service.client.models.generate_content")
+    def test_missing_type_and_intent_defaults_to_record_expense(self, mock_gen):
+        """JSON ناقص الحقلين (type و intent) معًا → يُضبط تلقائيًا على
+        record/expense ولا يُهمَله media_router رغم أن الفاتورة محللة فعلًا."""
+        mock_gen.return_value = _resp(
+            json.dumps({"amount": "150.50", "currency": "شيكل", "person": "بقالة"})
+        )
+        result = analyze_receipt_image(b"\xff\xd8\xff\xe0fakejpeg")
+        assert result["intent"] == "record"
+        assert result["type"] == "expense"
+        assert result["amount"] == 150.5
+        assert result["person"] == "بقالة"
+
+    @patch("app.ai_service.client.models.generate_content")
+    def test_missing_intent_with_known_type_sets_record(self, mock_gen):
+        mock_gen.return_value = _resp(
+            json.dumps({"type": "income", "amount": "90", "currency": "شيكل"})
+        )
+        result = analyze_receipt_image(b"\xff\xd8\xff\xe0fakejpeg")
+        assert result["intent"] == "record"
+        assert result["type"] == "income"
+
+    @patch("app.ai_service.client.models.generate_content")
     def test_gemini_unavailable_returns_safe_fallback(self, mock_gen):
         mock_gen.side_effect = ConnectionError("network down")
         result = analyze_receipt_image(b"\x00\xff")

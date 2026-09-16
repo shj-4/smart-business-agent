@@ -99,7 +99,7 @@ class TestHealthChecks:
     def test_format_health_report_renders_marks(self, db_env):
         text = format_health_report(run_health_checks(db_env))
         assert "🩺" in text
-        assert "✅" in text
+        assert "✔️" in text
 
 
 class TestEncryptionCheck:
