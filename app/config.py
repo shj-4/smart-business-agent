@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # --- الأداء ---
     cache_ttl_seconds: int = Field(
         default=60,
+        gt=0,
         description="فترة بقاء ذاكرة التخزين المؤقت للاستعلامات المتكررة (بالثواني)",
     )
     ai_queue_enabled: bool = Field(
@@ -63,10 +64,12 @@ class Settings(BaseSettings):
     )
     ai_queue_maxsize: int = Field(
         default=64,
+        gt=0,
         description="الحد الأقصى لمهام AI المنتظرة في الطابور (فوق ذلك: ضغط رجعي)",
     )
     ai_queue_concurrency: int = Field(
         default=2,
+        gt=0,
         description="عدد العمال الذين يعالجون مهام AI بالتوازي",
     )
 
@@ -82,6 +85,7 @@ class Settings(BaseSettings):
     )
     max_voice_file_mb: int = Field(
         default=20,
+        gt=0,
         description="الحد الأقصى بحجم ملفات الصوت/الصوتيات المقبولة (ميجابايت) قبل التحويل",
     )
     sentry_dsn: str = Field(

@@ -851,14 +851,19 @@ async def _alert_admin_of_probe(update: Update, attacker_id: int, count: int) ->
 async def _require_admin(update: Update, label: str) -> bool:
     """بوابة موحّدة لأوامر الأدمن: يرفض غير المصرّح له مع تتبّع المحاولات
     الفاشلة وإنذار عند بلوغ عتبة استكشاف الصلاحيات."""
-    from bot.ratelimit import ADMIN_ATTEMPTS_MAX, ADMIN_ATTEMPTS_WINDOW, register_admin_denied
+    from bot.ratelimit import (
+        ADMIN_ATTEMPTS_MAX,
+        ADMIN_ATTEMPTS_WINDOW,
+        is_admin_probing,
+        register_admin_denied,
+    )
 
     user_id = update.effective_user.id
     if _is_admin(user_id):
         return True
     denied = register_admin_denied(user_id)
     logger.warning("محاولة وصول غير مصرّح لأمر الأدمن (%s) من user=%s", label, user_id)
-    if denied >= ADMIN_ATTEMPTS_MAX:
+    if is_admin_probing(user_id):
         logger.critical(
             "استكشاف صلاحيات مفترض: %d محاولات فاشلة لأوامر الأدمن من user=%s خلال %ds",
             denied,

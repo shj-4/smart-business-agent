@@ -122,8 +122,10 @@ def _cleanup_loop() -> None:
     """دورة واحدة من التنظيف، ثم تُجدول نفسها مجددًا عبر Timer (daemon)."""
     global _cleanup_timer, _last_prune
     with _RATE_LOCK:
-        _prune_rate_buckets(time.monotonic())
-        _last_prune = time.monotonic()
+        now = time.monotonic()
+        _prune_rate_buckets(now)
+        _prune_admin_denied(now)
+        _last_prune = now
     _cleanup_timer = _new_cleanup_timer()
     _cleanup_timer.start()
 

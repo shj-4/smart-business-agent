@@ -5,9 +5,16 @@
 الوحدة تحتفظ بكاش في الذاكرة لتفادي استعلام قاعدة لكل زر، مع ذاكرة افتراضية
 "ar" لمن لم يضبط لغة بعد.
 
+ذاكرة اللغة كاش محدود الحجم (LRU): كل مستخدم يخزن سلسلة صغيرة ("ar"/"en")،
+ولكن بدون إخلاء كان القاموس ينمو بلا حدود مع كل مستخدم جديد في عملية طويلة
+التشغيل — سقف الحجم أدناه يطرد الأقدم تلقائيًا (بخلاف app/cache.py الذي
+يملك TTL ومنظفًا؛ هنا قيمة تافهة الحجم تكفيها حدود الحجم فقط).
+
 ملاحظة صادقة: الترجمة تغطي القوائم الرئيسية/الأدوات حاليًا، والردود النصية
 الداخلية ما زالت عربية — البنية جاهزة لنقل السلسلة كاملة تباعًا.
 """
+
+from collections import OrderedDict
 
 _STRINGS: dict[str, dict[str, str]] = {
     "main_title": {
@@ -46,31 +53,51 @@ _STRINGS: dict[str, dict[str, str]] = {
     "lang_done_en": {"ar": "الواجهة أصبحت بالإنجليزية 🇬🇧", "en": "Interface set to English 🇬🇧"},
 }
 
-_LANG_CACHE: dict[int, str] = {}
+_LANG_CACHE_MAX = 5000  # سقف عدد المستخدمين المخزَّنين — فوقه يُطرد الأقدم
+_LANG_CACHE: "OrderedDict[int, str]" = OrderedDict()
+
+
+def _cache_put(user_id: int, lang: str) -> None:
+    """يخزن قيمة ويحدّثها كأحدث استخدام، ويطرد الأقدم عند تجاوز السقف."""
+    _LANG_CACHE[user_id] = lang
+    _LANG_CACHE.move_to_end(user_id)
+    while len(_LANG_CACHE) > _LANG_CACHE_MAX:
+        _LANG_CACHE.popitem(last=False)
+
+
+def _cache_get(user_id: int) -> str | None:
+    """يقرأ القيمة ويكرّمها كأحدث استخدام، أو None إن غاب المفتاح."""
+    if user_id in _LANG_CACHE:
+        _LANG_CACHE.move_to_end(user_id)
+        return _LANG_CACHE[user_id]
+    return None
 
 
 def remember_lang(telegram_user_id: int, lang: str) -> None:
     """يحدّث كاش اللغة في الذاكرة بعد أي تبديل."""
-    _LANG_CACHE[telegram_user_id] = "en" if lang == "en" else "ar"
+    _cache_put(telegram_user_id, "en" if lang == "en" else "ar")
 
 
 def user_lang(telegram_user_id: int) -> str:
     """لغة الواجهة من الكاش (ar افتراضي). يُحمَّل من قاعدة البيانات عند أول طلب."""
     if telegram_user_id is None:
         return "ar"
-    if telegram_user_id not in _LANG_CACHE:
-        try:
-            from app.database.crud import get_user_lang
-            from app.database.db import SessionLocal
+    cached = _cache_get(telegram_user_id)
+    if cached is not None:
+        return cached
+    try:
+        from app.database.crud import get_user_lang
+        from app.database.db import SessionLocal
 
-            db = SessionLocal()
-            try:
-                _LANG_CACHE[telegram_user_id] = get_user_lang(db, telegram_user_id)
-            finally:
-                db.close()
-        except Exception:  # noqa: BLE001 — غياب الجدول/أخطاء مؤقتة لا تُسقط القوائم
-            _LANG_CACHE[telegram_user_id] = "ar"
-    return _LANG_CACHE.get(telegram_user_id, "ar")
+        db = SessionLocal()
+        try:
+            lang = get_user_lang(db, telegram_user_id)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — غياب الجدول/أخطاء مؤقتة لا تُسقط القوائم
+        lang = "ar"
+    _cache_put(telegram_user_id, lang)
+    return lang
 
 
 def t(key: str, lang: str = "ar") -> str:

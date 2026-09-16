@@ -55,6 +55,36 @@ class TestAdminDenyTracker:
         ratelimit.register_admin_denied(1111)
         assert ratelimit.admin_denied_count(2222) == 0
 
+    def test_cleanup_loop_prunes_admin_denied(self, monkeypatch):
+        """حلقة التنظيف الدورية يجب أن تُخلّي سجلات محاولات الأدمن المتقادمة
+        (كانت تخلّي معدّلات الرسائل فقط، وتترك _admin_denied ينمو بلا حدود)."""
+        clock = _Clock()
+        monkeypatch.setattr(ratelimit.time, "monotonic", clock.monotonic)
+
+        real_prune = ratelimit._prune_admin_denied
+        pruned_at = []
+
+        def _spy_prune(now):
+            pruned_at.append(now)
+            real_prune(now)
+
+        monkeypatch.setattr(ratelimit, "_prune_admin_denied", _spy_prune)
+
+        class _NoopTimer:
+            def start(self):
+                pass
+
+        monkeypatch.setattr(ratelimit, "_new_cleanup_timer", lambda: _NoopTimer())
+
+        ratelimit.register_admin_denied(888)  # عند clock.now = start
+        assert 888 in ratelimit._admin_denied
+        clock.now += ratelimit.ADMIN_ATTEMPTS_WINDOW + 1
+        ratelimit._cleanup_loop()
+
+        assert pruned_at, "دورة التنظيف لم تستدعِ _prune_admin_denied"
+        assert 888 not in ratelimit._admin_denied
+        assert ratelimit.admin_denied_count(888) == 0
+
 
 def _fake_update(user_id, replied=None, sent=None):
     async def _reply(text, **kwargs):
