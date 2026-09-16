@@ -199,6 +199,51 @@ def parse_convert_text(raw: str) -> dict | None:
     return {"amount": amount, "from": codes[0], "to": codes[1]}
 
 
+_RATE_KEYWORDS = re.compile(
+    r"(?:كم\s*صرف|كم\s*سعر|بكم|سعر\s*(?:ال)?صرف|كم\s*يساوي|كم\s*تساوي|كم\s*توازي|تحويل\s*(?:عملة)?\s*(?:من|الى|إلى))",
+    re.IGNORECASE,
+)
+_GREETING_RE = re.compile(
+    r"^(?:مرحبا|اهلا|أهلا|هلا|هاي|صباح الخير|مساء الخير|السلام عليكم|سلام|hi|hello|hey|yo)",
+    re.IGNORECASE,
+)
+
+
+def parse_rate_question(raw: str) -> dict | None:
+    """يكتشف سؤال سعر صرف بلا مبلغ: "كم صرف شيكل على دينار" → {"from": "ILS", "to": "JOD"}."""
+    text = (raw or "").strip().strip("?؟!.")
+    if not text or len(text) < 4:
+        return None
+    if _RATE_KEYWORDS.search(text):
+        from app.database.crud import CURRENCY_ALIASES
+        from app.exchange import CURRENCY_NAMES
+
+        tokens = re.split(r"[\s,،!?.]+", text)
+        codes: list[str] = []
+        for t in tokens:
+            low = t.lower()
+            code = CURRENCY_ALIASES.get(low)
+            if code is None:
+                code = t.upper() if t.upper() in CURRENCY_NAMES else None
+            if code is None:
+                for alias, acode in CURRENCY_ALIASES.items():
+                    if alias in low and len(alias) >= 2:
+                        code = acode
+                        break
+            if code and code not in codes:
+                codes.append(code)
+            if len(codes) >= 2:
+                break
+        if len(codes) >= 2:
+            return {"from": codes[0], "to": codes[1]}
+    return None
+
+
+def is_greeting(text: str) -> bool:
+    """يحدد إذا كان النص تحية (مرحبا/أهلا/هلا/hi/...)."""
+    return bool(_GREETING_RE.match((text or "").strip().strip("?؟!.")))
+
+
 async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """نص حر من زر "إضافة ميزانية" (عملة/شخص) → إنشاء الميزانية."""
     pending = context.user_data.pop("pending_budget", None)
@@ -612,6 +657,22 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
         return None
 
+    rate_q = parse_rate_question(user_text)
+    if rate_q:
+        from app.exchange import CURRENCY_NAMES, convert
+
+        rate_result = await asyncio.to_thread(convert, "1", rate_q["from"], rate_q["to"])
+        if "error" in rate_result:
+            await update.message.reply_text(rate_result["error"])
+        else:
+            from_name = CURRENCY_NAMES.get(rate_result["from"], rate_result["from"])
+            to_name = CURRENCY_NAMES.get(rate_result["to"], rate_result["to"])
+            await update.message.reply_text(
+                f"💱 سعر الصرف اليوم:\n"
+                f"1 {from_name} = {rate_result['rate']} {to_name}"
+            )
+        return None
+
     result = await asyncio.to_thread(analyze_message, user_text)
     logger.info("نتيجة التحليل: %s", result)
 
@@ -626,7 +687,18 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if intent == "query":
         return await _handle_query(update, result)
 
-    await update.message.reply_text("أهلًا! يمكنك إرسال عملية أو سؤال عن بياناتك.")
+    if is_greeting(user_text):
+        await update.message.reply_text(
+            "أهلًا وسهلًا! كيف أقدر أساعدك اليوم؟\n"
+            "مثلاً: تسجيل عملية، سؤال عن ميزانية، أو تحويل عملة."
+        )
+    else:
+        await update.message.reply_text(
+            "أعتذر، ما فهمت رسالتك. جرّب:\n"
+            "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
+            "• سؤال: \"كم لي عند محمد؟\"\n"
+            "• سعر صرف: \"كم صرف شيكل على دينار\""
+        )
     return None
 
 
@@ -857,7 +929,34 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if intent == "query":
         return await _handle_query(update, result)
 
-    await update.message.reply_text("أهلًا! يمكنك إرسال عملية أو سؤال عن بياناتك.")
+    rate_q = parse_rate_question(text)
+    if rate_q:
+        from app.exchange import CURRENCY_NAMES, convert
+
+        rate_result = await asyncio.to_thread(convert, "1", rate_q["from"], rate_q["to"])
+        if "error" in rate_result:
+            await update.message.reply_text(rate_result["error"])
+        else:
+            from_name = CURRENCY_NAMES.get(rate_result["from"], rate_result["from"])
+            to_name = CURRENCY_NAMES.get(rate_result["to"], rate_result["to"])
+            await update.message.reply_text(
+                f"💱 سعر الصرف اليوم:\n"
+                f"1 {from_name} = {rate_result['rate']} {to_name}"
+            )
+        return None
+
+    if is_greeting(text):
+        await update.message.reply_text(
+            "أهلًا وسهلًا! كيف أقدر أساعدك اليوم؟\n"
+            "مثلاً: تسجيل عملية، سؤال عن ميزانية، أو تحويل عملة."
+        )
+    else:
+        await update.message.reply_text(
+            "أعتذر، ما فهمت رسالتك. جرّب:\n"
+            "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
+            "• سؤال: \"كم لي عند محمد؟\"\n"
+            "• سعر صرف: \"كم صرف شيكل على دينار\""
+        )
     return None
 
 

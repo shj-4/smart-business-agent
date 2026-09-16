@@ -21,8 +21,10 @@ from bot import menus
 from bot.conversation import (
     _confirm_editable_fields,
     apply_confirm_edit,
+    is_greeting,
     parse_budget_text,
     parse_convert_text,
+    parse_rate_question,
     workspace_invite_value,
 )
 
@@ -360,6 +362,35 @@ class TestBudgetConvertParsing:
     def test_parse_convert_invalid(self):
         assert parse_convert_text("كم سعر الصرف؟") is None
         assert parse_convert_text("") is None
+
+    def test_parse_rate_question(self):
+        parsed = parse_rate_question("كم صرف شيكل على دينار الأردني")
+        assert parsed is not None
+        assert parsed["from"] == "ILS"
+        assert parsed["to"] == "JOD"
+
+    def test_parse_rate_question_usd(self):
+        parsed = parse_rate_question("كم سعر الدولار مقابل الشيكل؟")
+        assert parsed is not None
+        assert parsed["from"] == "USD"
+        assert parsed["to"] == "ILS"
+
+    def test_parse_rate_question_no_amount_needed(self):
+        assert parse_rate_question("كم صرف يورو إلى دينار") is not None
+
+    def test_parse_rate_question_normal_queries_excluded(self):
+        assert parse_rate_question("كم صرفت هذا الشهر") is None
+        assert parse_rate_question("دفعت 300 شيكل لمحمد") is None
+        assert parse_rate_question("كم لي عند محمد؟") is None
+        assert parse_rate_question("") is None
+
+    def test_is_greeting(self):
+        assert is_greeting("مرحبا")
+        assert is_greeting("أهلا بك")
+        assert is_greeting("hi")
+        assert is_greeting("السلام عليكم")
+        assert not is_greeting("كم صرف شيكل على دينار")
+        assert not is_greeting("دفعت 300 شيكل لمحمد")
 
 
 class TestExportAndTools:
