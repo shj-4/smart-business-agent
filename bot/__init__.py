@@ -4,8 +4,7 @@
 - bot.conversation: آلة الحالة (جمع النواقص → تأكيد → حفظ) عبر ConversationHandler.
 - bot.handlers: أوامر بسيطة (start/done/undo) وتسجيل المعالجات.
 - bot.ratelimit: حدّ معدل الرسائل مع تنظيف دوري للذاكرة.
+
+لا يُستورد أي модول هنا مباشرة لكي لا يُثقل الاختبارات.
+المستوردون يستوردون ما يحتاجونه مباشرة (bot.handlers / bot.conversation / ...).
 """
-
-from bot.handlers import register_handlers
-
-__all__ = ["register_handlers"]
