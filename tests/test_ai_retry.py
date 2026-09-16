@@ -127,14 +127,37 @@ class TestAnalyzeMessageRetry:
         state2.attempt_number = 1
         assert _retry_wait(state2) == 1.0  # تصاعدي: 2^0
 
+    def test_httpx_timeout_is_retryable(self):
+        """httpx.TimeoutException يُعاد لأنه خطأ شبكة مؤقت."""
+        import httpx
+
+        from app.ai_service import _is_retryable
+
+        assert _is_retryable(httpx.TimeoutException("timeout")) is True
+
+    def test_httpx_connect_error_is_retryable(self):
+        """httpx.ConnectError يُعاد لأنه خطأ اتصال."""
+        import httpx
+
+        from app.ai_service import _is_retryable
+
+        assert _is_retryable(httpx.ConnectError("connect failed")) is True
+
+    def test_unclassified_exception_is_not_retryable(self):
+        """استثناء غير مصنّف لا يُعاد — يُفشل فورًا."""
+        from app.ai_service import _is_retryable
+        assert _is_retryable(RuntimeError("bug")) is False
+        assert _is_retryable(ValueError("bad input")) is False
+        assert _is_retryable(KeyError("missing")) is False
+
 
 class TestTranscribeAudioRetry:
     """اختبار retry في transcribe_audio عند فشل generate_content."""
 
     @patch("app.ai_service.client.models.generate_content")
     def test_returns_empty_on_all_retries_failed(self, mock_gen):
-        """إذا فشلت كل المحاولات، تُرجع نص فارغ."""
-        mock_gen.side_effect = RuntimeError("service unavailable")
+        """إذا فشلت كل المحاولات (خطأ عابر معروف)، تُرجع نص فارغ."""
+        mock_gen.side_effect = ConnectionError("service unavailable")
         result = transcribe_audio(b"\x00\x01\x02", mime_type="audio/ogg")
         assert result == ""
         assert mock_gen.call_count == 3
@@ -165,3 +188,11 @@ class TestTranscribeAudioRetry:
         mock_gen.side_effect = RetryError(last_attempt=state)
         result = transcribe_audio(b"\x00\x01\x02")
         assert result == ""
+
+    @patch("app.ai_service.client.models.generate_content")
+    def test_unclassified_exceptions_are_not_retried(self, mock_gen):
+        """استثناء غير مصنّف (RuntimeError) لا يُعاد — يُفشل فورًا."""
+        mock_gen.side_effect = RuntimeError("programming bug")
+        result = transcribe_audio(b"\x00\x01\x02")
+        assert result == ""
+        assert mock_gen.call_count == 1

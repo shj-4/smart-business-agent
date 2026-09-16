@@ -105,15 +105,26 @@ def _extract_status_code(exc: Exception) -> int | None:
 
 
 def _is_retryable(exc: Exception) -> bool:
-    """يُعيد المحاولة فقط للفشل العابر — ويتوقف فورًا أمام أخطاء العميل الدائمة."""
+    """يُعيد المحاولة فقط للفشل العابر — ويتوقف فورًا أمام أي استثناء غير معرف.
+
+    القاعدة: فقط الأخطاء المعروفة وال مؤقتة تُعاد — أي استثناء غير مصنّف
+    يُهمل فورًا لأن AI API له تكلفة وRate Limits ولا يُعاد على أخطاء البرمجة.
+    """
     status = _extract_status_code(exc)
     if status is not None:
         # 429 (rate limit/quota) يُعاد مع احترام Retry-After؛ أخطاء 4xx أخرى دائمة
         return status >= 500 or status == 429
-    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
-        return True
-    # استثناء غير مصنّف — نعتبره عابرًا (توافق مع السلوك السابق)
-    return True
+    # أخطاء الشبكة والمهلة المعروفة فقط
+    import httpx
+    return isinstance(exc, (
+        ConnectionError,
+        TimeoutError,
+        OSError,
+        httpx.TimeoutException,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+    ))
 
 
 def _extract_retry_after(exc: Exception) -> float | None:
