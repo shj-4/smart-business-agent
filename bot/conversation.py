@@ -687,11 +687,13 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if intent == "query":
         return await _handle_query(update, result)
 
-    if is_greeting(user_text):
-        await update.message.reply_text(
-            "أهلًا وسهلًا! كيف أقدر أساعدك اليوم؟\n"
-            "مثلاً: تسجيل عملية، سؤال عن ميزانية، أو تحويل عملة."
+    if intent == "chat":
+        chat_reply = (result or {}).get("reply") or (
+            "أهلًا! كيف أقدر أساعدك؟ سجّل عملية أو اسأل عن ميزانيتك."
+            if is_greeting(user_text)
+            else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
         )
+        await update.message.reply_text(chat_reply)
     else:
         await update.message.reply_text(
             "أعتذر، ما فهمت رسالتك. جرّب:\n"
@@ -945,11 +947,13 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             )
         return None
 
-    if is_greeting(text):
-        await update.message.reply_text(
-            "أهلًا وسهلًا! كيف أقدر أساعدك اليوم؟\n"
-            "مثلاً: تسجيل عملية، سؤال عن ميزانية، أو تحويل عملة."
+    if intent == "chat":
+        chat_reply = (result or {}).get("reply") or (
+            "أهلًا! كيف أقدر أساعدك؟ سجّل عملية أو اسأل عن ميزانيتك."
+            if is_greeting(text)
+            else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
         )
+        await update.message.reply_text(chat_reply)
     else:
         await update.message.reply_text(
             "أعتذر، ما فهمت رسالتك. جرّب:\n"
