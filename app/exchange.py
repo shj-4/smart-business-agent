@@ -57,6 +57,25 @@ def _record_fetch_result(success: bool) -> None:
         )
 
 
+def _normalize_currency_code(raw: str | None) -> str | None:
+    """يحوّل أي صيغة عملة إلى رمز ISO صالح للاستعلام (شيكل→ILS، ₪→ILS...).
+
+    يعيد None للقيم غير العملية (فارغ، «غير محدد»، أرقام) حتى لا يُرسَل
+    نص عربي/حطام إلى API الأسعار (404) أو يُفسَّر خطأً كعملة حيّة.
+    """
+    if not raw:
+        return None
+    from app.database.crud.common import normalize_currency
+
+    code = normalize_currency(raw)
+    if not code:
+        return None
+    code = code.upper().strip()
+    if len(code) != 3 or not code.isascii() or not code.isalpha():
+        return None
+    return code
+
+
 def _fetch_rates(base: str) -> dict[str, float] | None:
     """يجلب أسعار الصرف لعملة أساسية من API المجاني (بدون منطق قاطع الدائرة)."""
     url = f"{API_BASE}/{base}"
@@ -73,9 +92,15 @@ def _fetch_rates(base: str) -> dict[str, float] | None:
 
 
 def get_rate(from_cur: str, to_cur: str) -> Decimal | None:
-    """يجلب سعر صرف من from_cur → to_cur مع تخزين مؤقت."""
-    from_cur = from_cur.upper().strip()
-    to_cur = to_cur.upper().strip()
+    """يجلب سعر صرف من from_cur → to_cur مع تخزين مؤقت.
+
+    لا يستدعي الشبكة لصيغ غير عملية (شيكل، غير محدد، أرقام...) — يُعيد None
+    فورًا بدل 404/مخزّن خاطئ من API.
+    """
+    from_cur = _normalize_currency_code(from_cur)
+    to_cur = _normalize_currency_code(to_cur)
+    if from_cur is None or to_cur is None:
+        return None
 
     if from_cur == to_cur:
         return Decimal("1.0000")
@@ -125,8 +150,11 @@ def convert(amount: Decimal | float | str, from_cur: str, to_cur: str) -> dict:
 
     يعيد dict: {amount, from, to, rate, result} أو {error: str}.
     """
-    from_cur = from_cur.upper().strip()
-    to_cur = to_cur.upper().strip()
+    raw_from, raw_to = from_cur, to_cur
+    from_cur = _normalize_currency_code(from_cur)
+    to_cur = _normalize_currency_code(to_cur)
+    if from_cur is None or to_cur is None:
+        return {"error": f"عملة غير معروفة: {raw_from} → {raw_to}"}
 
     try:
         amount = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -175,6 +203,7 @@ def convert_totals_to_base(
     - `partial` True إذا نجحت بعض العملات فقط (لا يمكن عرض مجموع كامل).
     """
     base_currency = base_currency.upper().strip()
+    base_norm = _normalize_currency_code(base_currency) or base_currency
     stored = stored or {}
     if not totals and not stored:
         return {"base": base_currency, "total": Decimal("0.00"), "partial": False, "rates": {}}
@@ -187,7 +216,8 @@ def convert_totals_to_base(
     # بسعر اليوم.
     for currency in dict.fromkeys([*totals, *stored]):
         amount = totals.get(currency)
-        if currency == base_currency:
+        code = _normalize_currency_code(currency) or currency
+        if code == base_norm:
             if amount is None:
                 continue
             rates[currency] = Decimal("1.0000")
@@ -201,7 +231,7 @@ def convert_totals_to_base(
         if amount is None:
             continue
         try:
-            rate = get_rate(currency, base_currency)
+            rate = get_rate(code, base_currency)
         except Exception:
             rate = None
         if rate is None:

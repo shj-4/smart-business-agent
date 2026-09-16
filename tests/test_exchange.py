@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import exchange
-from app.exchange import convert, get_rate
+from app.exchange import _normalize_currency_code, convert, get_rate
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +69,30 @@ class TestGetRate:
         assert "ILS" in exchange.CURRENCY_NAMES
         assert "USD" in exchange.CURRENCY_NAMES
         assert "JOD" in exchange.CURRENCY_NAMES
+
+    def test_arabic_name_normalized_to_iso(self):
+        """«شيكل/شيقل» يُوحَّد إلى ILS قبل أي استدعاء شبكة."""
+        assert _normalize_currency_code("شيكل") == "ILS"
+        assert _normalize_currency_code("شيقل") == "ILS"
+        assert _normalize_currency_code("₪") == "ILS"
+        assert _normalize_currency_code("دولار") == "USD"
+        assert _normalize_currency_code("دينار") == "JOD"
+
+    def test_garbage_currency_never_hits_api(self):
+        """نص/أرقام غير عملات («غير محدد»، ٢٠٠...) لا تُرسَل إلى API أبدًا."""
+        with patch("app.exchange._fetch_rates", MagicMock(return_value=None)) as mock_fetch:
+            assert get_rate("غير محدد", "ILS") is None
+            assert get_rate("٢٠٠", "ILS") is None
+            assert get_rate("", "ILS") is None
+        mock_fetch.assert_not_called()
+
+    @patch("app.exchange._fetch_rates")
+    def test_arabic_currency_converted(self, mock_fetch):
+        """تحويل بعملة عربية (شيكل) يعمل بلا استدعاء API بأسماء عربية."""
+        mock_fetch.return_value = {"ILS": 1.0, "USD": 0.2667}
+        result = convert("100", "شيكل", "USD")
+        assert not result.get("error")
+        assert result["from"] == "ILS"
 
 
 class TestConvertTotalsToBaseStored:
