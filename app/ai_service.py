@@ -238,7 +238,7 @@ def analyze_message(text: str) -> dict:
         return {"intent": "unknown", "error": "gemini_unavailable", "raw": text}
     except Exception as exc:  # noqa: BLE001
         logger.error("خطأ غير متوقع في analyze_message: %s", exc)
-        return {"intent": "unknown", "error": str(exc)[:200], "raw": text}
+        return {"intent": "unknown", "error": "unexpected_error", "raw": text}
 
     parsed = _parse_json(response.text or "")
     if parsed is None:
@@ -381,7 +381,7 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         return {"intent": "record", "type": "unknown", "error": "gemini_unavailable"}
     except Exception as exc:  # noqa: BLE001
         logger.error("خطأ غير متوقع في analyze_receipt_image: %s", exc)
-        return {"intent": "record", "type": "unknown", "error": str(exc)[:200]}
+        return {"intent": "record", "type": "unknown", "error": "unexpected_error"}
 
     parsed = _parse_json(response.text or "")
     if parsed is None:

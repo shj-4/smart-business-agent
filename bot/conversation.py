@@ -903,8 +903,9 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         # فحص الحجم قبل أي تنزيل (حماية الموارد/التكلفة)
         _check_file_size(update.message)
         audio_bytes, mime, media_kind = await _extract_media(update)
-    except MediaTooLargeError as exc:
-        await update.message.reply_text(str(exc))
+    except MediaTooLargeError:
+        logger.warning("ملف وسيط مرفوض الحجم")
+        await update.message.reply_text("الملف كبير جدًا لحد المعالجة. أرسل ملفًا أصغر أو استخدم تسجيلًا صوتيًا مختصرًا.")
         return None
     except Exception:
         logger.exception("خطأ في تنزيل الملف الصوتي")
