@@ -43,7 +43,8 @@ python -m venv venv
 # Windows:
 venv\Scripts\activate
 # ثم:
-pip install -r requirements.txt
+pip install -r requirements.txt        # تشغيل فقط
+pip install -r requirements-dev.txt    # تشغيل + اختبارات + ruff
 python -m alembic upgrade head   # إنشاء قاعدة SQLite محليًا
 python bot.py                    # تشغيل البوت
 uvicorn app.main:app --port 8000 # (اختياري) واجهة API

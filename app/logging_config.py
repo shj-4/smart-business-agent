@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import re
 from logging.handlers import RotatingFileHandler
 
 # مجلد السجلات داخل جذر المشروع (موجود افتراضيًا)
@@ -23,6 +24,24 @@ MAIN_LOG = os.path.join(LOGS_DIR, "app.log")
 # التكوين الافتراضي للتدوير
 MAX_BYTES = 5 * 1024 * 1024  # 5MB
 BACKUP_COUNT = 5  # يحتفظ بـ 5 ملفات قديمة (app.log.1 .. app.log.5)
+
+# أنماط أسرار تُقصّ من أي رسالة سجل قبل كتابتها — لا تُكتَب نصوص رسائل
+# Telegram الحساسة ولا المفاتيح أبدًا (تُستبدل بعلامة حجب).
+_SECRET_PATTERNS = (
+    re.compile(r"(TELEGRAM_BOT_TOKEN|BOT_TOKEN|API_KEY|APIKEY|GEMINI_API_KEY)[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(ENCRYPTION_KEY)[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(DASHBOARD_PASSWORD|PASSWORD)[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"(Authorization|authorization)[=:]\s*(?:Basic|Bearer|Token)\s+\S+"),
+    re.compile(r"(token[=:]\s*)\S+", re.IGNORECASE),
+)
+
+
+def _scrub(text: str) -> str:
+    """يحجب الأسرار المعروفة في نص السجل (بند مركزي يمر عليه كل سطر)."""
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub(r"\1=***REDACTED***", out)
+    return out
 
 
 class JsonFormatter(logging.Formatter):
@@ -38,10 +57,10 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "service": self.service or "",
-            "message": record.getMessage(),
+            "message": _scrub(record.getMessage()),
         }
         if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
+            payload["exc"] = _scrub(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -49,11 +68,25 @@ def _make_formatter(service: str) -> logging.Formatter:
     """يختار المُنسّق حسب LOG_FORMAT (text افتراضيًا / json للتجميع المركزي)."""
     if os.environ.get("LOG_FORMAT", "").strip().lower() == "json":
         return JsonFormatter(service)
-    return logging.Formatter(
+    return ScrubbingFormatter(
         "%(asctime)s - %(name)s - %(levelname)s - "
         + (f"[{service}] " if service else "")
         + "%(message)s"
     )
+
+
+class ScrubbingFormatter(logging.Formatter):
+    """مُنسّق نصي يحجب الأسرار في رسالة/استثناء السجل قبل الإخراج.
+
+    يحرص على عدم إتلاف عناصر التنسيق %s — يمرّ على الرسالة النهائية بعد اكتمال
+    استبدال العناصر بدلًا من الرسالة الخام التي قد تحتوي %s.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.args:
+            record.args = tuple(_scrub(str(a)) if isinstance(a, str) else a for a in record.args)
+        rendered = super().format(record)
+        return _scrub(rendered)
 
 
 def configure_logging(level: int = logging.INFO, service: str = "") -> None:

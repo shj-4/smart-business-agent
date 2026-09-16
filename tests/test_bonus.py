@@ -41,6 +41,7 @@ from app.database.crud import (
     set_loyalty_config,
 )
 from app.database.models import LoyaltyAccount
+from app.timeutil import now_utc
 from bot.bonus import (
     _fmt_amount,
     _parse_optional_args,
@@ -176,7 +177,7 @@ class TestBonusEvents:
         assert end_bonus_event(db_session, USER_A, ev.id).status == "ended"
 
     def test_event_bonus_summary_granted_sales_and_percent(self, db_session):
-        now = datetime.utcnow()
+        now = now_utc()
         ev = create_bonus_event(
             db_session, USER_A, "صيف",
             budget="1000", currency="ILS",
@@ -237,8 +238,8 @@ class TestEmployeeBonusPlans:
         assert disable_employee_bonus_plan(db_session, USER_B, plan.id) is None
 
     def test_due_plans_only_for_due_and_enabled(self, db_session):
-        past = datetime.utcnow() - timedelta(days=1)
-        future = datetime.utcnow() + timedelta(days=10)
+        past = now_utc() - timedelta(days=1)
+        future = now_utc() + timedelta(days=10)
         create_employee_bonus_plan(db_session, USER_A, "محمد", "100", next_due_at=past)
         create_employee_bonus_plan(db_session, USER_A, "سامر", "200", next_due_at=future)
         create_employee_bonus_plan(db_session, USER_B, "خالد", "300", next_due_at=past)
@@ -246,7 +247,7 @@ class TestEmployeeBonusPlans:
         assert {USER_A: "محمد", USER_B: "خالد"} == owed
 
     def test_due_plan_after_text_removed(self, db_session):
-        past = datetime.utcnow() - timedelta(days=1)
+        past = now_utc() - timedelta(days=1)
         create_employee_bonus_plan(db_session, USER_A, "محمد", "100", next_due_at=past)
         _grant(db_session, uid=USER_B, amount="50", person="محمد")
         owed = due_employee_bonus_plans(db_session)
@@ -309,7 +310,7 @@ class TestEmployeeBonusPlans:
         assert spent == Decimal("250")
 
     def test_overview_detects_due_count_and_cap_status(self, db_session):
-        now = datetime.utcnow()
+        now = now_utc()
         create_employee_bonus_plan(db_session, USER_A, "محمد", "1000", monthly_cap="2000", next_due_at=now - timedelta(days=1))
         create_employee_bonus_plan(db_session, USER_A, "سامر", "200", monthly_cap="500")
         _grant(db_session, amount="1800", person="محمد")

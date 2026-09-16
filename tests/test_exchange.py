@@ -111,7 +111,6 @@ class TestRateCaching:
     def test_rate_refreshed_after_ttl(self, mock_fetch):
         """انقضاء ساعة (TTL) يفرض جلبًا جديدًا من الشبكة."""
         mock_fetch.return_value = {"USD": 1.0, "ILS": 3.75}
-        import time as _time
 
         get_rate("USD", "ILS")
         first_call_count = mock_fetch.call_count

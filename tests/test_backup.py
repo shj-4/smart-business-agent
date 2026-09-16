@@ -99,3 +99,46 @@ def test_run_backup_removes_failed_verification(monkeypatch, tmp_path):
 
     assert backup.run_backup() is False
     assert backup._list_backups() == []
+
+
+def test_restore_roundtrip_backup_then_query(monkeypatch, tmp_path):
+    """Full round-trip: backup → restore into fresh DB → query data → integrity check."""
+    src = tmp_path / "source.db"
+    conn = sqlite3.connect(str(src))
+    conn.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, name TEXT, amount REAL)")
+    for i in range(5):
+        conn.execute("INSERT INTO records (name, amount) VALUES (?, ?)", (f"row_{i}", i * 10.0))
+    conn.commit()
+    conn.close()
+
+    bdir = tmp_path / "backups"
+    monkeypatch.setattr(backup, "DB_PATH", str(src))
+    monkeypatch.setattr(backup, "BACKUP_DIR", str(bdir))
+    monkeypatch.setattr(backup, "KEEP_COUNT", 3)
+    monkeypatch.setattr(backup, "LOG_FILE", str(tmp_path / "backup.log"))
+
+    # 1) create backup
+    assert backup.run_backup() is True
+    made = backup._list_backups()
+    assert len(made) == 1
+    backup_path = bdir / made[0]
+
+    # 2) restore: open backup as read-only and copy into a fresh DB
+    restore = tmp_path / "restored.db"
+    with sqlite3.connect(str(backup_path)) as src_conn:
+        with sqlite3.connect(str(restore)) as dst_conn:
+            src_conn.backup(dst_conn)
+
+    # 3) query restored DB — all rows must be intact
+    with sqlite3.connect(str(restore)) as db:
+        rows = db.execute("SELECT COUNT(*) FROM records").fetchone()
+        assert rows[0] == 5
+        names = {r[0] for r in db.execute("SELECT name FROM records ORDER BY id")}
+        assert names == {f"row_{i}" for i in range(5)}
+        total = db.execute("SELECT SUM(amount) FROM records").fetchone()[0]
+        assert abs(total - 100.0) < 0.01  # 0+10+20+30+40
+
+    # 4) integrity check on restored DB
+    with sqlite3.connect(str(restore)) as db:
+        rows = db.execute("PRAGMA integrity_check").fetchall()
+        assert rows[0][0] == "ok"

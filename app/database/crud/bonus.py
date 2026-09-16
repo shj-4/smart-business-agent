@@ -31,6 +31,7 @@ from app.database.models import (
     LoyaltyConfig,
     Transaction,
 )
+from app.timeutil import now_utc
 
 # التصنيف الموحّد للبونس في المعاملات المالية
 BONUS_CATEGORY = "بونس"
@@ -230,7 +231,7 @@ def set_bonus_event_status(
     if event is None:
         return None
     event.status = status
-    event.updated_at = datetime.utcnow()
+    event.updated_at = now_utc()
     db.commit()
     db.refresh(event)
     return event
@@ -272,7 +273,7 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
             Transaction.type == "expense",
             _bonus_category_filter(),
             Transaction.created_at >= lo,
-            Transaction.created_at < (hi or datetime.utcnow()),
+            Transaction.created_at < (hi or now_utc()),
         )
         .all()
     )
@@ -288,7 +289,7 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
             Transaction.created_at >= lo,
-            Transaction.created_at < (hi or datetime.utcnow()),
+            Transaction.created_at < (hi or now_utc()),
         )
         .all()
     )
@@ -383,7 +384,7 @@ def disable_employee_bonus_plan(
     if plan is None:
         return None
     plan.enabled = False
-    plan.updated_at = datetime.utcnow()
+    plan.updated_at = now_utc()
     db.commit()
     db.refresh(plan)
     return plan
@@ -391,7 +392,7 @@ def disable_employee_bonus_plan(
 
 def due_employee_bonus_plans(db: Session, now: datetime | None = None) -> list[EmployeeBonusPlan]:
     """كل خطط المكافآت النشطة التي بلغ موعد منحها (تُستخدم للتذكير اليومي)."""
-    now = now or datetime.utcnow()
+    now = now or now_utc()
     return (
         db.query(EmployeeBonusPlan)
         .filter(
@@ -419,7 +420,7 @@ def advance_employee_bonus_due(db: Session, plan: EmployeeBonusPlan, now: dateti
     كي لا ينجرف الجدول مع تأخير التذكير؛ مع تقليص اليوم عند الشهور الأقصر
     (31 يناير → 28 فبراير).
     """
-    base = plan.next_due_at or now or datetime.utcnow()
+    base = plan.next_due_at or now or now_utc()
     if plan.frequency == "one_off":
         plan.enabled = False
     elif plan.frequency == "quarterly":
@@ -428,7 +429,7 @@ def advance_employee_bonus_due(db: Session, plan: EmployeeBonusPlan, now: dateti
         plan.next_due_at = _next_due(base, 1)
     else:
         plan.enabled = False
-    plan.updated_at = datetime.utcnow()
+    plan.updated_at = now_utc()
     db.commit()
 
 
@@ -513,7 +514,7 @@ def loyalty_config_enable(
             cfg.points_value = Decimal(str(points_value))
         if min_redeem_points is not None:
             cfg.min_redeem_points = int(min_redeem_points)
-    cfg.updated_at = datetime.utcnow()
+    cfg.updated_at = now_utc()
     db.commit()
     db.refresh(cfg)
     return cfg
@@ -536,7 +537,7 @@ def set_loyalty_config(
         cfg.points_value = Decimal(str(points_value))
     if min_redeem_points is not None:
         cfg.min_redeem_points = max(0, int(min_redeem_points))
-    cfg.updated_at = datetime.utcnow()
+    cfg.updated_at = now_utc()
     db.commit()
     db.refresh(cfg)
     return cfg
@@ -594,7 +595,7 @@ def loyalty_add_points(
         account = _loyalty_account_create(db, telegram_user_id, person)
     account.points_balance = (account.points_balance or 0) + points
     account.total_earned = (account.total_earned or 0) + points
-    account.updated_at = datetime.utcnow()
+    account.updated_at = now_utc()
     db.commit()
     db.refresh(account)
     return account
@@ -653,7 +654,7 @@ def loyalty_redeem_points(
         }
     account.points_balance -= points
     account.total_redeemed = (account.total_redeemed or 0) + points
-    account.updated_at = datetime.utcnow()
+    account.updated_at = now_utc()
     db.commit()
     db.refresh(account)
     value = (Decimal(str(cfg.points_value)) * points).quantize(Decimal("0.01"))
@@ -690,7 +691,7 @@ def bonus_overview(db: Session, telegram_user_id: int) -> dict:
     due_count = sum(
         1
         for p in plans
-        if p["next_due_at"] is not None and p["next_due_at"] <= datetime.utcnow()
+        if p["next_due_at"] is not None and p["next_due_at"] <= now_utc()
     )
     cfg = loyalty_config_get(db, telegram_user_id)
     accounts = list_loyalty_accounts(db, telegram_user_id, limit=5)

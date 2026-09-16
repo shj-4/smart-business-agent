@@ -1,4 +1,3 @@
-from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -15,6 +14,7 @@ from sqlalchemy import (
 
 from app.database.db import Base
 from app.security import EncryptedNumeric, EncryptedString
+from app.timeutil import now_utc
 
 # تصنيفات مالية شائعة تُستخرج تلقائيًا من الـ AI (الحقل اختياري)
 DEFAULT_CATEGORIES = [
@@ -73,7 +73,7 @@ class Transaction(Base):
     vat_amount = Column(Numeric(12, 2), nullable=True)  # قيمة الضريبة بعملة العملية
 
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -102,7 +102,7 @@ class Note(Base):
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -129,7 +129,7 @@ class Task(Base):
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
     reminder_sent = Column(Boolean, default=False, nullable=False)
 
@@ -149,7 +149,7 @@ class CorrectionFeedback(Base):
     raw_message = Column(EncryptedString(), nullable=True)  # النص الأصلي (مشفر)
     data_type = Column(String(16), nullable=True)  # intent->type المشتبه به إن وُجد
     reviewed = Column(Boolean, default=False, nullable=False)  # رُوجع يدويًا؟
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
 
 
 class WorkspaceMember(Base):
@@ -175,7 +175,7 @@ class WorkspaceMember(Base):
     status = Column(
         String(16), nullable=False, default="active", server_default="active"
     )
-    joined_at = Column(DateTime, default=datetime.utcnow)
+    joined_at = Column(DateTime, default=now_utc)
 
 
 class Budget(Base):
@@ -215,7 +215,7 @@ class Budget(Base):
     alerted_status = Column(Integer, default=0, nullable=False)  # 0|1|2
     month_key = Column(String(7), default="", nullable=False)  # "YYYY-MM"
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -235,7 +235,7 @@ class CreditLimit(Base):
     limit_amount = Column(Numeric(12, 2), nullable=False)
 
     alerted_status = Column(Integer, default=0, nullable=False)  # 0=لا تنبيه | 1=اقتراب | 2=تجاوز
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -259,7 +259,7 @@ class Invoice(Base):
     paid_at = Column(DateTime, nullable=True)
     alerted = Column(Boolean, default=False, nullable=False)  # أُرسل تنبيه تأخر؟ (مرة واحدة)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -281,7 +281,7 @@ class ReportPref(Base):
     deliver_time = Column(String(8), nullable=True)  # "HH:MM" محلي
     last_sent_at = Column(DateTime, nullable=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -304,7 +304,7 @@ class UserPref(Base):
     notif_morning_summary = Column(Boolean, default=True, nullable=False)
     notif_deviation = Column(Boolean, default=True, nullable=False)
     notif_periodic_report = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -329,7 +329,7 @@ class BonusEvent(Base):
     note = Column(String(255), nullable=True)  # وصف/تعليق
     status = Column(String(16), nullable=False, default="planned")  # planned|active|ended
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -359,7 +359,7 @@ class EmployeeBonusPlan(Base):
     note = Column(String(255), nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
 
