@@ -304,6 +304,7 @@ class UserPref(Base):
     notif_morning_summary = Column(Boolean, default=True, nullable=False)
     notif_deviation = Column(Boolean, default=True, nullable=False)
     notif_periodic_report = Column(Boolean, default=True, nullable=False)
+    notif_proactive = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 

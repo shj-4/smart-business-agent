@@ -23,7 +23,7 @@ from app.database.crud import mark_overdue_tasks
 from app.database.db import SessionLocal
 from app.database.models import Budget, CreditLimit, Invoice, ReportPref, Task
 from app.timeutil import now_local, now_utc
-from bot.icons import WARNING
+from bot.icons import EXPENSE, TASK, WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -606,6 +606,158 @@ def setup_deviation_check(app: Application) -> None:
         name="deviation_check",
     )
     logger.info("تم تسجيل فحص الانحراف كل %d دقيقة", CHECK_INTERVAL_MINUTES)
+
+
+# ---------- النشرة الاستباقية اليومية (تنبيهات مجمّعة) ----------
+
+# يُرسَل مرة واحدة يوميًا لكل مستخدم (حارس في الذاكرة). تُغطّي ما يحتاج
+# انتباهًا *قبل* أن يصير متأخرًا: مهام وفواتير تستحق خلال DAYS_AHEAD يومًا +
+# ميزانيات على السقف — بسقف إسهاب (لا تُغرق المستخدم بإشعارات منفصلة).
+PROACTIVE_DAYS_AHEAD = 3
+PROACTIVE_MAX_ITEMS_PER_GROUP = 3
+_PROACTIVE_HOUR = 9  # الساعة 09:00 بالتوقيت المحلي
+
+_LAST_PROACTIVE_SENT: dict[int, str] = {}
+
+
+def build_proactive_digest(db: Session, uid: int, *, days_ahead: int = PROACTIVE_DAYS_AHEAD) -> str | None:
+    """يبني نشرة تنبيهات استباقية (سطر واحد بلا استدعاء شبكة).
+
+    يرجع None إذا لم يكن هناك ما يستحق التنبيه (لا رسالة فارغة). الفترة الآتية
+    تُحسب بحدود local → UTC عبر to_utc_naive. الأسماء/المبالغ من القاعدة — ليست
+    نصوصًا قابلة للتنفيذ.
+    """
+    from app.database.crud import accessible_user_ids, budget_usage, list_budgets
+    from app.timeutil import to_local_naive, to_utc_naive
+
+    now = now_local()
+    now_utc_dt = to_utc_naive(now)
+    soon_utc = to_utc_naive(now + timedelta(days=days_ahead))
+    lines: list[str] = []
+
+    def _in_window(dt) -> str | None:
+        """يعيد «متأخرة»/«تستحق قريبًا» حسب الموعد، أو None خارج النافذة."""
+        if not dt:
+            return None
+        if dt < now_utc_dt:
+            return "متأخرة"
+        if dt <= soon_utc:
+            return "قريبًا"
+        return None
+
+    ids = accessible_user_ids(db, uid)
+
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.telegram_user_id.in_(ids),
+            Task.deleted_at.is_(None),
+            Task.status.in_(["pending", "overdue"]),
+        )
+        .all()
+    )
+    task_items = []
+    for t in tasks:
+        state = _in_window(t.due_date)
+        if state is None:
+            continue
+        when = to_local_naive(t.due_date).strftime("%m-%d %H:%M") if t.due_date else ""
+        task_items.append(f"{TASK} {t.description[:50]}{' — ' + when if when else ''} ({state})")
+    if task_items:
+        shown = task_items[:PROACTIVE_MAX_ITEMS_PER_GROUP]
+        lines.append("🗓️ مهام تستحق الانتباه:")
+        lines.extend(f"  {row}" for row in shown)
+        if len(task_items) > len(shown):
+            lines.append(f"  … و{len(task_items) - len(shown)} أخرى")
+
+    invoices = (
+        db.query(Invoice)
+        .filter(
+            Invoice.telegram_user_id.in_(ids),
+            Invoice.status.in_(["pending", "overdue"]),
+        )
+        .all()
+    )
+    inv_items = []
+    for inv in invoices:
+        state = _in_window(inv.due_date)
+        if state is None:
+            continue
+        when = to_local_naive(inv.due_date).strftime("%m-%d") if inv.due_date else ""
+        inv_items.append(
+            f"#{inv.id} {inv.person or 'بدون شخص'}: {inv.amount} {inv.currency or ''}"
+            f"{' — ' + when if when else ''} ({state})"
+        )
+    if inv_items:
+        shown = inv_items[:PROACTIVE_MAX_ITEMS_PER_GROUP]
+        lines.append("🧾 فواتير تستحق الانتباه:")
+        lines.extend(f"  {row}" for row in shown)
+        if len(inv_items) > len(shown):
+            lines.append(f"  … و{len(inv_items) - len(shown)} أخرى")
+
+    budget_warns = []
+    for b in list_budgets(db, uid):
+        usage = budget_usage(db, b)
+        if usage.get("over"):
+            budget_warns.append((b, usage, "تجاوزت السقف"))
+        elif usage.get("percent", 0) >= 80:
+            budget_warns.append((b, usage, "قريبة من السقف"))
+    if budget_warns:
+        shown = budget_warns[:PROACTIVE_MAX_ITEMS_PER_GROUP]
+        lines.append("💰 الميزانيات:")
+        for b, usage, status in shown:
+            target = b.name or b.person or b.currency or b.category or "ميزانية"
+            lines.append(f"  {EXPENSE} {target}: {usage['spent']} / {usage['limit']} ({usage['percent']}%) — {status}")
+        if len(budget_warns) > len(shown):
+            lines.append(f"  … و{len(budget_warns) - len(shown)} أخرى")
+
+    if not lines:
+        return None
+    lines.append("\nللتفاصيل: /kpi · /tasks · /invoices · /budget")
+    return "\n".join(lines)
+
+
+async def proactive_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يرسل النشرة الاستباقية اليومية لكل مستخدم لديه ما يستحق التنبيه."""
+    from app.database.crud.reports import user_ids_with_data
+
+    db = SessionLocal()
+    try:
+        today = now_utc().strftime("%Y-%m-%d")
+        for uid in user_ids_with_data(db):
+            try:
+                if not _user_pref_flag(db, uid, "notif_proactive"):
+                    continue
+                if _LAST_PROACTIVE_SENT.get(uid) == today:
+                    continue
+                digest = build_proactive_digest(db, uid)
+                if digest is None:
+                    continue
+                await context.bot.send_message(chat_id=uid, text=digest)
+                _LAST_PROACTIVE_SENT[uid] = today
+            except Exception:  # noqa: BLE001
+                logger.exception("فشل إرسال النشرة الاستباقية للمستخدم %s", uid)
+    finally:
+        db.close()
+
+
+def setup_proactive_check(app: Application) -> None:
+    """يُسجّل مهمة يومية (الساعة 09:05) للنشرة الاستباقية المجمّعة."""
+    if app.job_queue is None:
+        logger.warning("job_queue غير مُفعّل — النشرة الاستباقية لن تعمل.")
+        return
+
+    target = now_local().replace(hour=_PROACTIVE_HOUR, minute=5, second=0, microsecond=0)
+    if target <= now_local():
+        target += timedelta(days=1)
+    delay = target - now_local()
+    app.job_queue.run_repeating(
+        proactive_check,
+        interval=timedelta(hours=24),
+        first=delay,
+        name="proactive_check",
+    )
+    logger.info("تم تسجيل النشرة الاستباقية اليومية (%d:05)", _PROACTIVE_HOUR)
 
 
 # ---------- النسخ الاحتياطي اليومي التلقائي ----------

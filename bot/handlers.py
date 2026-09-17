@@ -499,6 +499,7 @@ async def notif_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "notif_morning_summary": ("☀️ الملخص الصباحي", True),
         "notif_deviation": ("🚨 تنبيهات الانحراف", True),
         "notif_periodic_report": ("📊 التقارير الدورية", True),
+        "notif_proactive": ("🚨 النشرة الاستباقية اليومية", True),
     }
 
     telegram_user_id = update.effective_user.id
@@ -1237,6 +1238,7 @@ def register_handlers(app: Application) -> None:
         setup_morning_summary,
         setup_overdue_reminder,
         setup_periodic_reports,
+        setup_proactive_check,
     )
 
     setup_overdue_reminder(app)
@@ -1247,4 +1249,5 @@ def register_handlers(app: Application) -> None:
     setup_deviation_check(app)
     setup_daily_backup(app)
     setup_morning_summary(app)
+    setup_proactive_check(app)
     setup_bonus_check(app)

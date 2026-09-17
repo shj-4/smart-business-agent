@@ -1,5 +1,6 @@
 """اختبارات لوحة مؤشرات الأداء (/kpi) — kpi_dashboard + format_kpi_dashboard."""
 
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,7 +12,9 @@ from app.database.crud import (
     create_transaction,
     kpi_dashboard,
 )
+from app.timeutil import now_local
 from bot.formatters import format_brief_data, format_kpi_dashboard
+from bot.reminders import build_proactive_digest
 
 USER = 909
 
@@ -134,3 +137,69 @@ class TestDailyBrief:
         assert "300" in text
         assert "إيجار" in text
         assert "العملة الأساس" in text
+
+
+class TestProactiveDigest:
+    def _task_due(self, db, days: int, desc: str = "اختبار") -> None:
+        when = (now_local() + timedelta(days=days)).strftime("%Y-%m-%d")
+        create_task(db, USER, {"description": desc, "date": when}, f"مهمة: {desc}")
+
+    def _invoice_due(self, db, days: int, amount: str = "200") -> None:
+        when = (now_local() + timedelta(days=days)).isoformat()
+        create_invoice(db, USER, {"amount": amount, "currency": "ILS", "due_date": when})
+
+    def test_empty_workspace_returns_none(self, db_session):
+        assert build_proactive_digest(db_session, USER) is None
+
+    def test_overdue_and_due_soon_tasks(self, db_session):
+        self._task_due(db_session, -1, "متأخرة")
+        self._task_due(db_session, 1, "قريبة")
+        self._task_due(db_session, 30, "بعيدة")  # خارج نافذة 3 أيام
+        out = build_proactive_digest(db_session, USER)
+        assert out is not None
+        assert "متأخرة" in out
+        assert "قريبًا" in out
+        assert "بعيدة" not in out
+
+    def test_only_far_future_is_none(self, db_session):
+        self._task_due(db_session, 30)
+        out = build_proactive_digest(db_session, USER)
+        assert out is None
+
+    def test_due_invoices_included(self, db_session):
+        self._invoice_due(db_session, 2, "300")
+        self._invoice_due(db_session, 40, "500")  # خارج النافذة
+        out = build_proactive_digest(db_session, USER)
+        assert out is not None
+        assert "فواتير تستحق الانتباه" in out
+        assert "300" in out
+        assert "500" not in out
+
+    def test_budget_near_cap_included(self, db_session):
+        create_budget(db_session, USER, "category", "إيجار", 1000)
+        _tx(db_session, "800", tx_type="expense", category="إيجار")
+        out = build_proactive_digest(db_session, USER)
+        assert out is not None
+        assert "قريبة من السقف" in out
+
+    def test_budget_over_cap_included(self, db_session):
+        create_budget(db_session, USER, "category", "إيجار", 1000)
+        _tx(db_session, "1200", tx_type="expense", category="إيجار")
+        out = build_proactive_digest(db_session, USER)
+        assert out is not None
+        assert "تجاوزت السقف" in out
+
+    def test_cap_limits_items_per_group(self, db_session):
+        for i in range(6):
+            self._task_due(db_session, 1, f"مهمة {i}")
+        out = build_proactive_digest(db_session, USER)
+        assert out is not None
+        assert out.count("مهام تستحق الانتباه") == 1
+        assert "و3 أخرى" in out
+        assert sum(1 for line in out.splitlines() if line.startswith("  🗓️ ")) == 3
+
+    def test_proactive_flag_readable(self, db_session):
+        from app.database.crud import get_or_create_user_pref
+
+        pref = get_or_create_user_pref(db_session, USER)
+        assert pref.notif_proactive is True

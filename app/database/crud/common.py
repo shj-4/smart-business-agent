@@ -169,6 +169,7 @@ def toggle_notification_pref(db: Session, telegram_user_id: int, field: str, ena
     VALID = {
         "notif_task_reminder", "notif_budget_alert", "notif_credit_alert",
         "notif_invoice_alert", "notif_morning_summary", "notif_deviation", "notif_periodic_report",
+        "notif_proactive",
     }
     if field not in VALID:
         return f"إعداد غير معروف: {field}"
