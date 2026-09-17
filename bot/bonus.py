@@ -103,11 +103,16 @@ def _known_currency(val: str) -> str | None:
 
 
 def _parse_optional_args(args: list[str], defaults: dict | None = None) -> dict:
-    """يحلّل وسيطات اختيارية (عملة/شخص/وصف/أرقام) بشكل ذكي."""
+    """يحلّل وسيطات اختيارية (عملة/شخص/وصف/أرقام) بشكل ذكي.
+
+    يجمع كل الكلمات المتبقية بعد العملة والشخص في وصف واحد بدل الاكتفاء
+    بالكلمة الأخيرة فقط. مثال: ["ILS", "محمد", "منحة", "شهر", "رمضان"]
+    → desc="منحة شهر رمضان".
+    """
     defaults = defaults or {}
     currency = defaults.get("currency")
     person = defaults.get("person")
-    desc = defaults.get("desc")
+    desc_parts = [defaults["desc"]] if defaults.get("desc") else []
     for token in args:
         val = token.strip()
         if not val:
@@ -118,8 +123,8 @@ def _parse_optional_args(args: list[str], defaults: dict | None = None) -> dict:
         elif person is None:
             person = val
         else:
-            desc = val
-    return {"currency": currency, "person": person, "desc": desc}
+            desc_parts.append(val)
+    return {"currency": currency, "person": person, "desc": " ".join(desc_parts) or None}
 
 
 def split_name_and_amount(args: list[str]) -> tuple[str, Decimal | None, list[str]]:

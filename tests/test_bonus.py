@@ -664,6 +664,30 @@ class TestBotBonusHelpers:
         parsed = _parse_optional_args(["100"])
         assert parsed["currency"] is None and parsed["person"] == "100"
 
+    def test_parse_optional_args_accumulates_multi_word_desc(self):
+        """كما يصل من تيليجرام (مقسم على المسافات): لا تُفقد كلمات الوصف."""
+        parsed = _parse_optional_args(
+            ["ILS", "محمد", "منحة", "شهر", "رمضان"]
+        )
+        assert parsed == {
+            "currency": "ILS",
+            "person": "محمد",
+            "desc": "منحة شهر رمضان",
+        }
+        parsed = _parse_optional_args(["ILS", "محمد"])
+        assert parsed["desc"] is None
+
+    def test_parse_optional_args_defaults_prepend_desc(self):
+        parsed = _parse_optional_args(
+            ["ILS", "رمضان"],
+            defaults={"person": "أحمد", "desc": "منحة"},
+        )
+        assert parsed == {
+            "currency": "ILS",
+            "person": "أحمد",
+            "desc": "منحة رمضان",
+        }
+
     def test_parse_optional_args_arabic_person_not_currency(self):
         # يصل فقط ما بعد المبلغ (args[2:]) — كما في _cmd_add
         for name in ("علي", "خالد", "سامر", "أحمد", "هدى"):
