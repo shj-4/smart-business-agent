@@ -12,6 +12,15 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.normalize import normalize_priority, normalize_recurrence
+from app.validation import (
+    clamp_amount,
+    clean_free_text,
+    clean_person,
+    normalize_currency,
+    sanitize_analysis_result,
+    valid_intent,
+    valid_record_type,
+)
 
 
 def _to_str_or_none(value) -> str | None:
@@ -111,6 +120,41 @@ class AnalysisResultSchema(BaseModel):
     def _strs(cls, v):
         return _to_str_or_none(v)
 
+    @field_validator("intent", mode="after")
+    @classmethod
+    def _intent(cls, v):
+        return v if valid_intent(v) else None
+
+    @field_validator("type", mode="after")
+    @classmethod
+    def _type(cls, v):
+        return v if valid_record_type(v) else None
+
+    @field_validator("currency", mode="after")
+    @classmethod
+    def _currency(cls, v):
+        return normalize_currency(v)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _amt(cls, v):
+        return _coerce_amount(v)
+
+    @field_validator("amount", mode="after")
+    @classmethod
+    def _amt_bounds(cls, v):
+        return clamp_amount(v)
+
+    @field_validator("person", mode="after")
+    @classmethod
+    def _person(cls, v):
+        return clean_person(v)
+
+    @field_validator("description", "category", mode="after")
+    @classmethod
+    def _free_text(cls, v):
+        return clean_free_text(v)
+
     @field_validator("priority", mode="before")
     @classmethod
     def _priority(cls, v):
@@ -127,11 +171,6 @@ class AnalysisResultSchema(BaseModel):
             return None
         return normalize_recurrence(s)
 
-    @field_validator("amount", mode="before")
-    @classmethod
-    def _amt(cls, v):
-        return _coerce_amount(v)
-
     @field_validator("missing_fields", mode="before")
     @classmethod
     def _miss(cls, v):
@@ -146,13 +185,18 @@ class AnalysisResultSchema(BaseModel):
 
 
 def normalize_analysis(data) -> dict:
-    """يمرّر البيانات الخام عبر المخطط ويعيد dict موحّدًا (لا يرمي استثناءات)."""
+    """يمرّر البيانات الخام عبر المخطط ويعيد dict موحّدًا (لا يرمي استثناءات).
+
+    يُطبَّق بعد المخطط تنظيف إضافي (sanitize_analysis_result) كخط دفاع ثانٍ:
+    حتى لو مرّ بعضه من الحقول، تُصرَّف القيم المخالفة للقوائم البيضاء وحدود
+    المدى قبل تسليم النتيجة لأي مستهلك.
+    """
     if not isinstance(data, dict):
         return {"intent": "unknown", "error": "invalid_structure", "raw": str(data)}
 
     try:
         model = AnalysisResultSchema.model_validate(data)
-        return model.model_dump()
+        return sanitize_analysis_result(model.model_dump())
     except ValidationError:
         # فشل التحقق بالكامل → بنية آمنة بدل إسقاط المعالجة
         return {"intent": "unknown", "error": "validation_failed", "raw": str(data)}

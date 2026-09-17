@@ -288,6 +288,11 @@ def interpret_arabic_date(text: str, *, now=None) -> str | None:
     from app.database.crud import parse_date_local
     from app.timeutil import now_local, to_local_naive
 
+    # حارس حقن البرومبت: نص موعد يحاول إعادة برمجة المساعد لا يُرسَل للتفسير
+    if has_injection_pattern(text):
+        logger.info("رُصدت محاولة حقن برومبت في نص الموعد — رُفض التفسير: %.60s", text)
+        return None
+
     ref = now or now_local()
     contents = (
         f"التاريخ المرجعي اليوم (بالتوقيت المحلي): {ref.strftime('%Y-%m-%d %H:%M')}\n"

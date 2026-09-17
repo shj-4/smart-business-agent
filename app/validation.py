@@ -86,19 +86,30 @@ def clamp_amount(amount) -> float | None:
 
 
 def normalize_currency(value) -> str | None:
-    """يقرّب صيغة عملة إلى رمز ISO uppercase إن كان معروفًا، وإلا None."""
+    """يقرّب صيغة عملة إلى رمز ISO مقيّد بالقائمة البيضاء (ILS لشيكل...)."""
     if value is None:
         return None
-    code = str(value).strip().upper().replace(" ", "")
-    return code if code in KNOWN_CURRENCIES else None
+    raw = str(value).strip()
+    code = raw.upper().replace(" ", "")
+    if code in KNOWN_CURRENCIES:
+        return code
+    # الأسماء المتداولة (شيكل/دولار/دينار...) تُطابَق عبر خريطة المصطلحات الموجودة
+    from app.database.crud.common import normalize_currency as _normalize_crud
+
+    mapped = _normalize_crud(raw)
+    if mapped and mapped.upper() in KNOWN_CURRENCIES:
+        return mapped.upper()
+    return None
 
 
 def valid_record_type(value) -> bool:
-    return value in RECORD_TYPES
+    """نوع قابل للتسجيل أو القيمة الحارسة «unknown» (توجّه إلى رسالة التراجع)."""
+    return value in RECORD_TYPES or value == "unknown"
 
 
 def valid_intent(value) -> bool:
-    return value in INTENT_TYPES
+    """نية توجّه (record/query/chat) أو القيمة الحارسة «unknown» (مسار آمن)."""
+    return value in INTENT_TYPES or value == "unknown"
 
 
 def sanitize_analysis_result(result: dict) -> dict:

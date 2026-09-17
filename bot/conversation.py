@@ -432,6 +432,13 @@ def _do_save(
     raw_message: str | None,
     telegram_message_id: int | None = None,
 ) -> str | None:
+    from app.validation import sanitize_analysis_result
+
+    # بوابة أمان أخيرة قبل الحفظ: تُصرَّف أي قيمة خارجة عن القوائم البيضاء/حدود
+    # المدى (حتى لو أتت من تعديل حقل أو زر) — القيمة المخالفة تصبح None فيُطلب
+    # إكمالها من المستخدم بدل حفظ بيانات مشوّهة.
+    result = sanitize_analysis_result(dict(result))
+
     data_type = result.get("type")
 
     if not can_save_record(result):
@@ -514,6 +521,12 @@ def ask_for_field_prompt(data_type: str, field: str) -> str:
 
 
 def fill_field_from_reply(partial: dict, reply_result: dict, field: str) -> None:
+    from app.validation import sanitize_analysis_result
+
+    # القيمة القادمة من تحليل ردّ المستخدم قد تحمل بيانات خارجة عن الحدود
+    # (مبالغ فاحشة/أسماء طويلة/عملات مجهولة) — تُقيَّد قبل دمجها في السجل.
+    reply_result = sanitize_analysis_result(dict(reply_result))
+
     if field == "amount":
         if reply_result.get("amount") is not None:
             partial["amount"] = reply_result["amount"]
@@ -682,6 +695,12 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if seed and result.get("intent") == "record":
         result["type"] = seed
+
+    # إعادة تحقق بعد كل مسار (إصلاح/تعديل/زر): نوع غير معروف = لا يُحفظ
+    from app.validation import valid_record_type
+
+    if result.get("type") and not valid_record_type(result.get("type")):
+        result["type"] = None
 
     intent = result.get("intent")
 
