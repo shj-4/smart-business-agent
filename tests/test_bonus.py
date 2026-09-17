@@ -496,6 +496,60 @@ class TestBonusWorkspaceSharing:
         assert list_loyalty_accounts(db_session, USER_A)[0].points_balance == 0
 
 
+# ---------- مسار الأمر الفعلي (_cmd_plan) ----------
+
+
+class TestBonusPlanCommandPath:
+    def _run_cmd_plan(self, db_session, args):
+        import asyncio
+        from unittest.mock import patch
+
+        from sqlalchemy.orm import sessionmaker
+
+        sent: list[str] = []
+
+        class _Msg:
+            async def reply_text(self, text, *a, **k):
+                sent.append(text)
+
+        class _Upd:
+            def __init__(self):
+                self.message = _Msg()
+
+        from bot.bonus import _cmd_plan
+
+        cmd = _cmd_plan
+        fac = sessionmaker(bind=db_session.get_bind())
+        with patch("bot.bonus.SessionLocal", fac):
+            asyncio.run(cmd(_Upd(), USER_A, args))
+        return sent
+
+    def test_plan_add_sets_initial_next_due_at(self, db_session):
+        """الخطة المنشأة عبر /bonus plan إضافة يجب أن تُستحق فورًا (next_due_at حاضر)."""
+        self._run_cmd_plan(db_session, ["add", "محمد", "1000", "monthly"])
+        plans = list_employee_bonus_plans(db_session, USER_A)
+        assert len(plans) == 1
+        assert plans[0].person == "محمد"
+        assert plans[0].next_due_at is not None
+        assert plans[0].next_due_at <= now_utc()
+
+    def test_plan_add_appears_in_due_plans(self, db_session):
+        """بعد إنشاء الخطة عبر الأمر لا بد أن تُلتقط بالفحص التلقائي وتُمنح."""
+        self._run_cmd_plan(db_session, ["add", "سامر", "500", "monthly"])
+        due = due_employee_bonus_plans(db_session)
+        assert any(p.person == "سامر" for p in due)
+
+    def test_plan_add_one_off_is_due_immediately(self, db_session):
+        self._run_cmd_plan(db_session, ["add", "خالد", "300", "مرة واحدة"])
+        due = due_employee_bonus_plans(db_session)
+        assert any(p.person == "خالد" for p in due)
+
+    def test_plan_add_quarterly_is_due_immediately(self, db_session):
+        self._run_cmd_plan(db_session, ["add", "أحمد", "900", "ربع سنوي"])
+        due = due_employee_bonus_plans(db_session)
+        assert any(p.person == "أحمد" for p in due)
+
+
 # ---------- نظرة شاملة ----------
 
 

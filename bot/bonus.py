@@ -461,7 +461,16 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
             except InvalidOperation:
                 pass
         from app.database.crud import create_employee_bonus_plan
-        plan = await asyncio.to_thread(lambda: _db_call(lambda db: create_employee_bonus_plan(db, uid, person, amount, frequency=freq, monthly_cap=cap)))
+        from app.timeutil import now_utc
+
+        plan = await asyncio.to_thread(
+            lambda: _db_call(
+                lambda db: create_employee_bonus_plan(
+                    db, uid, person, amount,
+                    frequency=freq, monthly_cap=cap, next_due_at=now_utc(),
+                )
+            )
+        )
         if plan:
             freq_label = PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)
             cap_txt = _fmt_amount(plan.monthly_cap, plan.currency) if plan.monthly_cap else "—"
