@@ -32,6 +32,7 @@ from app.database.crud import (
     list_bonus_transactions,
     list_employee_bonus_plans,
     list_loyalty_accounts,
+    loyalty_account_get,
     loyalty_add_points,
     loyalty_config_enable,
     loyalty_config_get,
@@ -414,6 +415,85 @@ class TestLoyalty:
         loyalty_add_points(db_session, USER_A, "أحمد", 50)
         names = [a.person for a in list_loyalty_accounts(db_session, USER_A)]
         assert names == ["أحمد", "خالد"]
+
+
+# ---------- مشاركة المساحة (workspace) ----------
+
+
+def _share_workspace(db, owner=USER_A, member=USER_B):
+    from app.database.crud import (
+        accept_workspace_invite,
+        create_workspace,
+        invite_to_workspace,
+    )
+
+    create_workspace(db, owner)
+    invite_to_workspace(db, owner, member)
+    accept_workspace_invite(db, member, owner)
+
+
+class TestBonusWorkspaceSharing:
+    def test_events_visible_and_controllable_across_workspace(self, db_session):
+        _share_workspace(db_session)
+        ev = create_bonus_event(db_session, USER_A, "عروض")
+        assert [e.id for e in list_bonus_events(db_session, USER_B)] == [ev.id]
+        updated = set_bonus_event_status(db_session, USER_B, ev.id, "active")
+        assert updated.status == "active"
+        assert end_bonus_event(db_session, USER_B, ev.id).status == "ended"
+
+    def test_employee_plans_shared_across_workspace(self, db_session):
+        _share_workspace(db_session)
+        create_employee_bonus_plan(db_session, USER_A, "محمد", "100")
+        assert [p.person for p in list_employee_bonus_plans(db_session, USER_B)] == ["محمد"]
+        plan = create_employee_bonus_plan(db_session, USER_A, "سامر", "200")
+        assert disable_employee_bonus_plan(db_session, USER_B, plan.id).enabled is False
+
+    def test_loyalty_config_shared_and_single_row(self, db_session):
+        from app.database.models import LoyaltyConfig
+
+        _share_workspace(db_session)
+        cfg = loyalty_config_enable(db_session, USER_A, points_rate=3)
+        assert cfg.points_rate == Decimal("3")
+        assert loyalty_config_get(db_session, USER_B) is not None
+        # تفعيل من عضو ثانٍ يحدّث نفس صف المالك (لا صف جديد — قيد uq_loyalty_user)
+        again = loyalty_config_enable(db_session, USER_B, min_redeem_points=10)
+        assert again.min_redeem_points == 10
+        assert loyalty_config_get(db_session, USER_A).min_redeem_points == 10
+        assert db_session.query(LoyaltyConfig).count() == 1
+
+    def test_loyalty_account_single_row_across_workspace(self, db_session):
+        from app.database.models import LoyaltyAccount
+
+        _share_workspace(db_session)
+        loyalty_add_points(db_session, USER_A, "أحمد", 30)
+        loyalty_add_points(db_session, USER_B, "أحمد", 20)
+        account = loyalty_account_get(db_session, USER_B, "أحمد")
+        assert account.points_balance == 50
+        assert db_session.query(LoyaltyAccount).filter_by(person="أحمد").count() == 1
+        assert account.telegram_user_id == USER_A  # مُثبَّت على صف المالك
+
+    def test_accrue_for_member_sale_uses_workspace_config(self, db_session):
+        _share_workspace(db_session)
+        loyalty_config_enable(db_session, USER_A, points_rate=2)
+        # العضو يسجّل المبيع — tx.telegram_user_id = USER_B
+        create_transaction(
+            db_session, USER_B,
+            {"type": "income", "amount": 100, "currency": "ILS", "person": "زبون"},
+            raw_message="مبيع زبون",
+            telegram_message_id=50,
+        )
+        acc = list_loyalty_accounts(db_session, USER_A)[0]
+        assert acc.points_balance == 200
+        assert list_loyalty_accounts(db_session, USER_B)[0].points_balance == 200
+
+    def test_redeem_from_member_works(self, db_session):
+        _share_workspace(db_session)
+        loyalty_config_enable(db_session, USER_A, points_rate=1, points_value=0.01)
+        loyalty_add_points(db_session, USER_A, "أحمد", 100)
+        res = loyalty_redeem_points(db_session, USER_B, "أحمد", 100)
+        assert res["ok"] is True
+        assert res["value"] == Decimal("1.00")
+        assert list_loyalty_accounts(db_session, USER_A)[0].points_balance == 0
 
 
 # ---------- نظرة شاملة ----------

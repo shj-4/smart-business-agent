@@ -210,8 +210,11 @@ def create_bonus_event(
 def list_bonus_events(
     db: Session, telegram_user_id: int, status: str | None = None
 ) -> list[BonusEvent]:
-    """فعاليات المستخدم (أحدث أولًا) مع فلترة اختيارية بالحالة."""
-    q = db.query(BonusEvent).filter(BonusEvent.telegram_user_id == telegram_user_id)
+    """فعاليات المستخدم (أحدث أولًا) — عبر مساحة العمل — مع فلترة اختيارية بالحالة."""
+    from app.database.crud import accessible_user_ids
+
+    uids = accessible_user_ids(db, telegram_user_id)
+    q = db.query(BonusEvent).filter(BonusEvent.telegram_user_id.in_(uids))
     if status:
         q = q.filter(BonusEvent.status == status)
     return q.order_by(BonusEvent.id.desc()).all()
@@ -220,12 +223,15 @@ def list_bonus_events(
 def set_bonus_event_status(
     db: Session, telegram_user_id: int, event_id: int, status: str
 ) -> BonusEvent | None:
-    """يتحكم بحالة الفعالية (planned/active/ended) — يملكها المستخدم فقط."""
+    """يتحكم بحالة الفعالية (planned/active/ended) — يملكها أعضاء المساحة."""
+    from app.database.crud import accessible_user_ids
+
     if status not in EVENT_STATUS_LABELS:
         return None
+    uids = accessible_user_ids(db, telegram_user_id)
     event = (
         db.query(BonusEvent)
-        .filter(BonusEvent.id == event_id, BonusEvent.telegram_user_id == telegram_user_id)
+        .filter(BonusEvent.id == event_id, BonusEvent.telegram_user_id.in_(uids))
         .first()
     )
     if event is None:
@@ -363,10 +369,11 @@ def create_employee_bonus_plan(
 def list_employee_bonus_plans(
     db: Session, telegram_user_id: int, include_disabled: bool = False
 ) -> list[EmployeeBonusPlan]:
-    """خطط مكافآت الموظفين (المفعّلة أولًا)."""
-    q = db.query(EmployeeBonusPlan).filter(
-        EmployeeBonusPlan.telegram_user_id == telegram_user_id
-    )
+    """خطط مكافآت الموظفين (المفعّلة أولًا) — عبر مساحة العمل."""
+    from app.database.crud import accessible_user_ids
+
+    uids = accessible_user_ids(db, telegram_user_id)
+    q = db.query(EmployeeBonusPlan).filter(EmployeeBonusPlan.telegram_user_id.in_(uids))
     if not include_disabled:
         q = q.filter(EmployeeBonusPlan.enabled.is_(True))
     return q.order_by(EmployeeBonusPlan.next_due_at.asc()).all()
@@ -376,9 +383,12 @@ def disable_employee_bonus_plan(
     db: Session, telegram_user_id: int, plan_id: int
 ) -> EmployeeBonusPlan | None:
     """يعطّل خطة مكافأة موظف (لا حذف — لحفظ السجل التاريخي)."""
+    from app.database.crud import accessible_user_ids
+
+    uids = accessible_user_ids(db, telegram_user_id)
     plan = (
         db.query(EmployeeBonusPlan)
-        .filter(EmployeeBonusPlan.id == plan_id, EmployeeBonusPlan.telegram_user_id == telegram_user_id)
+        .filter(EmployeeBonusPlan.id == plan_id, EmployeeBonusPlan.telegram_user_id.in_(uids))
         .first()
     )
     if plan is None:
@@ -482,10 +492,35 @@ def employee_bonus_overview(db: Session, telegram_user_id: int) -> dict:
 # ---------- 4) نقاط الولاء ----------
 
 
+def _workspace_anchor(db: Session, telegram_user_id: int) -> int:
+    """مرتكز مساحة العمل (معرّف المالك) — تُثبَّت عنده سجلات النقاط المشتركة.
+
+    في المساحة المشتركة تكون سجلات LoyaltyConfig/Account لكل شخص واحدة
+    (قيدا uq_loyalty_user و uq_loyalty_user_person) ويجب أن تُنسب إلى مالك
+    واحد حتى لا تتكاثر بإنشاء أكثر من عضو. فرديًّا فهو المستخدم نفسه.
+    """
+    from app.database.crud import workspace_for_user
+
+    return workspace_for_user(db, telegram_user_id) or telegram_user_id
+
+
 def loyalty_config_get(db: Session, telegram_user_id: int) -> LoyaltyConfig | None:
+    """إعدادات نقاط الولاء عبر مساحة العمل (تفضّل صف المالك إن وُجد)."""
+    from app.database.crud import accessible_user_ids
+
+    anchor = _workspace_anchor(db, telegram_user_id)
+    cfg = (
+        db.query(LoyaltyConfig)
+        .filter(LoyaltyConfig.telegram_user_id == anchor)
+        .first()
+    )
+    if cfg is not None:
+        return cfg
+    uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyConfig)
-        .filter(LoyaltyConfig.telegram_user_id == telegram_user_id)
+        .filter(LoyaltyConfig.telegram_user_id.in_(uids))
+        .order_by(LoyaltyConfig.id.asc())
         .first()
     )
 
@@ -497,11 +532,12 @@ def loyalty_config_enable(
     points_value=None,
     min_redeem_points: int | None = None,
 ) -> LoyaltyConfig:
-    """يفعّل نقاط الولاء (إنشاء/تحديث الإعدادات)."""
+    """يفعّل نقاط الولاء (إنشاء/تحديث الإعدادات) على مرتكز المساحة."""
+    anchor = _workspace_anchor(db, telegram_user_id)
     cfg = loyalty_config_get(db, telegram_user_id)
     if cfg is None:
         cfg = LoyaltyConfig(
-            telegram_user_id=telegram_user_id,
+            telegram_user_id=anchor,
             points_rate=Decimal(str(points_rate if points_rate is not None else 1)),
             points_value=Decimal(str(points_value if points_value is not None else 0.01)),
             min_redeem_points=int(min_redeem_points if min_redeem_points is not None else 0),
@@ -554,17 +590,30 @@ def disable_loyalty(db: Session, telegram_user_id: int) -> bool:
 
 
 def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> LoyaltyAccount | None:
-    from app.database.crud import _clean_person
+    from app.database.crud import _clean_person, accessible_user_ids
 
     person = _clean_person(person)
     if not person:
         return None
+    anchor = _workspace_anchor(db, telegram_user_id)
+    account = (
+        db.query(LoyaltyAccount)
+        .filter(
+            LoyaltyAccount.telegram_user_id == anchor,
+            LoyaltyAccount.person == person,
+        )
+        .first()
+    )
+    if account is not None:
+        return account
+    uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
         .filter(
-            LoyaltyAccount.telegram_user_id == telegram_user_id,
+            LoyaltyAccount.telegram_user_id.in_(uids),
             LoyaltyAccount.person == person,
         )
+        .order_by(LoyaltyAccount.id.asc())
         .first()
     )
 
@@ -573,7 +622,7 @@ def _loyalty_account_create(db: Session, telegram_user_id: int, person: str) -> 
     from app.database.crud import _clean_person
 
     account = LoyaltyAccount(
-        telegram_user_id=telegram_user_id,
+        telegram_user_id=_workspace_anchor(db, telegram_user_id),
         person=_clean_person(person),
         points_balance=0,
         total_earned=0,
@@ -670,9 +719,12 @@ def loyalty_redeem_points(
 def list_loyalty_accounts(
     db: Session, telegram_user_id: int, limit: int = 20
 ) -> list[LoyaltyAccount]:
+    from app.database.crud import accessible_user_ids
+
+    uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
-        .filter(LoyaltyAccount.telegram_user_id == telegram_user_id)
+        .filter(LoyaltyAccount.telegram_user_id.in_(uids))
         .order_by(LoyaltyAccount.points_balance.desc())
         .limit(limit)
         .all()

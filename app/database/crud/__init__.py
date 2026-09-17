@@ -26,6 +26,7 @@ from .bonus import (
     _category_like,
     _loyalty_account_create,
     _next_due,
+    _workspace_anchor,
     accrue_loyalty_for_transaction,
     advance_employee_bonus_due,
     bonus_overview,
