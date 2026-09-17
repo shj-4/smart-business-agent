@@ -20,7 +20,6 @@ CURRENCY_ALIASES = {
     "شيقلا": "ILS",
     "₪": "ILS",
     "nis": "ILS",
-    "₪:": "ILS",
     "shekel": "ILS",
     "shekels": "ILS",
     "ils": "ILS",
@@ -157,7 +156,9 @@ def get_or_create_user_pref(db: Session, telegram_user_id: int):
 
     pref = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
     if pref is None:
-        pref = UserPref(telegram_user_id=telegram_user_id)
+        from app.timeutil import now_utc
+
+        pref = UserPref(telegram_user_id=telegram_user_id, updated_at=now_utc())
         db.add(pref)
         db.commit()
         db.refresh(pref)

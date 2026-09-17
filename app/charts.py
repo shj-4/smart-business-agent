@@ -38,9 +38,9 @@ def _convert_month_currency_groups(
             if amount is None:
                 continue
             c = normalize_currency(currency) or currency
-            totals[c] = Decimal(str(amount))
+            totals[c] = totals.get(c, Decimal("0")) + Decimal(str(amount))
             if stored and (stored.get(currency) or {}).get(kind) is not None:
-                stored_kind[c] = Decimal(str(stored[currency][kind]))
+                stored_kind[c] = stored_kind.get(c, Decimal("0")) + Decimal(str(stored[currency][kind]))
         conv = convert_totals_to_base(totals, base_currency, stored=stored_kind or None)
         return conv.get("total")
 

@@ -1426,6 +1426,19 @@ class TestStoredBaseAmount:
         assert tx.amount_in_base_currency is None
         assert tx.base_currency_at_creation is None
 
+    def test_missing_currency_defaults_to_base(self, db_session):
+        """عملة مفقودة كليًا = عملة الأساس (مثل invoices) — لا صندوق '' يسمم الإجمالي."""
+        from app.config import settings
+
+        base = (settings.base_currency or "ILS").upper()
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "description": "بلا عملة"},
+            raw_message="عملية بلا عملة",
+        )
+        assert tx.currency == base
+
     def test_run_query_unified_total_uses_stored(self, db_session, monkeypatch):
         """unified_total في run_query يجمع المبالغ المخزّنة ولا يلمس الشبكة."""
         monkeypatch.setattr(

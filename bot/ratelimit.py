@@ -40,13 +40,16 @@ def _prune_rate_buckets(now: float) -> None:
     _global_stamps[:] = [t for t in _global_stamps if t > global_start]
 
 
-def _global_limit_hit(now: float) -> bool:
-    """حد كلي (لكل العملية) ضمن نافذة زمنية — حماية من إغراق شامل."""
+def _global_limit_reached(now: float) -> bool:
+    """صحيح إذا بلغنا الحد الكلي (لكل العملية) ضمن النافذة — حماية من إغراق شامل.
+
+    لا يسجّل الطابع هنا؛ التسجيل يتم فقط عند قبول الرسالة (الفحص حتى لا يُحصي
+    المحجوبون ضمن ميزانية الإغراق العالمية فيُعتبرون مقبولين).
+    """
     window_start = now - GLOBAL_RATE_LIMIT_WINDOW
     _global_stamps[:] = [t for t in _global_stamps if t > window_start]
     if len(_global_stamps) >= GLOBAL_RATE_LIMIT_MAX:
         return True
-    _global_stamps.append(now)
     return False
 
 
@@ -60,7 +63,7 @@ def is_rate_limited(user_id: int) -> bool:
         ):
             _prune_rate_buckets(now)
             _last_prune = now
-        if _global_limit_hit(now):
+        if _global_limit_reached(now):
             return True
         window_start = now - RATE_LIMIT_WINDOW
         stamps = [t for t in _rate_buckets.get(user_id, []) if t > window_start]
@@ -69,6 +72,7 @@ def is_rate_limited(user_id: int) -> bool:
             return True
         stamps.append(now)
         _rate_buckets[user_id] = stamps
+        _global_stamps.append(now)
         return False
 
 

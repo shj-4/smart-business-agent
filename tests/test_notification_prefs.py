@@ -49,6 +49,17 @@ class TestGetOrCreate:
         assert pref is not None
         assert pref.telegram_user_id == 333
 
+    def test_created_row_has_updated_at(self, db_session):
+        pref = get_or_create_user_pref(db_session, 345)
+        assert pref.updated_at is not None
+
+    def test_set_lang_created_row_has_updated_at(self, db_session):
+        from app.database.crud import set_user_lang
+
+        set_user_lang(db_session, 346, "en")
+        pref = get_or_create_user_pref(db_session, 346)
+        assert pref.updated_at is not None
+
     def test_returns_same_row(self, db_session):
         first = get_or_create_user_pref(db_session, 444)
         second = get_or_create_user_pref(db_session, 444)

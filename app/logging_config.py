@@ -28,10 +28,10 @@ BACKUP_COUNT = 5  # يحتفظ بـ 5 ملفات قديمة (app.log.1 .. app.lo
 # أنماط أسرار تُقصّ من أي رسالة سجل قبل كتابتها — لا تُكتَب نصوص رسائل
 # Telegram الحساسة ولا المفاتيح أبدًا (تُستبدل بعلامة حجب).
 _SECRET_PATTERNS = (
-    re.compile(r"(TELEGRAM_BOT_TOKEN|BOT_TOKEN|API_KEY|APIKEY|GEMINI_API_KEY)[=:]\s*\S+", re.IGNORECASE),
-    re.compile(r"(ENCRYPTION_KEY)[=:]\s*\S+", re.IGNORECASE),
-    re.compile(r"(DASHBOARD_PASSWORD|PASSWORD)[=:]\s*\S+", re.IGNORECASE),
-    re.compile(r"(Authorization|authorization)[=:]\s*(?:Basic|Bearer|Token)\s+\S+"),
+    re.compile(r"((?:TELEGRAM_BOT_TOKEN|BOT_TOKEN|API_KEY|APIKEY|GEMINI_API_KEY)[=:]\s*)\S+", re.IGNORECASE),
+    re.compile(r"(ENCRYPTION_KEY[=:]\s*)\S+", re.IGNORECASE),
+    re.compile(r"((?:DASHBOARD_PASSWORD|PASSWORD)[=:]\s*)\S+", re.IGNORECASE),
+    re.compile(r"(Authorization[=:]\s*(?:Basic|Bearer|Token)\s+)\S+", re.IGNORECASE),
     re.compile(r"(token[=:]\s*)\S+", re.IGNORECASE),
 )
 
@@ -40,7 +40,7 @@ def _scrub(text: str) -> str:
     """يحجب الأسرار المعروفة في نص السجل (بند مركزي يمر عليه كل سطر)."""
     out = text
     for pat in _SECRET_PATTERNS:
-        out = pat.sub(r"\1=***REDACTED***", out)
+        out = pat.sub(r"\1***REDACTED***", out)
     return out
 
 

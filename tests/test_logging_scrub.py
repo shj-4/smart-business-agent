@@ -74,3 +74,10 @@ def test_json_formatter_redacts_args():
     output = buffer.getvalue()
     assert "super-secret-enc" not in output
     assert "***REDACTED***" in output
+
+
+def test_scrub_does_not_double_separators():
+    """الحجب يحافظ على الفاصل الواحد — لا يتحول `token=` إلى `token==`."""
+    assert _scrub("token=abc123") == "token=***REDACTED***"
+    assert _scrub("BOT_TOKEN: secret") == "BOT_TOKEN: ***REDACTED***"
+    assert "token==***" not in _scrub("token=abc123")

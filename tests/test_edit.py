@@ -110,6 +110,51 @@ class TestUpdateTransaction:
         updated = update_transaction(db_session, txn, {"currency": "دولار"})
         assert updated.currency == "USD"
 
+    def test_missing_currency_defaults_to_base(self, db_session):
+        from app.config import settings
+
+        base = (settings.base_currency or "ILS").upper()
+        txn, *_ = _seed_all(db_session)
+        updated = update_transaction(db_session, txn, {"currency": ""})
+        assert updated.currency == base
+
+    def test_edit_recomputes_stored_base_amount(self, db_session, monkeypatch):
+        """تعديل المبلغ يُعيد تثبيت المبلغ بعملة الأساس بدل إبقاء القديم (خطأ)."""
+        from decimal import Decimal
+
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("7.5")},
+        )
+        txn = create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "description": "مواد"},
+            raw_message="دُفع دفعة",
+        )
+        assert txn.amount_in_base_currency == Decimal("750.00")
+        updated = update_transaction(db_session, txn, {"amount": "200"})
+        assert updated.amount_in_base_currency == Decimal("1500.00")
+        assert updated.base_currency_at_creation == "ILS"
+
+    def test_edit_currency_back_to_base_clears_stored_amount(self, db_session, monkeypatch):
+        from decimal import Decimal
+
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("7.5")},
+        )
+        txn = create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "description": "مواد"},
+            raw_message="دُفع دفعة",
+        )
+        updated = update_transaction(db_session, txn, {"currency": "ILS"})
+        assert updated.currency == "ILS"
+        assert updated.amount_in_base_currency is None
+        assert updated.base_currency_at_creation is None
+
     def test_ignores_unknown_fields(self, db_session):
         txn, *_ = _seed_all(db_session)
         updated = update_transaction(db_session, txn, {"nonexistent_field": "x"})

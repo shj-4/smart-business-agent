@@ -46,7 +46,9 @@ def create_transaction(
         return None
 
     amount = _to_decimal(data.get("amount"))
-    currency = normalize_currency(data.get("currency"))
+    # عملة مفقودة تمامًا = عملة الأساس (مثلما تفعل invoices) — دون ذلك تُتسمم
+    # الإجماليات الموحّدة كاملة بصندوق "" غير قابل للتحويل.
+    currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper() or None
     base_amount, base_at = _best_effort_base_amount(amount, currency)
 
     vat_rate = _to_decimal(data.get("vat_rate"))
@@ -247,8 +249,11 @@ def get_comparison_ranges(period: str) -> dict:
     if period == "this_year":
         cur_start = local_now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
         prev_start = cur_start.replace(year=cur_start.year - 1)
-        days_in_year = calendar.monthrange(local_now.year, 12)[1]  # 365 أو 366
-        return _payload(cur_start, prev_start, days_in_year * 86400)
+        # طول السنة الفعلي بالثواني — monthrange(year, 12)[1] يُعيد 31 (أيام ديسمبر)
+        # وكان يجعل partial=False بعد أواخر يناير فيبقى تحذير "السنة الجارية" ميتًا.
+        next_jan = cur_start.replace(year=cur_start.year + 1)
+        total_seconds = (next_jan - cur_start).total_seconds()
+        return _payload(cur_start, prev_start, total_seconds)
 
     # all_time أو غير معروف: لا مقارنة
     return None
@@ -822,13 +827,23 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
             if key == "amount":
                 row.amount = _to_decimal(fields[key])
             elif key == "currency":
-                row.currency = normalize_currency(fields[key]) or fields[key]
+                row.currency = (
+                    normalize_currency(fields[key])
+                    or (settings.base_currency or "").upper()
+                    or fields[key]
+                )
             elif key == "category":
                 row.category = _clean_text(fields[key])
             elif key == "person":
                 row.person = _clean_person(fields[key])
             elif key == "description":
                 row.description = _clean_text(fields[key])
+    if "amount" in fields or "currency" in fields:
+        # إعادة تثبيت سعر الصرف عند التسجيل: التعديل السابق كان يُبقي المبلغ
+        # القديم بعملة الأساس (خاطئ بعد تغيير المبلغ أو العملة).
+        base_amount, base_at = _best_effort_base_amount(row.amount, row.currency)
+        row.amount_in_base_currency = base_amount
+        row.base_currency_at_creation = base_at
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)

@@ -116,6 +116,14 @@ class TestComparisonRanges:
         assert ranges["partial"] is False
         assert ranges["elapsed_pct"] == 100
 
+    def test_this_year_partial_mid_year(self, monkeypatch):
+        """في 1 فبراير تبقى السنة جارية (31/365 ≈ 8%) — كان الخلل يحسب 31 يومًا
+        فيجعل partial=False اعتبارًا من أواخر يناير فيموت تحذير «السنة الجارية»."""
+        _freeze_now(monkeypatch, datetime(2026, 2, 1, 12, 0))
+        ranges = get_comparison_ranges("this_year")
+        assert ranges["partial"] is True
+        assert 5 <= ranges["elapsed_pct"] < 12
+
     def test_all_time_returns_none(self):
         assert get_comparison_ranges("all_time") is None
 

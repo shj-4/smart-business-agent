@@ -643,6 +643,7 @@ async def dashboard(
         "net": _fmt(income - expense),
         "net_cls": "green" if income >= expense else "red",
     }
+    summary_partial = bool(summary.get("partial"))
 
     chart_url = None
     try:
@@ -664,6 +665,7 @@ async def dashboard(
             "chart_url": chart_url,
             "counts": counts,
             "month_cards": month_cards,
+            "summary_partial": summary_partial,
             "top_categories": _category_tops(db, base),
             "top_parties": _party_rows(db, base)[:6],
             "transactions": _recent_transactions(db, limit=10),

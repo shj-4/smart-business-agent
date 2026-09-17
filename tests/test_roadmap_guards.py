@@ -58,6 +58,15 @@ class TestGlobalRateLimit:
         results = [ratelimit.is_rate_limited(999) for _ in range(5)]
         assert results == [False, False, False, True, True]
 
+    def test_blocked_users_do_not_count_to_global_budget(self, monkeypatch):
+        """المحجوب بنصيبه الشخصي لا يضيف طابعًا إلى ميزانية الإغراق الكلية."""
+        monkeypatch.setattr(ratelimit, "RATE_LIMIT_MAX", 1)
+        monkeypatch.setattr(ratelimit, "GLOBAL_RATE_LIMIT_MAX", 10_000)
+        monkeypatch.setattr(ratelimit, "_rate_buckets", {})
+        monkeypatch.setattr(ratelimit, "_global_stamps", [])
+        [ratelimit.is_rate_limited(1234) for _ in range(4)]
+        assert len(ratelimit._global_stamps) == 1
+
 
 class TestPromptLoader:
     def test_loads_existing_file(self):

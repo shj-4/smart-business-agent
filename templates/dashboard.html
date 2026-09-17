@@ -10,6 +10,11 @@
     </span>
 </div>
 
+{% if summary_partial %}
+<div class="alert warn">⚠️ لا يمكن توحيد بعض العملات هذا الشهر (عملة غير معروفة/سعر غير متوفر) —
+    الأرقام المعروضة جزئية.</div>
+{% endif %}
+
 <div class="cards">
     <div class="card blue"><div class="num">{{ counts.transactions }}</div><div class="label">عدد العمليات</div></div>
     <div class="card red"><div class="num">{{ month_cards.expense }}</div><div class="label">مصروفات الشهر</div></div>

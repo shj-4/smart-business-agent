@@ -222,3 +222,59 @@ class TestCircuitBreaker:
         exchange.reset_breaker()
         assert exchange._BREAKER["failures"] == 0
         assert exchange.breaker_open() is False
+
+
+class TestMonthCurrencyGroupsAccumulate:
+    """صيغا عملة مُوحّدتان لنفس ISO يجب أن تُجمَّع — لا أن تحلّ الواحدة محل الأخرى."""
+
+    def _convert(self, by_currency, stored=None):
+        from app.charts import _convert_month_currency_groups
+
+        calls = []
+
+        def fake_convert(totals, base, stored=None):
+            calls.append((dict(totals), dict(stored) if stored else {}))
+            total = sum(totals.values()) if totals else None
+            return {"total": total, "partial": total is None, "base": "ILS"}
+
+        with patch("app.exchange.convert_totals_to_base", side_effect=fake_convert):
+            res = _convert_month_currency_groups(by_currency, "ILS", stored=stored)
+        return res, calls
+
+    def test_normalized_spellings_accumulate(self):
+        by_currency = {
+            "USD": {"expense": Decimal("100"), "income": Decimal("0")},
+            "دولار": {"expense": Decimal("50"), "income": Decimal("0")},
+        }
+        res, calls = self._convert(by_currency)
+        assert res["expense"] == Decimal("150")
+        assert res["income"] == Decimal("0")
+        assert res["partial"] is False
+        # أول استدعاء = المصروفات: تجمّع الصيغتين بدل تجاوز الثانية للأولى
+        assert calls[0][0] == {"USD": Decimal("150")}
+
+    def test_stored_amounts_also_accumulate(self):
+        by_currency = {
+            "USD": {"expense": Decimal("100"), "income": Decimal("0")},
+            "دولار": {"expense": Decimal("50"), "income": Decimal("0")},
+        }
+        stored = {
+            "USD": {"expense": Decimal("80"), "income": Decimal("0")},
+            "دولار": {"expense": Decimal("30"), "income": Decimal("0")},
+        }
+        res, calls = self._convert(by_currency, stored=stored)
+        # stored يُركَّز تحت USD: 80 + 30
+        assert calls[0][1] == {"USD": Decimal("110")}
+
+    def test_partial_when_either_stream_fails(self):
+        from app.charts import _convert_month_currency_groups
+
+        with patch(
+            "app.exchange.convert_totals_to_base",
+            return_value={"total": None, "partial": True, "base": "ILS"},
+        ):
+            res = _convert_month_currency_groups(
+                {"USD": {"expense": Decimal("10"), "income": Decimal("10")}}, "ILS"
+            )
+        assert res["partial"] is True
+        assert res["expense"] is None and res["income"] is None
