@@ -880,6 +880,36 @@ class TestMergePerson:
         assert merge_person(db_session, "  ", "ب") == 0
         assert merge_person(db_session, "أ", "أ") == 0
 
+    def test_merge_invalidates_cache_for_loyalty_only_user(self, db_session, monkeypatch):
+        import app.database.crud.common as common_mod
+        from app.database.crud import loyalty_add_points
+
+        cleared = []
+        monkeypatch.setattr(
+            common_mod, "clear_cache", lambda key: cleared.append(key)
+        )
+        monkeypatch.setattr(common_mod, "emit", lambda name, **kwargs: None)
+
+        loyalty_add_points(db_session, USER_B, "مدين", 10)
+        merge_person(db_session, "مدين", "دائن")
+
+        assert any(f"run_query:{USER_B}" in key for key in cleared)
+
+    def test_merge_invalidates_cache_for_bonus_plan_user(self, db_session, monkeypatch):
+        import app.database.crud.common as common_mod
+        from app.database.crud import create_employee_bonus_plan
+
+        cleared = []
+        monkeypatch.setattr(
+            common_mod, "clear_cache", lambda key: cleared.append(key)
+        )
+        monkeypatch.setattr(common_mod, "emit", lambda name, **kwargs: None)
+
+        create_employee_bonus_plan(db_session, USER_B, "مدين", "100")
+        merge_person(db_session, "مدين", "دائن")
+
+        assert any(f"run_query:{USER_B}" in key for key in cleared)
+
 
 # ---------- الحدود الائتمانية (#26) ----------
 

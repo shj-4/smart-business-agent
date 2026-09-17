@@ -66,3 +66,13 @@ class TestNoDuplication:
         from app.database.crud import budgets
 
         assert "def _current_month_key" not in inspect.getsource(budgets)
+
+    def test_frequency_names_single_source(self):
+        import bot.reminders
+        import bot.reports
+
+        for mod in (bot.reminders, bot.reports):
+            src = inspect.getsource(mod)
+            assert "FREQUENCY_NAMES = {" not in src
+            if "FREQUENCY_NAMES" in src:
+                assert "from app.formatting import FREQUENCY_NAMES" in src

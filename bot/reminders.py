@@ -454,8 +454,6 @@ def setup_credit_check(app: Application) -> None:
 
 REPORT_CHECK_INTERVAL_MINUTES = 30  # نفحص كل 30 دقيقة ونرسل عند استحقاق وقت الإرسال
 
-FREQUENCY_NAMES = {"daily": "اليومي", "weekly": "الأسبوعي", "monthly": "الشهري"}
-
 
 def _parse_deliver_time(pref: ReportPref) -> tuple[int, int]:
     from app.config import settings

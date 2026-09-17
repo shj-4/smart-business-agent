@@ -873,7 +873,16 @@ def merge_person(db: Session, source: str, target: str) -> int:
         return 0
 
     affected: set[int] = set()
-    for model in (Transaction, Note, Task, Invoice, CreditLimit, Budget):
+    for model in (
+        Transaction,
+        Note,
+        Task,
+        Invoice,
+        CreditLimit,
+        Budget,
+        LoyaltyAccount,
+        EmployeeBonusPlan,
+    ):
         for (uid,) in db.query(model.telegram_user_id).filter(model.person == source).distinct():
             affected.add(uid)
 

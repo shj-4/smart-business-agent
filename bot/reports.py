@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.database.crud import accessible_user_ids, mark_overdue_tasks
 from app.database.models import Task, Transaction
+from app.formatting import FREQUENCY_NAMES
 from app.formatting import fmt_amount as _fmt_amount
 from app.formatting import totals_line as _totals_line
 from app.timeutil import now_local, to_local_naive
@@ -25,12 +26,6 @@ FREQUENCY_PERIOD = {
     "daily": "today",
     "weekly": "this_week",
     "monthly": "this_month",
-}
-
-FREQUENCY_NAMES = {
-    "daily": "اليومي",
-    "weekly": "الأسبوعي",
-    "monthly": "الشهري",
 }
 
 # فترات العرض: لليومي "اليوم" وللأسبوعي/الشهري الفترة السابقة
