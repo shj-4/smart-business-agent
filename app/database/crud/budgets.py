@@ -151,10 +151,17 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         unified = _unified_totals_for_rows(spent_rows, settings.base_currency)
         spent = unified["total"]
         if spent is None:
-            # تعذّر تحويل كل المبالغ (لا شبكة/أسعار) — مجموع خام كتقدير أخير
-            # حتى لا تُحتسب الميزانية 0% رغم وجود مصاريف (فلا يُنبه بالتجاوز).
+            # تعذّر تحويل كل المبالغ (لا شبكة/أسعار) — لا نخلط عملات في رقم واحد
+            # (خطأ محاسبي مضلل)؛ نجمع عملة الأساس فقط كحدّ أدنى صادق حتى لا
+            # تُعدّ الميزانية 0% رغم وجود مصاريف بعملة الأساس.
+            base = (settings.base_currency or "").upper().strip()
             spent = sum(
-                (r.amount for r in spent_rows if r.amount is not None), Decimal("0")
+                (
+                    r.amount
+                    for r in spent_rows
+                    if r.amount is not None and (r.currency or "").upper() == base
+                ),
+                Decimal("0"),
             )
     spent = spent.quantize(Decimal("0.01"))
     limit = (budget.monthly_limit or Decimal("0")).quantize(Decimal("0.01"))

@@ -34,7 +34,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """esحذف الأعمدة المضافة (عكوس)."""
+    """حذف الأعمدة المضافة (عكوس)."""
     op.drop_column("tasks", "reminder_sent")
     op.drop_column("tasks", "updated_at")
     op.drop_column("notes", "updated_at")

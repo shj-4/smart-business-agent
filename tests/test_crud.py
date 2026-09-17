@@ -777,6 +777,59 @@ class TestVatFields:
         )
         assert tx.vat_rate == Decimal("100.000")
 
+    def test_vat_consistent_value_within_tolerance_kept(self, db_session):
+        """اختلاف طفيف ضمن التسامح (≈4% أو 0.05) مقبول ولا يُعاد بناؤه."""
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 117,
+                "currency": "ILS",
+                "vat_rate": 17,
+                "vat_amount": 17.20,
+                "description": "فاتورة",
+            },
+            raw_message="فاتورة",
+        )
+        assert tx.vat_amount == Decimal("17.20")
+
+    def test_vat_inconsistent_amount_auto_corrected(self, db_session):
+        """قيمة خارجة عن الاتساق الرياضي (المبلغ شامل الضريبة) تُصحَّح ذاتيًا —
+        لا تُقبل بيانات محاسبية متضاربة بصمت: amount=117/rate=17 ⇒ vat=17 لا 50."""
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 117,
+                "currency": "ILS",
+                "vat_rate": 17,
+                "vat_amount": 50,
+                "description": "فاتورة متناقضة",
+            },
+            raw_message="فاتورة",
+        )
+        assert tx.vat_amount == Decimal("17.00")
+
+    def test_vat_zero_rate_forces_zero_amount(self, db_session):
+        """نسبة 0% مع مبلغ ضريبة موجب يجعل القيمة المتضاربة تُصحَّح إلى صفر."""
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 100,
+                "currency": "ILS",
+                "vat_rate": 0,
+                "vat_amount": 25,
+                "description": "معفاة",
+            },
+            raw_message="معفاة",
+        )
+        assert tx.vat_rate == Decimal("0.000")
+        assert tx.vat_amount == Decimal("0.00")
+
     def test_vat_fields_in_recent_records(self, db_session):
         tx = create_transaction(
             db_session,
@@ -971,6 +1024,54 @@ class TestCreditLimits:
         assert usage["amount"] == Decimal("0.00")
         assert usage["over"] is False
 
+    def test_usage_multi_currency_unifies_to_base(self, db_session, monkeypatch):
+        """عدة عملات لا تُخلط في رقم خام — تُوحَّد لعملة الأساس بالمبالغ المثبّتة
+        وقت التسجيل (ستور بالتصحيح للتحويل: 100 USD = 375 ILS)."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal("375.00")},
+        )
+        set_credit_limit(db_session, USER_A, "متعدد", "5000")
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد"}, "دين دولار"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "متعدد"}, "دين شيقل"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "income", "amount": 40, "currency": "ILS", "person": "متعدد"}, "سداد جزئي"
+        )
+        row = list_credit_limits(db_session, USER_A)[0]
+        usage = credit_usage(db_session, row)
+        assert usage["unified_ok"] is True
+        assert usage["by_currency"]["USD"]["expense"] == Decimal("100.00")
+        assert usage["by_currency"]["ILS"]["balance"] == Decimal("60.00")
+        # مصروف 375+100=475 محوّلًا → ناقص إيراد 40 = 435 بعملة الأساس
+        assert usage["outstanding"] == Decimal("435.00")
+        assert usage["side"] == "payable"
+        assert usage["over"] is False
+
+    def test_usage_multi_currency_unavailable_notifies_none(self, db_session, monkeypatch):
+        """تعذّر توحيد عدة عملات (لا أسعار/شبكة) — «غير متاح» بدل رقم مختلط،
+        ويمتنع التنبيه بالتجاوز (over=False) كي لا يُنبه رقماً خاطئًا."""
+        monkeypatch.setattr("app.exchange.convert", lambda *a, **k: {"result": None})
+        monkeypatch.setattr("app.exchange.get_rate", lambda *a, **k: None)
+        set_credit_limit(db_session, USER_A, "متعدد", "3000")
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد"}, "دين دولار"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "income", "amount": 50, "currency": "ILS", "person": "متعدد"}, "سداد"
+        )
+        row = list_credit_limits(db_session, USER_A)[0]
+        usage = credit_usage(db_session, row)
+        assert usage["unified_ok"] is False
+        assert usage["outstanding"] is None
+        assert usage["amount"] is None
+        assert usage["percent"] is None
+        assert usage["over"] is False
+        assert usage["side"] == "unknown"
+
     def test_monthly_reset_clears_status_from_previous_month(self, db_session):
         row = set_credit_limit(db_session, USER_A, "نادر", "1000")
         row.alerted_status = 2
@@ -1143,6 +1244,31 @@ class TestBudgetPersonScopeCurrency:
         usage = budget_usage(db_session, budget)
         assert usage["spent"] == Decimal("200.00")
         assert usage["percent"] == 40.0
+
+    def test_person_spent_fallback_no_mixing(self, db_session, monkeypatch):
+        """تعذّر التوحيد (لا أسعار) — لا يُبنى مجموع خام يخلط العملات؛ عملة الأساس
+        فقط (100 ILS) بدل 100 دولار+100 شيكل في رقم واحد."""
+        from app.database.crud import budget_usage, create_budget
+
+        monkeypatch.setattr("app.exchange.convert", lambda *a, **k: {"result": None})
+        monkeypatch.setattr("app.exchange.get_rate", lambda *a, **k: None)
+        budget = create_budget(db_session, USER_A, "person", "ريم", "1000")
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "USD", "person": "ريم"},
+            "دفعة دولار",
+        )
+        create_transaction(
+            db_session,
+            USER_A,
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "ريم"},
+            "دفعة شيقل",
+        )
+        usage = budget_usage(db_session, budget)
+        assert usage["spent"] == Decimal("100.00")
+        assert usage["percent"] == 10.0
+        assert usage["over"] is False
 
 
 # ---------- دقة أسماء الأشخاص خارج search_records (#3/#4) ----------

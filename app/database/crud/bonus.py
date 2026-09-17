@@ -304,10 +304,26 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
         cur = tx.currency or "غير محددة"
         sales[cur] = sales.get(cur, Decimal("0")) + (tx.amount or Decimal("0"))
 
-    total_granted = sum(granted.values(), Decimal("0"))
+    total_granted = None
     percent = None
     if event.budget is not None and event.budget > 0:
-        percent = int(round(float(total_granted) / float(event.budget) * 100))
+        # النسبة لا تُبنى بخلط عملات مختلفات: عملة واحدة تُقارن مباشرة
+        # (الميزانية تُفسَّر بها)؛ عدة عملات تُوحَّد لعملة الأساس بالمبالغ
+        # المثبّتة وقت التسجيل أو أسعار اليوم — وبلا توحيد تُترك None.
+        spent_rows = [tx for tx in granted_rows if tx.amount is not None]
+        spent_currencies = {tx.currency or "غير محددة" for tx in spent_rows}
+        if len(spent_currencies) <= 1:
+            total_granted = sum((tx.amount or Decimal("0")) for tx in spent_rows).quantize(Decimal("0.01"))
+        else:
+            from app.config import settings
+            from app.money import _unified_totals_for_rows
+
+            base = (settings.base_currency or "").upper().strip()
+            granted_unified = _unified_totals_for_rows(spent_rows, base).get("total")
+            if granted_unified is not None:
+                total_granted = granted_unified.quantize(Decimal("0.01"))
+        if total_granted is not None:
+            percent = int(round(float(total_granted) / float(event.budget) * 100))
 
     return {
         "granted": granted,
@@ -444,8 +460,15 @@ def advance_employee_bonus_due(db: Session, plan: EmployeeBonusPlan, now: dateti
 
 
 def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: datetime | None = None) -> Decimal:
-    """صرف بونس هذا الشهر للموظّف (expense بتصنيف بونس باسمه) عبر مساحة العمل."""
-    from app.database.crud import accessible_user_ids
+    """صرف بونس هذا الشهر للموظّف (expense بتصنيف بونس باسمه) عبر مساحة العمل.
+
+    العملات لا تُخلط: عملة واحدة تُجمع مباشرة (المحادّ يُفسَّر بها)؛ عدة عملات
+    تُوحَّد لعملة الأساس بالمبالغ المثبّتة وقت التسجيل إن توفرت أو أسعار اليوم —
+    وعند تعذّر التوحيد نجمع عملة الأساس فقط (لا رقمًا مختلطًا قد يضلل المقارنة
+    مع monthly_cap).
+    """
+    from app.config import settings
+    from app.database.crud import _unified_totals_for_rows, accessible_user_ids
     from app.timeutil import now_local, to_utc_naive
 
     local_now = now if now is not None else now_local()
@@ -462,7 +485,20 @@ def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: date
         )
         .all()
     )
-    return sum((tx.amount or Decimal("0")) for tx in rows)
+    if not rows:
+        return Decimal("0.00")
+    currencies = {r.currency or "غير محددة" for r in rows if r.amount is not None}
+    if len(currencies) <= 1:
+        return sum((r.amount or Decimal("0")) for r in rows).quantize(Decimal("0.01"))
+    base = (settings.base_currency or "").upper().strip()
+    total = _unified_totals_for_rows([r for r in rows if r.amount is not None], base).get("total")
+    if total is None:
+        # لا توحيد متاح (لا أسعار حيّة لعملة أجنبية) — عملة الأساس فقط، بلا خلط
+        total = sum(
+            (r.amount for r in rows if r.amount is not None and (r.currency or "").upper() == base),
+            Decimal("0"),
+        )
+    return total.quantize(Decimal("0.01"))
 
 
 def employee_bonus_overview(db: Session, telegram_user_id: int) -> dict:

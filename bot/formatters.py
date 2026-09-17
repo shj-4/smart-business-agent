@@ -472,18 +472,22 @@ def format_credit_limits(payload: list[dict]) -> str:
     for d in payload:
         name = d["person"]
         u = d["usage"]
-        if u["over"]:
-            status = "⚠️ تجاوزت"
-        elif u["percent"] >= 80:
-            status = "⚠️ قريب من السقف"
+        if not u.get("unified_ok"):
+            status = "⚠️ عملات متعددة بلا توحيد"
+            value_txt = "غير متاح"
         else:
-            status = "ضمن الحدود"
-        if u["side"] == "receivable":
-            value_txt = f"لك عليه {_fmt_amount(u['amount'])}"
-        elif u["side"] == "payable":
-            value_txt = f"عليك له {_fmt_amount(u['outstanding'])}"
-        else:
-            value_txt = "صفر"
+            if u["over"]:
+                status = "⚠️ تجاوزت"
+            elif u["percent"] >= 80:
+                status = "⚠️ قريب من السقف"
+            else:
+                status = "ضمن الحدود"
+            if u["side"] == "receivable":
+                value_txt = f"لك عليه {_fmt_amount(u['amount'])}"
+            elif u["side"] == "payable":
+                value_txt = f"عليك له {_fmt_amount(u['outstanding'])}"
+            else:
+                value_txt = "صفر"
         lines.append(
             f"• {name}: {value_txt} / {_fmt_amount(u['limit'])} "
             f"({u['percent']}%) — {status}"
@@ -550,12 +554,18 @@ def format_finance_card(
     # ٣) الحدود الائتمانية
     lines.append("")
     if credit_limits:
-        over = [d for d in credit_limits if d["usage"]["over"]]
+        over = [d for d in credit_limits if d["usage"].get("over")]
         if over:
             names = ", ".join(d["person"] for d in over[:3])
             lines.append(f"{WARNING} تجاوز حدّ: {names}")
         else:
-            near = [d for d in credit_limits if d["usage"]["percent"] >= 80]
+            unified_ok = [d for d in credit_limits if d["usage"].get("unified_ok")]
+            near = [
+                d
+                for d in unified_ok
+                if d["usage"].get("percent") is not None
+                and d["usage"]["percent"] >= 80
+            ]
             if near:
                 names = ", ".join(d["person"] for d in near[:3])
                 lines.append(f"⚠️ قريب من السقف: {names}")

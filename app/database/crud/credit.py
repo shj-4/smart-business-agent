@@ -100,10 +100,19 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     outstanding = المصروفات - الإيرادات: موجبة = ما عليك له، سالبة = ما هو مدين لك.
     amount = القيمة المطلقة التي يُقاس عليها السقف؛ percent/over مبنيان عليها —
     فيُنبي النظام عند تجاوز السقف سواء كان الدين عليك له (مورّد) أو عليه لك (عميل).
-    يعيد: {outstanding, amount, side, limit, percent, over}
-    side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced".
+
+    العملات لا تُخلط أبدًا (كانتُ تُجمع قبلًا كأنها واحدة — أرقام مضللة):
+      - عملة واحدة فقط: outstanding بصافي تلك العملة (المحادّ يُفسَّر بها).
+      - عدة عملات: توحيد لعملة الأساس بالمبالغ المثبّتة وقت التسجيل إن توفرت
+        (أو أسعار اليوم)، فإن تعذّر التحويل (لا شبكة) يُعاد outstanding=None
+        و unified_ok=False بدل بناء رقم خاطئ — ويمتنع التنبيه/العرض المضلل.
+
+    يعيد: {outstanding, amount, by_currency, unified_ok, side, limit, percent, over}
+    side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced" | "unknown".
     """
+    from app.config import settings
     from app.database.crud import accessible_user_ids
+    from app.money import _unified_totals_for_rows
 
     rows = (
         db.query(Transaction)
@@ -114,18 +123,64 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
         )
         .all()
     )
-    income = sum((r.amount for r in rows if r.amount is not None and r.type == "income"), Decimal("0"))
-    expense = sum(
-        (r.amount for r in rows if r.amount is not None and r.type == "expense"), Decimal("0")
-    )
-    outstanding = (expense - income).quantize(Decimal("0.01"))
-    amount = abs(outstanding)
+
+    per_cur: dict = {}
+    for r in rows:
+        if r.amount is None:
+            continue
+        c = r.currency or "غير محددة"
+        cell = per_cur.setdefault(c, {"income": Decimal("0"), "expense": Decimal("0")})
+        cell[r.type] = cell.get(r.type, Decimal("0")) + r.amount
+    by_currency = {
+        c: {
+            "income": cell["income"].quantize(Decimal("0.01")),
+            "expense": cell["expense"].quantize(Decimal("0.01")),
+            "balance": (cell["expense"] - cell["income"]).quantize(Decimal("0.01")),
+        }
+        for c, cell in per_cur.items()
+    }
+
     limit = (limit_row.limit_amount or Decimal("0")).quantize(Decimal("0.01"))
+    unified_ok = True
+    if not by_currency:
+        outstanding = Decimal("0.00")
+    elif len(by_currency) == 1:
+        outstanding = next(iter(by_currency.values()))["balance"]
+    else:
+        base = (settings.base_currency or "").upper().strip()
+        exp_uni = _unified_totals_for_rows(
+            [r for r in rows if r.type == "expense" and r.amount is not None], base
+        ).get("total")
+        inc_uni = _unified_totals_for_rows(
+            [r for r in rows if r.type == "income" and r.amount is not None], base
+        ).get("total")
+        if exp_uni is not None and inc_uni is not None:
+            outstanding = exp_uni - inc_uni
+        else:
+            outstanding = None
+            unified_ok = False
+
+    if outstanding is None:
+        return {
+            "outstanding": None,
+            "amount": None,
+            "by_currency": by_currency,
+            "unified_ok": False,
+            "side": "unknown",
+            "limit": limit,
+            "percent": None,
+            "over": False,
+        }
+
+    outstanding = outstanding.quantize(Decimal("0.01"))
+    amount = abs(outstanding)
     percent = float(amount / limit * 100) if limit and amount > 0 else 0.0
     side = "payable" if outstanding > 0 else ("receivable" if outstanding < 0 else "balanced")
     return {
         "outstanding": outstanding,
         "amount": amount,
+        "by_currency": by_currency,
+        "unified_ok": unified_ok,
         "side": side,
         "limit": limit,
         "percent": round(percent, 1),

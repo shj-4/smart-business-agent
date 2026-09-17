@@ -363,6 +363,51 @@ class TestPeriodicSummary:
         text = build_periodic_summary(db_session, USER_A, "nonsense")
         assert "اليومي" in text
 
+    def test_vat_lines_when_vat_amounts_present(self, db_session, monkeypatch):
+        """حقول VAT المخزّنة (#24) تظهر أخيرًا في التقرير الدوري: محصَّلة/مدفوعة
+        مصنّفة بالعملة — أول استخدام تقريري فعلي لها."""
+        from app.timeutil import to_utc_naive
+        from bot.reports import build_periodic_summary
+
+        _freeze_now(monkeypatch, datetime(2026, 9, 7, 10, 0))
+        lo = to_utc_naive(datetime(2026, 9, 7, 0, 0))
+        db_session.add(Transaction(
+            telegram_user_id=USER_A,
+            type="expense",
+            amount=Decimal("117"),
+            currency="ILS",
+            description="فاتورة ضريبية",
+            raw_message="فاتورة",
+            vat_rate=Decimal("17.000"),
+            vat_amount=Decimal("17.00"),
+            created_at=lo + timedelta(hours=1),
+        ))
+        db_session.add(Transaction(
+            telegram_user_id=USER_A,
+            type="income",
+            amount=Decimal("117"),
+            currency="ILS",
+            description="مبيع ضريبي",
+            raw_message="مبيع",
+            vat_rate=Decimal("17.000"),
+            vat_amount=Decimal("17.00"),
+            created_at=lo + timedelta(hours=2),
+        ))
+        db_session.commit()
+
+        text = build_periodic_summary(db_session, USER_A, "daily")
+        assert "ضريبة القيمة المضافة محصَّلة" in text
+        assert "ضريبة القيمة المضافة مدفوعة" in text
+        assert "17" in text
+
+    def test_no_vat_lines_when_none_present(self, db_session, monkeypatch):
+        from bot.reports import build_periodic_summary
+
+        _freeze_now(monkeypatch, datetime(2026, 9, 7, 10, 0))
+        _add_transaction(db_session, USER_A, tx_type="expense", amount=50, dt_utc=datetime(2026, 9, 7, 2, 0))
+        text = build_periodic_summary(db_session, USER_A, "daily")
+        assert "ضريبة القيمة المضافة" not in text
+
 
 # ---------- generate_export_excel ----------
 

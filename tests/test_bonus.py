@@ -202,6 +202,42 @@ class TestBonusEvents:
         assert s["window"] == (None, None)
         assert s["percent"] is None
 
+    def test_event_summary_multi_currency_no_unify_percent_none(self, db_session, monkeypatch):
+        """نسبة الميزانية لا تُبنى بخلط عملات — عند تعذّر التوحيد تبقى None
+        (لا رقم مختلط مضلل)، مع بقاء تفصيل الممنوح لكل عملة سليمًا."""
+        monkeypatch.setattr("app.exchange.convert", lambda *a, **k: {"result": None})
+        monkeypatch.setattr("app.exchange.get_rate", lambda *a, **k: None)
+        now = now_utc()
+        ev = create_bonus_event(
+            db_session, USER_A, "مزيج",
+            budget="1000", currency="ILS",
+            start_at=now - timedelta(days=5), end_at=now + timedelta(days=5),
+        )
+        _grant(db_session, amount="300", currency="USD", person="س")
+        _grant(db_session, amount="200", currency="ILS", person="ص")
+        s = event_bonus_summary(db_session, ev)
+        assert s["granted"]["USD"] == Decimal("300")
+        assert s["granted"]["ILS"] == Decimal("200")
+        assert s["percent"] is None
+
+    def test_event_summary_multi_currency_unifies_to_base(self, db_session, monkeypatch):
+        """عملات متعددة تُوحَّد بالمبالغ المثبّتة للتوحيد: 300 USD (=900 مثبَّتة
+        وقت التسجيل) + 200 ILS = 1100 من ميزانية 2000 → 55%."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal("900.00")},
+        )
+        now = now_utc()
+        ev = create_bonus_event(
+            db_session, USER_A, "صيف مزيج",
+            budget="2000", currency="ILS",
+            start_at=now - timedelta(days=5), end_at=now + timedelta(days=5),
+        )
+        _grant(db_session, amount="300", currency="USD", person="س")
+        _grant(db_session, amount="200", currency="ILS", person="ص")
+        s = event_bonus_summary(db_session, ev)
+        assert s["percent"] == 55
+
 
 # ---------- مكافآت موظفين دورية ----------
 
@@ -321,6 +357,28 @@ class TestEmployeeBonusPlans:
         assert by_person["سامر"]["cap_status"] == "ok"
         overdue = [p["person"] for p in data["plans"] if p["next_due_at"] is not None and p["next_due_at"] <= now]
         assert overdue == ["محمد"]
+
+    def test_monthly_spent_multi_currency_unifies(self, db_session, monkeypatch):
+        """صرف موظف بعدة عملات لا يُخلط — يُوحَّد بعملة الأساس بالمبالغ المثبّتة:
+        100 USD (=375 مثبَّتة) + 100 ILS = 475 مقارنًا بالسقف."""
+        monkeypatch.setattr(
+            "app.exchange.convert",
+            lambda amount, frm, to: {"result": Decimal("375.00")},
+        )
+        plan = create_employee_bonus_plan(db_session, USER_A, "فادي", "500", currency="ILS", monthly_cap="2000")
+        _grant(db_session, amount="100", currency="USD", person="فادي")
+        _grant(db_session, amount="100", currency="ILS", person="فادي")
+        assert employee_bonus_monthly_spent(db_session, plan) == Decimal("475.00")
+
+    def test_monthly_spent_multi_currency_fallback_no_mixing(self, db_session, monkeypatch):
+        """تعذّر التوحيد (لا أسعار) — تعود لدولار+شيكل خلطًا ولا تُبني رقمًا مختلطًا؛
+        عملة الأساس فقط (100 ILS)."""
+        monkeypatch.setattr("app.exchange.convert", lambda *a, **k: {"result": None})
+        monkeypatch.setattr("app.exchange.get_rate", lambda *a, **k: None)
+        plan = create_employee_bonus_plan(db_session, USER_A, "جود", "500", currency="ILS", monthly_cap="2000")
+        _grant(db_session, amount="100", currency="USD", person="جود")
+        _grant(db_session, amount="100", currency="ILS", person="جود")
+        assert employee_bonus_monthly_spent(db_session, plan) == Decimal("100.00")
 
 
 # ---------- نقاط الولاء ----------
@@ -621,6 +679,59 @@ class TestBonusEventCommandPath:
         events = list_bonus_events(db_session, USER_A)
         assert len(events) == 1
         assert events[0].name == "فعاليـة الصيف"
+
+
+# ---------- فحص منح المكافآت التلقائي والسقف الشهري ----------
+
+
+class TestBonusReminderCheckCap:
+    def _run_check(self, db_session):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from sqlalchemy.orm import sessionmaker
+
+        from bot.bonus import bonus_reminder_check
+
+        class _Bot:
+            send_message = AsyncMock()
+
+        class _Ctx:
+            bot = _Bot()
+
+        fac = sessionmaker(bind=db_session.get_bind())
+        with patch("bot.bonus.SessionLocal", fac):
+            asyncio.run(bonus_reminder_check(_Ctx()))
+        return _Bot.send_message
+
+    def test_grant_skipped_when_overshoots_cap(self, db_session):
+        """منحة تُكسر السقف تُؤجَّل (1800 + 500 > 2000) — لا معاملة جديدة تُسجَّل
+        والاستحقاق يتقدّم رغم ذلك (تُعاد الشهر القادم)."""
+        plan = create_employee_bonus_plan(
+            db_session, USER_A, "سمير", "500", currency="ILS",
+            monthly_cap="2000", next_due_at=now_utc() - timedelta(days=1),
+        )
+        _grant(db_session, amount="1800", person="سمير")
+        original_due = plan.next_due_at
+        assert employee_bonus_monthly_spent(db_session, plan) == Decimal("1800.00")
+
+        self._run_check(db_session)
+        db_session.refresh(plan)
+
+        assert employee_bonus_monthly_spent(db_session, plan) == Decimal("1800.00")
+        assert plan.next_due_at != original_due
+
+    def test_grant_happens_when_within_cap(self, db_session):
+        """اضافة المنحة الكاملة للسقف ضمن الحدود تُمنح: 1400 + 500 = 1900 ≤ 2000."""
+        plan = create_employee_bonus_plan(
+            db_session, USER_A, "ليلى", "500", currency="ILS",
+            monthly_cap="2000", next_due_at=now_utc() - timedelta(days=1),
+        )
+        _grant(db_session, amount="1400", person="ليلى")
+
+        self._run_check(db_session)
+
+        assert employee_bonus_monthly_spent(db_session, plan) == Decimal("1900.00")
 
 
 # ---------- نظرة شاملة ----------

@@ -210,7 +210,7 @@ class Budget(Base):
     currency = Column(String(16), nullable=True)  # عند scope=currency
     person = Column(String(255), nullable=True)  # عند scope=person
     category = Column(String(64), nullable=True)  # عند scope=category
-    monthly_limit = Column(Numeric(12, 2), nullable=False)
+    monthly_limit = Column(EncryptedNumeric(), nullable=False)
 
     alerted_status = Column(Integer, default=0, nullable=False)  # 0|1|2
     month_key = Column(String(7), default="", nullable=False)  # "YYYY-MM"
@@ -232,7 +232,7 @@ class CreditLimit(Base):
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
     person = Column(String(255), nullable=False)
-    limit_amount = Column(Numeric(12, 2), nullable=False)
+    limit_amount = Column(EncryptedNumeric(), nullable=False)
 
     alerted_status = Column(Integer, default=0, nullable=False)  # 0=لا تنبيه | 1=اقتراب | 2=تجاوز
     created_at = Column(DateTime, default=now_utc)
@@ -251,7 +251,7 @@ class Invoice(Base):
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
     person = Column(String(255), nullable=True)  # المورّد/الجهة المستحقة
-    amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(EncryptedNumeric(), nullable=False)
     currency = Column(String(16), nullable=True)
     description = Column(EncryptedString(), nullable=True)  # وصف الفاتورة (مشفر)
     due_date = Column(DateTime, nullable=True)  # تاريخ الاستحقاق (UTC)
@@ -325,7 +325,7 @@ class BonusEvent(Base):
     name = Column(String(255), nullable=False)  # عنوان الفعالية
     start_at = Column(DateTime, nullable=True)  # بداية الفعالية
     end_at = Column(DateTime, nullable=True)  # نهاية الفعالية
-    budget = Column(Numeric(12, 2), nullable=True)  # ميزانية البونس المقترحة
+    budget = Column(EncryptedNumeric(), nullable=True)  # ميزانية البونس المقترحة
     currency = Column(String(16), nullable=True)
     note = Column(String(255), nullable=True)  # وصف/تعليق
     status = Column(String(16), nullable=False, default="planned")  # planned|active|ended
@@ -352,7 +352,7 @@ class EmployeeBonusPlan(Base):
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
 
     person = Column(String(255), nullable=False)  # اسم الموظف
-    amount = Column(Numeric(12, 2), nullable=False)
+    amount = Column(EncryptedNumeric(), nullable=False)
     currency = Column(String(16), nullable=True)
     frequency = Column(String(16), nullable=False, default="monthly")  # monthly|quarterly|one_off
     next_due_at = Column(DateTime, nullable=True)  # موعد المنح القادم

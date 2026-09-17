@@ -58,6 +58,19 @@ def create_transaction(
         vat_rate = None
     if vat_amount is not None and vat_amount < 0:
         vat_amount = None
+    # اتساق المحاسبة: المبلغ شامل الضريبة، فعلى أي نسبة صحيحة
+    # vat_amount = amount × rate / (100 + rate). قيم متضاربة stylان (مستخرَجة
+    # بالذكاء الاصطناعي من صور) تُصحَّح تلقائيًا — لا تُقبل بصمت بيانات متضاربة.
+    if (
+        vat_rate is not None
+        and vat_amount is not None
+        and amount is not None
+        and amount > 0
+    ):
+        expected = (amount * vat_rate / (Decimal("100") + vat_rate)).quantize(Decimal("0.01"))
+        tolerance = abs(expected) * Decimal("0.04") + Decimal("0.05")
+        if abs(vat_amount - expected) > tolerance:
+            vat_amount = expected
 
     transaction = Transaction(
         telegram_user_id=telegram_user_id,

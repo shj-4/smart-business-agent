@@ -57,7 +57,7 @@ class TestEncryptedColumnDiscovery:
         assert _encrypted_columns(CorrectionFeedback) == ["raw_message"]
 
     def test_invoice_fields(self):
-        assert _encrypted_columns(Invoice) == ["description"]
+        assert _encrypted_columns(Invoice) == ["amount", "description"]
 
     def test_every_discovered_column_is_encrypted_type(self):
         for model in (Transaction, Note, Task, CorrectionFeedback, Invoice):
@@ -161,7 +161,10 @@ class TestBackfillWritesEncrypted:
             text("SELECT description, amount FROM invoices WHERE telegram_user_id = 111")
         ).one()
         assert str(invoice_raw[0]).startswith("v1$")
-        assert invoice_raw[1] == 200.00  # الحقل الرقمي الواضح يبقى كما هو
+        assert str(invoice_raw[1]).startswith("v1$")  # المبلغ (المرقّم) يُشفَّر أيضًا
+
+        invoice_obj = db_session.query(Invoice).filter_by(telegram_user_id=111).one()
+        assert invoice_obj.amount == Decimal("200.00")
 
         feedback_raw = db_session.execute(
             text("SELECT raw_message FROM correction_feedback WHERE telegram_user_id = 111")

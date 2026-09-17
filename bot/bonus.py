@@ -682,7 +682,9 @@ async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                 skip = False
                 if plan.monthly_cap is not None:
                     spent = employee_bonus_monthly_spent(db, plan)
-                    if spent >= plan.monthly_cap:
+                    # المنحة الحالية تُحتسب قبل التنفيذ — منحة تكسر السقف تُؤجَّل
+                    # (لا إنفاق فوق السقف هذا الشهر؛ الاستحقاق يتقدّم فتُعاد الشهر القادم).
+                    if spent + (plan.amount or 0) > plan.monthly_cap:
                         skip = True
                 if not skip:
                     tx = record_bonus_grant(db, uid, plan.amount, plan.currency, direction="expense", person=plan.person, description=f"مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})")

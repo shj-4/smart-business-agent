@@ -22,14 +22,34 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.database.db import SessionLocal
-from app.database.models import CorrectionFeedback, Invoice, Note, Task, Transaction
+from app.database.models import (
+    BonusEvent,
+    Budget,
+    CorrectionFeedback,
+    CreditLimit,
+    EmployeeBonusPlan,
+    Invoice,
+    Note,
+    Task,
+    Transaction,
+)
 from app.security import EncryptedNumeric, EncryptedString
 
 CONFIG = Settings()
 
 # كل النماذج التي تحمل حقولًا مشفّرة — النموذج الجديد يُضاف هنا فقط،
 # وأما حقوله المشفّرة فتُكتشف تلقائيًا أدناه.
-_BACKFILL_MODELS = (Transaction, Note, Task, CorrectionFeedback, Invoice)
+_BACKFILL_MODELS = (
+    Transaction,
+    Note,
+    Task,
+    CorrectionFeedback,
+    Invoice,
+    Budget,
+    CreditLimit,
+    EmployeeBonusPlan,
+    BonusEvent,
+)
 
 
 def _confirm_key() -> None:

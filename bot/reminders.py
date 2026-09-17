@@ -380,7 +380,10 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             credit_monthly_reset(db, limit_row)
             usage = credit_usage(db, limit_row)
-            if usage["amount"] <= 0 or usage["limit"] <= 0:
+            # عملات متعددة بلا توحيد (لا أسعار) — لا نبني رقمًا مختلطًا ولا ننبه عليه
+            if not usage.get("unified_ok"):
+                continue
+            if not usage.get("amount") or usage.get("limit", 0) <= 0:
                 continue
             await _notify_credit(context, db, limit_row, usage)
         except Exception:

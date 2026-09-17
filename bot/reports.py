@@ -132,6 +132,30 @@ def _stored_totals_between(
     return stored
 
 
+def _vat_totals_between(
+    db: Session, user_id: int, lo: datetime | None, hi: datetime | None, tx_type: str
+) -> dict:
+    """إجمالي ضريبة القيمة المضافة (vat_amount) لنوع معيّن مصنّفًا بالعملة.
+
+    أول استخدام تقريري فعلي لأعمدة VAT المخزّنة منذ استخراجها (#24): محصَّلة
+    (income) أو مدفوعة (expense) — بلا خلط عملات (تبقى كل عملة في سطرها).
+    """
+    q = db.query(Transaction).filter(
+        Transaction.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+        Transaction.deleted_at.is_(None),
+        Transaction.type == tx_type,
+        Transaction.created_at >= lo,
+        Transaction.created_at < hi,
+    )
+    vat: dict = {}
+    for r in q.all():
+        if r.vat_amount is None:
+            continue
+        c = r.currency or "غير محددة"
+        vat[c] = vat.get(c, Decimal("0")) + r.vat_amount
+    return vat
+
+
 def build_periodic_summary(
     db: Session,
     telegram_user_id: int,
@@ -182,6 +206,15 @@ def build_periodic_summary(
         unified = _unified_line(incomes, stored=stored_incomes)
         if unified:
             lines.append(unified)
+
+    vat_income = _vat_totals_between(db, telegram_user_id, lo, hi, "income")
+    vat_expense = _vat_totals_between(db, telegram_user_id, lo, hi, "expense")
+    if vat_income or vat_expense:
+        lines.append("")
+        if vat_income:
+            lines.append(f"🧾 ضريبة القيمة المضافة محصَّلة: {_totals_line(vat_income)}")
+        if vat_expense:
+            lines.append(f"🧾 ضريبة القيمة المضافة مدفوعة: {_totals_line(vat_expense)}")
 
     lines.append("")
     lines.append(f"{TASK} مهامك: {pending_count} قيد الانتظار")
