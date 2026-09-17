@@ -16,6 +16,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from app.database.crud import complete_task, find_pending_task, undo_last_record
 from app.database.db import SessionLocal
 from app.exchange import CURRENCY_NAMES, convert
+from app.formatting import fmt_amount
 from bot.icons import EXPENSE, INCOME, NEW, SUCCESS, TASK
 
 logger = logging.getLogger(__name__)
@@ -637,7 +638,7 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "category": f"التصنيف {budget.category}",
             }.get(budget.scope, budget.scope)
             await update.message.reply_text(
-                f"تم إنشاء ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
+                f"تم إنشاء ميزانية شهرية: {scope_txt} — {fmt_amount(budget.monthly_limit)}\n"
                 f"سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه."
             )
             return
@@ -682,7 +683,7 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 status = "ضمن الحدود"
             lines.append(
-                f"{b.id}. {target_txt}: {usage['spent']} / {usage['limit']} "
+                f"{b.id}. {target_txt}: {fmt_amount(usage['spent'])} / {fmt_amount(usage['limit'])} "
                 f"({usage['percent']}%) — {status}"
             )
         lines.append("\nلحذف: /budget حذف <رقم>")
@@ -803,7 +804,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا.")
                 return
             await update.message.reply_text(
-                f"{SUCCESS} حُدّد سقف ائتماني لـ {row.person}: {row.limit_amount}\n"
+                f"{SUCCESS} حُدّد سقف ائتماني لـ {row.person}: {fmt_amount(row.limit_amount)}\n"
                 "سأرسل تنبيهًا عند الاقتراب من السقف أو تجاوزه."
             )
             return

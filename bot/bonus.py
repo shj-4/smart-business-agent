@@ -79,11 +79,21 @@ PLAN_FREQ_LABELS = {"monthly": "شهري", "quarterly": "ربع سنوي", "one_
 
 
 def _fmt_amount(amount, currency: str | None = None) -> str:
+    """يُنسّق المبلغ ويضيف العملة إن وُجدت (بدون تكرار «شيكل» مع كود ILS)."""
     if amount is None:
         return "—"
     val = float(amount)
     cur = f" {currency}" if currency else ""
     return f"{val:,.2f}{cur}"
+
+
+def _amounts_with_currencies(items: list) -> str:
+    """يعرض مبالغ متعددة بعملاتها دون خلطهما: «1,000.00 ILS + 200.00 USD».
+
+    يستقبل قائمة (عملة، مبلغ) — تُعرض كل عملة بمبلغها وحدها، فلا يُبنى رقم
+    خام يجمع شيكلًا ودولارات معًا.
+    """
+    return " + ".join(_fmt_amount(v, c) for c, v in items)
 
 
 def _known_currency(val: str) -> str | None:
@@ -165,15 +175,23 @@ def _db_call(fn):
 def format_bonus_overview(data: dict) -> str:
     lines = ["🎁 ملخص البونس — هذا الشهر:\n"]
     report = data["report"]
-    total_exp = sum(report["expense"].values()) if report["expense"] else Decimal("0")
-    total_inc = sum(report["income"].values()) if report["income"] else Decimal("0")
-    if total_exp or total_inc:
-        lines.append(f"{EXPENSE} منح: {_fmt_amount(total_exp)}")
-        lines.append(f"{INCOME} استلام: {_fmt_amount(total_inc)}")
+    exp_items = sorted(report["expense"].items())
+    inc_items = sorted(report["income"].items())
+    if exp_items or inc_items:
+        # لا نخلط عملات في رقم واحد: كل عملة تُعرض بمبلغها
+        lines.append(f"{EXPENSE} منح: {_amounts_with_currencies(exp_items)}")
+        lines.append(f"{INCOME} استلام: {_amounts_with_currencies(inc_items)}")
         lines.append(f"🔢 عدد العمليات: {report['count_expense'] + report['count_income']}")
     else:
         lines.append("لا توجد معاملات بونس هذا الشهر بعد.")
     lines.append(f"\n🎯 فعالية ترويجية نشطة: {data['events_count']}")
+    if data.get("events"):
+        for e in data["events"]:
+            budget_txt = _fmt_amount(e["budget"], e["currency"]) if e.get("budget") else "—"
+            if e.get("percent") is not None:
+                lines.append(f"   🎯 {e['name']}: ميزانية {budget_txt} — صُرف {e['percent']}%")
+            else:
+                lines.append(f"   🎯 {e['name']}: ميزانية {budget_txt}")
     if data["plans"]:
         lines.append(f"\n👥 خطط مكافآت: {data['plans_count']}")
         if data["due_plans_count"]:
@@ -212,12 +230,16 @@ def format_bonus_report(report: dict, person: str | None = None) -> str:
         lines.append(f"{EXPENSE} مصروفات بونس:")
         for cur, total in report["expense"].items():
             lines.append(f"   {cur}: {_fmt_amount(total, cur)}")
-        lines.append(f"   الإجمالي: {_fmt_amount(sum(report['expense'].values()))}")
+        if len(report["expense"]) == 1:
+            total = next(iter(report["expense"].values()))
+            lines.append(f"   الإجمالي: {_fmt_amount(total)}")
     if report["income"]:
         lines.append(f"\n{INCOME} إيرادات بونس:")
         for cur, total in report["income"].items():
             lines.append(f"   {cur}: {_fmt_amount(total, cur)}")
-        lines.append(f"   الإجمالي: {_fmt_amount(sum(report['income'].values()))}")
+        if len(report["income"]) == 1:
+            total = next(iter(report["income"].values()))
+            lines.append(f"   الإجمالي: {_fmt_amount(total)}")
     if not report["expense"] and not report["income"]:
         lines.append("لا توجد معاملات بونس في هذه الفترة.")
     if report["rows"]:
@@ -661,8 +683,8 @@ def register_bonus_handlers(app: Application) -> None:
 async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.database.crud import (
         advance_employee_bonus_due,
+        bonus_grant_would_overshoot_cap,
         due_employee_bonus_plans,
-        employee_bonus_monthly_spent,
         list_bonus_events,
         record_bonus_grant,
     )
@@ -681,11 +703,10 @@ async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             for plan in plans:
                 skip = False
                 if plan.monthly_cap is not None:
-                    spent = employee_bonus_monthly_spent(db, plan)
-                    # المنحة الحالية تُحتسب قبل التنفيذ — منحة تكسر السقف تُؤجَّل
-                    # (لا إنفاق فوق السقف هذا الشهر؛ الاستحقاق يتقدّم فتُعاد الشهر القادم).
-                    if spent + (plan.amount or 0) > plan.monthly_cap:
-                        skip = True
+                    # مقارنة السقف تتم بعملة الصرف (تُحوَّل إن اختلفت) — منحة
+                    # تكسر السقف تُؤجَّل (لا إنفاق فوقه؛ الاستحقاق يتقدّم فتُعاد
+                    # الشهر القادم).
+                    skip = bonus_grant_would_overshoot_cap(db, plan)
                 if not skip:
                     tx = record_bonus_grant(db, uid, plan.amount, plan.currency, direction="expense", person=plan.person, description=f"مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})")
                     if tx:

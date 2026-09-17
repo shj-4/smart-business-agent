@@ -830,6 +830,24 @@ class TestVatFields:
         assert tx.vat_rate == Decimal("0.000")
         assert tx.vat_amount == Decimal("0.00")
 
+    def test_vat_rate_over_100_drops_rate_and_amount(self, db_session):
+        """نسبة غير منطقية (>100%) تُسقط مع مبلغها — لا نُبقي ضريبة بلا نسبة صالحة."""
+        tx = create_transaction(
+            db_session,
+            USER_A,
+            {
+                "type": "expense",
+                "amount": 150,
+                "currency": "ILS",
+                "vat_rate": 150,
+                "vat_amount": 25,
+                "description": "نسبة غير منطقية",
+            },
+            raw_message="نسبة غير منطقية",
+        )
+        assert tx.vat_rate is None
+        assert tx.vat_amount is None
+
     def test_vat_fields_in_recent_records(self, db_session):
         tx = create_transaction(
             db_session,

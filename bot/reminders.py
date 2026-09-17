@@ -22,6 +22,7 @@ from telegram.ext import Application, ContextTypes
 from app.database.crud import mark_overdue_tasks
 from app.database.db import SessionLocal
 from app.database.models import Budget, CreditLimit, Invoice, ReportPref, Task
+from app.formatting import fmt_amount
 from app.timeutil import now_local, now_utc
 from bot.icons import EXPENSE, TASK, WARNING
 
@@ -246,8 +247,8 @@ async def _notify_budget(
     if over and budget.alerted_status < 2:
         lines = [
             f"⚠️ تجاوزت ميزانيتك لـ**{budget_name}**!",
-            f"المصروف: {spent} {budget.currency or ''}",
-            f"السقف: {limit}",
+            f"المصروف: {fmt_amount(spent)} {budget.currency or ''}",
+            f"السقف: {fmt_amount(limit)}",
             f"الاستهلاك: {percent}%",
         ]
         await _broadcast_budget_alert(context, db, budget, lines, status=2)
@@ -256,7 +257,7 @@ async def _notify_budget(
     if percent >= WARNING_THRESHOLD * 100 and budget.alerted_status < 1:
         lines = [
             f"⚠️ اقتربت من سقف ميزانيتك لـ**{budget_name}**",
-            f"المصروف: {spent} {budget.currency or ''} من أصل {limit}",
+            f"المصروف: {fmt_amount(spent)} {budget.currency or ''} من أصل {fmt_amount(limit)}",
             f"الاستهلاك: {percent}%",
         ]
         await _broadcast_budget_alert(context, db, budget, lines, status=1)
@@ -308,7 +309,7 @@ async def invoice_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             owner = inv.telegram_user_id
             lines = [
                 "⚠️ فاتورة آجلة استحقت ولم تُسدَّد!",
-                f"#{inv.id} {inv.person or 'بدون شخص'}: {inv.amount} {inv.currency or ''}",
+                f"#{inv.id} {inv.person or 'بدون شخص'}: {fmt_amount(inv.amount)} {inv.currency or ''}",
             ]
             if inv.description:
                 lines.append(inv.description[:80])
@@ -421,7 +422,7 @@ async def _notify_credit(
         notify_status = 1
     else:
         return
-    detail = f"{relation} من أصل {usage['limit']} ({usage['percent']}%)"
+    detail = f"{relation} من أصل {fmt_amount(usage['limit'])} ({usage['percent']}%)"
 
     sent_any = False
     for uid in accessible_user_ids(db, limit_row.telegram_user_id):
@@ -686,7 +687,7 @@ def build_proactive_digest(db: Session, uid: int, *, days_ahead: int = PROACTIVE
             continue
         when = to_local_naive(inv.due_date).strftime("%m-%d") if inv.due_date else ""
         inv_items.append(
-            f"#{inv.id} {inv.person or 'بدون شخص'}: {inv.amount} {inv.currency or ''}"
+            f"#{inv.id} {inv.person or 'بدون شخص'}: {fmt_amount(inv.amount)} {inv.currency or ''}"
             f"{' — ' + when if when else ''} ({state})"
         )
     if inv_items:

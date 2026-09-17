@@ -101,8 +101,7 @@ def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
     ws.append(headers)
     _style_header(ws, len(headers))
 
-    total_expense = Decimal("0")
-    total_income = Decimal("0")
+    totals: dict[str, list[Decimal]] = {}
 
     for r in rows:
         local_date = to_local_naive(r.created_at)
@@ -126,22 +125,30 @@ def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
         for col_idx in range(1, len(headers) + 1):
             ws.cell(row=row_idx, column=col_idx).border = THIN_BORDER
 
+        cur = r.currency or "غير محددة"
+        bucket = totals.setdefault(cur, [Decimal("0"), Decimal("0")])
         if r.type == "expense":
-            total_expense += amount
+            bucket[0] += amount
         else:
-            total_income += amount
+            bucket[1] += amount
 
     if rows:
+        # الإجماليات تُعرض لكل عملة بمبالغها — لا رقم واحد يخلط عملات مختلفة.
         sum_row = ws.max_row + 2
-        ws.cell(row=sum_row, column=1, value="الإجمالي").font = SUM_FONT
-        ws.cell(row=sum_row, column=2, value="مصروفات").font = SUM_FONT
-        ws.cell(row=sum_row, column=3, value=float(total_expense)).font = SUM_FONT
-        ws.cell(row=sum_row + 1, column=2, value="إيرادات").font = SUM_FONT
-        ws.cell(row=sum_row + 1, column=3, value=float(total_income)).font = SUM_FONT
-        ws.cell(row=sum_row + 2, column=2, value="الصافي").font = SUM_FONT
-        ws.cell(
-            row=sum_row + 2, column=3, value=float(total_income - total_expense)
-        ).font = SUM_FONT
+        for i, (cur, (total_expense, total_income)) in enumerate(sorted(totals.items())):
+            base_row = sum_row + i * 3
+            ws.cell(row=base_row, column=1, value="الإجمالي" if i == 0 else "").font = SUM_FONT
+            ws.cell(row=base_row, column=2, value="مصروفات").font = SUM_FONT
+            ws.cell(row=base_row, column=3, value=float(total_expense)).font = SUM_FONT
+            ws.cell(row=base_row, column=4, value=cur).font = SUM_FONT
+            ws.cell(row=base_row + 1, column=2, value="إيرادات").font = SUM_FONT
+            ws.cell(row=base_row + 1, column=3, value=float(total_income)).font = SUM_FONT
+            ws.cell(row=base_row + 1, column=4, value=cur).font = SUM_FONT
+            ws.cell(row=base_row + 2, column=2, value="الصافي").font = SUM_FONT
+            ws.cell(
+                row=base_row + 2, column=3, value=float(total_income - total_expense)
+            ).font = SUM_FONT
+            ws.cell(row=base_row + 2, column=4, value=cur).font = SUM_FONT
 
 
 def generate_tasks_excel(
@@ -479,8 +486,7 @@ def generate_export_pdf(
 
     story.append(Paragraph("١) المعاملات المالية", heading_style))
     tx_rows = []
-    total_expense = Decimal("0")
-    total_income = Decimal("0")
+    tx_totals: dict[str, list[Decimal]] = {}
     for r in transactions:
         amount = r.amount or Decimal("0")
         local_date = to_local_naive(r.created_at)
@@ -495,17 +501,21 @@ def generate_export_pdf(
                 r.description or "",
             ]
         )
+        cur = r.currency or "غير محددة"
+        bucket = tx_totals.setdefault(cur, [Decimal("0"), Decimal("0")])
         if r.type == "expense":
-            total_expense += amount
+            bucket[0] += amount
         else:
-            total_income += amount
+            bucket[1] += amount
     tx_headers = ["التاريخ", "النوع", "المبلغ", "العملة", "الشخص", "التصنيف", "الوصف"]
     first_total_idx = None
     if tx_rows:
-        tx_rows.append(["الإجمالي", "مصروفات", format(float(total_expense), ".2f"), "", "", "", ""])
-        tx_rows.append(["", "إيرادات", format(float(total_income), ".2f"), "", "", "", ""])
-        tx_rows.append(["", "الصافي", format(float(total_income - total_expense), ".2f"), "", "", "", ""])
-        first_total_idx = 1 + (len(tx_rows) - 3)  # فهرس أول سطر إجماليات داخل data
+        # الإجماليات لكل عملة على حدة — لا نجمع عملات مختلفة في رقم واحد.
+        first_total_idx = len(tx_rows)
+        for cur, (total_expense, total_income) in sorted(tx_totals.items()):
+            tx_rows.append(["الإجمالي", "مصروفات", format(float(total_expense), ".2f"), cur, "", "", ""])
+            tx_rows.append(["", "إيرادات", format(float(total_income), ".2f"), cur, "", "", ""])
+            tx_rows.append(["", "الصافي", format(float(total_income - total_expense), ".2f"), cur, "", "", ""])
     else:
         tx_rows.append(["(لا توجد معاملات)", "", "", "", "", "", ""])
     story.append(_as_table(tx_headers, tx_rows, first_total_idx))

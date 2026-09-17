@@ -488,9 +488,10 @@ def format_credit_limits(payload: list[dict]) -> str:
                 value_txt = f"عليك له {_fmt_amount(u['outstanding'])}"
             else:
                 value_txt = "صفر"
+        percent_txt = f"{u['percent']}%" if u["percent"] is not None else "غير متاح"
         lines.append(
             f"• {name}: {value_txt} / {_fmt_amount(u['limit'])} "
-            f"({u['percent']}%) — {status}"
+            f"({percent_txt}) — {status}"
         )
     return "\n".join(lines)
 
@@ -532,10 +533,14 @@ def format_finance_card(
     overdue_inv = [i for i in invoices if i.status == "overdue"]
     lines.append("")
     if active:
-        total_due = sum(i.amount for i in active)
+        due_totals: dict[str, Decimal] = {}
+        for inv in active:
+            cur = inv.currency or "غير محددة"
+            due_totals[cur] = due_totals.get(cur, Decimal("0")) + (inv.amount or Decimal("0"))
+        total_txt = _totals_line(due_totals)
         lines.append(
             f"الفواتير الآجلة: {len(active)} (منها {len(overdue_inv)} {WARNING} متأخرة) — "
-            f"الإجمالي {_fmt_amount(total_due)}"
+            f"الإجمالي {total_txt}"
         )
         for inv in active[:5]:
             due_txt = ""

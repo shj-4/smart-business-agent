@@ -45,13 +45,15 @@ class TestTransactionsExcel:
         buf.seek(0)
         wb = load_workbook(buf)
         ws = wb.active
-        values = [row[0] for row in ws.iter_rows(values_only=True)]
-        # سطر الإجمالي موجود مع كلمة "الإجمالي"
-        assert any(v == "الإجمالي" for v in values)
-        total_row_idx = values.index("الإجمالي")  # 0-based
-        # الصافي في sum_row + 2 (1-based) = {values index} + 3
-        net = ws.cell(row=total_row_idx + 3, column=3).value
-        assert float(net) == 200.0
+        rows_all = list(ws.iter_rows(values_only=True))
+        # الإجماليات تُعرض لكل عملة على حدة — لا نخلط 300 شيكل مع 500 دولار
+        assert any(v == "الإجمالي" for v in (row[0] for row in rows_all))
+        net_by_cur = {
+            row[3]: float(row[2])
+            for row in rows_all
+            if row and len(row) >= 4 and row[1] == "الصافي" and row[3]
+        }
+        assert net_by_cur == {"ILS": -300.0, "USD": 500.0}
 
 
 class TestTasksExcel:

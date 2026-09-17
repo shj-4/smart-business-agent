@@ -286,13 +286,15 @@ async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return None
 
+    from app.formatting import fmt_amount
+
     scope_txt = {
         "currency": budget.currency,
         "person": f"الشخص {budget.person}",
         "category": f"التصنيف {budget.category}",
     }.get(budget.scope, budget.scope)
     await update.message.reply_text(
-        f"{SUCCESS} أُنشئت ميزانية شهرية: {scope_txt} — {budget.monthly_limit}\n"
+        f"{SUCCESS} أُنشئت ميزانية شهرية: {scope_txt} — {fmt_amount(budget.monthly_limit)}\n"
         "سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه.",
         reply_markup=MAIN_HOME_KEYBOARD,
     )

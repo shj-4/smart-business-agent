@@ -460,12 +460,18 @@ def advance_employee_bonus_due(db: Session, plan: EmployeeBonusPlan, now: dateti
 
 
 def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: datetime | None = None) -> Decimal:
-    """صرف بونس هذا الشهر للموظّف (expense بتصنيف بونس باسمه) عبر مساحة العمل.
+    """صرف بونس هذا الشهر للموظّف (expense بتصنيف بونس باسمه) عبر مساحة العمل."""
+    return _employee_bonus_monthly_spent(db, plan, now)[0]
 
-    العملات لا تُخلط: عملة واحدة تُجمع مباشرة (المحادّ يُفسَّر بها)؛ عدة عملات
-    تُوحَّد لعملة الأساس بالمبالغ المثبّتة وقت التسجيل إن توفرت أو أسعار اليوم —
-    وعند تعذّر التوحيد نجمع عملة الأساس فقط (لا رقمًا مختلطًا قد يضلل المقارنة
-    مع monthly_cap).
+
+def _employee_bonus_monthly_spent(
+    db: Session, plan: EmployeeBonusPlan, now: datetime | None = None
+) -> tuple[Decimal, str]:
+    """يعيد (الصرف، العملة) — العملة تُخبر بماذا تقاس النتيجة لتُقارن بالسقف:
+
+    - عملة واحدة: تُجمع مباشرة وتقاس بعملتها (المحادّ يُفسَّر بها).
+    - عدة عملات: تُوحَّد لعملة الأساس بالمبالغ المثبّتة وقت التسجيل — وتقاس
+      بعملة الأساس؛ عند تعذّر التوحيد نجمع عملة الأساس فقط (لا رقمًا مختلطًا).
     """
     from app.config import settings
     from app.database.crud import _unified_totals_for_rows, accessible_user_ids
@@ -485,12 +491,14 @@ def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: date
         )
         .all()
     )
+    base = (settings.base_currency or "").upper().strip()
     if not rows:
-        return Decimal("0.00")
+        return Decimal("0.00"), (plan.currency or base or "").upper()
     currencies = {r.currency or "غير محددة" for r in rows if r.amount is not None}
     if len(currencies) <= 1:
-        return sum((r.amount or Decimal("0")) for r in rows).quantize(Decimal("0.01"))
-    base = (settings.base_currency or "").upper().strip()
+        total = sum((r.amount or Decimal("0")) for r in rows).quantize(Decimal("0.01"))
+        unit = currencies.pop() if len(currencies) == 1 else (plan.currency or base or "").upper()
+        return total, unit
     total = _unified_totals_for_rows([r for r in rows if r.amount is not None], base).get("total")
     if total is None:
         # لا توحيد متاح (لا أسعار حيّة لعملة أجنبية) — عملة الأساس فقط، بلا خلط
@@ -498,7 +506,30 @@ def employee_bonus_monthly_spent(db: Session, plan: EmployeeBonusPlan, now: date
             (r.amount for r in rows if r.amount is not None and (r.currency or "").upper() == base),
             Decimal("0"),
         )
-    return total.quantize(Decimal("0.01"))
+    return total.quantize(Decimal("0.01")), base
+
+
+def bonus_grant_would_overshoot_cap(db: Session, plan: EmployeeBonusPlan) -> bool:
+    """هل سيكسر منح الخطة الحالية السقف الشهري؟
+
+    يقارن بصرف «الشهر الحالي» المقاس (بعملة الخطة أو بعملة الأساس عند
+    التوحيد) بعد تحويل السقف إلى نفس العملة عند الاختلاف — وعند تعذّر
+    التحويل لا نحكم مقابلته أصلاً (نمنح) فلا نمنع بلا دليل.
+    """
+    if plan.monthly_cap is None:
+        return False
+    spent, unit = _employee_bonus_monthly_spent(db, plan)
+    cap = plan.monthly_cap
+    plan_cur = (plan.currency or "").upper().strip()
+    if plan_cur and plan_cur != (unit or "").upper().strip():
+        from app.exchange import convert
+
+        conv = convert(cap, plan_cur, unit)
+        if conv and conv.get("result") is not None:
+            cap = Decimal(str(conv["result"]))
+        else:
+            return False  # عملتان مختلفتان بلا تحويل — لا نُرجّح على حساب المنحة
+    return spent + (plan.amount or Decimal("0")) > cap
 
 
 def employee_bonus_overview(db: Session, telegram_user_id: int) -> dict:
@@ -506,7 +537,7 @@ def employee_bonus_overview(db: Session, telegram_user_id: int) -> dict:
     plans = list_employee_bonus_plans(db, telegram_user_id)
     out = []
     for p in plans:
-        spent = employee_bonus_monthly_spent(db, p)
+        spent, unit = _employee_bonus_monthly_spent(db, p)
         entry = {
             "id": p.id,
             "person": p.person,
@@ -519,8 +550,21 @@ def employee_bonus_overview(db: Session, telegram_user_id: int) -> dict:
             "cap_status": None,
         }
         if p.monthly_cap is not None:
-            percent = int(round(float(spent) / float(p.monthly_cap) * 100)) if p.monthly_cap > 0 else 0
-            entry["cap_status"] = "over" if spent >= p.monthly_cap else ("near" if percent >= 80 else "ok")
+            cap = p.monthly_cap
+            plan_cur = (p.currency or "").upper().strip()
+            # السقف بعملة الخطة، والصرف قد يُقاس بعملة الأساس بعد التوحيد —
+            # يحوَّل السقف لعملة القياس عند الاختلاف حتى لا يُقارَن عملتان.
+            if plan_cur and plan_cur != (unit or "").upper().strip():
+                from app.exchange import convert
+
+                conv = convert(cap, plan_cur, unit)
+                if conv and conv.get("result") is not None:
+                    cap = Decimal(str(conv["result"]))
+                else:
+                    cap = None
+            if cap is not None and cap > 0:
+                percent = int(round(float(spent) / float(cap) * 100))
+                entry["cap_status"] = "over" if spent >= cap else ("near" if percent >= 80 else "ok")
         out.append(entry)
     return {"plans": out}
 
@@ -775,6 +819,19 @@ def bonus_overview(db: Session, telegram_user_id: int) -> dict:
     report = bonus_report_summary(db, telegram_user_id, period="this_month")
     events = list_bonus_events(db, telegram_user_id)
     active_events = [e for e in events if e.status in ("planned", "active")]
+    event_rows = []
+    for ev in active_events[:5]:
+        summary = event_bonus_summary(db, ev)
+        event_rows.append(
+            {
+                "id": ev.id,
+                "name": ev.name,
+                "status": ev.status,
+                "budget": ev.budget,
+                "currency": ev.currency,
+                "percent": summary["percent"],
+            }
+        )
     plans = employee_bonus_overview(db, telegram_user_id)["plans"]
     due_count = sum(
         1
@@ -787,7 +844,7 @@ def bonus_overview(db: Session, telegram_user_id: int) -> dict:
     return {
         "report": report,
         "events_count": len(active_events),
-        "events": active_events[:5],
+        "events": event_rows,
         "plans": plans,
         "plans_count": len(plans),
         "due_plans_count": due_count,

@@ -560,6 +560,8 @@ def _budget_list_payload(
     for b in budgets:
         budget_monthly_reset(db, b)
         usage = budget_usage(db, b)
+        from app.formatting import fmt_amount
+
         target_txt = {
             "currency": CURRENCY_NAMES.get(b.currency, b.currency),
             "person": f"الشخص {b.person}",
@@ -572,7 +574,7 @@ def _budget_list_payload(
         else:
             status = "ضمن الحدود"
         lines.append(
-            f"#{b.id} {target_txt}: {usage['spent']} / {usage['limit']} "
+            f"#{b.id} {target_txt}: {fmt_amount(usage['spent'])} / {fmt_amount(usage['limit'])} "
             f"({usage['percent']}%) — {status}"
         )
     return lines, budgets
