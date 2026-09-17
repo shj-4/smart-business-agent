@@ -549,6 +549,79 @@ class TestBonusPlanCommandPath:
         due = due_employee_bonus_plans(db_session)
         assert any(p.person == "أحمد" for p in due)
 
+    def test_plan_add_multi_word_person(self, db_session):
+        """الشخص المكوّن من كلمتين (أبو محمد) يُلتقط كاملاً لا الكلمة الأولى فقط."""
+        self._run_cmd_plan(db_session, ["add", "أبو", "محمد", "1000", "monthly"])
+        plans = list_employee_bonus_plans(db_session, USER_A)
+        assert len(plans) == 1
+        assert plans[0].person == "أبو محمد"
+        assert plans[0].amount == Decimal("1000")
+
+    def test_plan_add_multi_word_with_cap(self, db_session):
+        self._run_cmd_plan(db_session, ["add", "أم", "كلثوم", "2000", "monthly", "500"])
+        plans = list_employee_bonus_plans(db_session, USER_A)
+        assert len(plans) == 1
+        assert plans[0].person == "أم كلثوم"
+        assert plans[0].monthly_cap == Decimal("500")
+
+
+# ---------- مسار الأمر الفعلي (_cmd_event) ----------
+
+
+class TestBonusEventCommandPath:
+    def _run_cmd_event(self, db_session, args):
+        import asyncio
+        from unittest.mock import patch
+
+        from sqlalchemy.orm import sessionmaker
+
+        sent: list[str] = []
+
+        class _Msg:
+            async def reply_text(self, text, *a, **k):
+                sent.append(text)
+
+        class _Upd:
+            def __init__(self):
+                self.message = _Msg()
+
+        from bot.bonus import _cmd_event
+
+        cmd = _cmd_event
+        fac = sessionmaker(bind=db_session.get_bind())
+        with patch("bot.bonus.SessionLocal", fac):
+            asyncio.run(cmd(_Upd(), USER_A, args))
+        return sent
+
+    def test_event_add_multi_word_name(self, db_session):
+        from app.database.crud import list_bonus_events
+
+        self._run_cmd_event(
+            db_session, ["add", "عرض", "رمضان", "5000", "ILS"]
+        )
+        events = list_bonus_events(db_session, USER_A)
+        assert len(events) == 1
+        assert events[0].name == "عرض رمضان"
+        assert events[0].budget == Decimal("5000")
+        assert events[0].currency == "ILS"
+
+    def test_event_add_multi_word_name_without_budget(self, db_session):
+        from app.database.crud import list_bonus_events
+
+        self._run_cmd_event(db_session, ["add", "عرض", "رمضان", "ILS"])
+        events = list_bonus_events(db_session, USER_A)
+        assert len(events) == 1
+        assert events[0].name == "عرض رمضان"
+        assert events[0].currency == "ILS"
+
+    def test_event_add_multi_word_name_no_currency(self, db_session):
+        from app.database.crud import list_bonus_events
+
+        self._run_cmd_event(db_session, ["add", "فعاليـة", "الصيف"])
+        events = list_bonus_events(db_session, USER_A)
+        assert len(events) == 1
+        assert events[0].name == "فعاليـة الصيف"
+
 
 # ---------- نظرة شاملة ----------
 

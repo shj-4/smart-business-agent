@@ -557,6 +557,7 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         delete_budget,
         list_budgets,
     )
+    from bot.bonus import split_name_and_amount
 
     telegram_user_id = update.effective_user.id
     args = context.args or []
@@ -588,8 +589,6 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 return
             scope_txt = args[1].strip()
-            target = args[2].strip()
-            limit_str = args[3]
 
             if scope_txt.lower() in ("عملة", "currency"):
                 scope = "currency"
@@ -602,6 +601,15 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "النطاق غير معروف. استخدم: عملة|currency أو شخص|person أو تصنيف|category"
                 )
                 return
+
+            target, amount, _ = split_name_and_amount(args[2:])
+            if not target or amount is None:
+                await update.message.reply_text(
+                    "لم أستطع قراءة الهدف والمبلغ. مثال:\n"
+                    "/budget إضافة شخص أبو محمد 1500"
+                )
+                return
+            limit_str = str(amount)
 
             if scope == "currency":
                 from app.database.crud import normalize_currency
@@ -781,10 +789,15 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         if args and args[0].strip().lower() in ("add", "اضافة", "إضافة"):
             if len(args) < 3:
-                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة محمد 5000")
+                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
                 return
-            person = args[1].strip()
-            limit = args[2]
+            from bot.bonus import split_name_and_amount
+
+            person, limit_dec, _ = split_name_and_amount(args[1:])
+            if not person or limit_dec is None:
+                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
+                return
+            limit = str(limit_dec)
             row = set_credit_limit(db, telegraph_id, person, limit)
             if not row:
                 await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا.")

@@ -680,6 +680,84 @@ class TestBudgetCommandScope:
         replies = self._run(["add", "currency", "XYZ", "2000"], db_session, monkeypatch)
         assert replies and "العملة غير معروفة" in replies[0]
 
+    def test_scope_person_multi_word_target(self, db_session, monkeypatch):
+        from app.database.crud import list_budgets
+
+        replies = self._run(
+            ["add", "person", "أبو", "محمد", "1500"], db_session, monkeypatch
+        )
+        assert replies and "تم إنشاء ميزانية" in replies[0]
+        assert "أبو محمد" in replies[0]
+        budgets = list_budgets(db_session, USER_A)
+        assert not budgets or budgets[0].person == "أبو محمد"
+
+    def test_scope_category_multi_word_target(self, db_session, monkeypatch):
+        replies = self._run(
+            ["add", "category", "مشتريات", "المكتب", "800"], db_session, monkeypatch
+        )
+        assert replies and "تم إنشاء ميزانية" in replies[0]
+        from app.database.crud import list_budgets
+
+        budgets = list_budgets(db_session, USER_A)
+        target = (
+            budgets[0].category
+            if budgets and budgets[0].category
+            else (budgets[0].person if budgets else None)
+        )
+        assert target in ("مشتريات المكتب", "مشتريات المكتب")
+
+    def test_scope_person_without_amount_rejected(self, db_session, monkeypatch):
+        replies = self._run(
+            ["add", "person", "أبو", "محمد"], db_session, monkeypatch
+        )
+        assert replies and "لم أستطع قراءة" in replies[0]
+
+
+# ---------- /credit: أسماء متعددة الكلمات ----------
+
+
+class TestCreditCommandMultiWord:
+    def _run(self, args, db_session, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+
+        import bot.handlers as handlers
+
+        monkeypatch.setattr(handlers, "SessionLocal", lambda: db_session)
+        replies = []
+
+        class _Msg:
+            async def reply_text(self, text, **kwargs):
+                replies.append(text)
+
+        update = SimpleNamespace(
+            message=_Msg(), effective_user=SimpleNamespace(id=USER_A)
+        )
+        ctx = SimpleNamespace(args=args, user_data={})
+        asyncio.run(handlers.credit_command(update, ctx))
+        return replies
+
+    def test_add_multi_word_person(self, db_session, monkeypatch):
+        from app.database.crud import list_credit_limits
+
+        replies = self._run(["add", "أبو", "محمد", "5000"], db_session, monkeypatch)
+        assert replies and "حُدّد سقف ائتماني" in replies[0]
+        assert "أبو محمد" in replies[0]
+        persons = [lim.person for lim in list_credit_limits(db_session, USER_A)]
+        assert "أبو محمد" in persons
+
+    def test_add_single_word_still_works(self, db_session, monkeypatch):
+        from app.database.crud import list_credit_limits
+
+        replies = self._run(["add", "محمد", "5000"], db_session, monkeypatch)
+        assert replies and "حُدّد سقف ائتماني" in replies[0]
+        persons = [lim.person for lim in list_credit_limits(db_session, USER_A)]
+        assert "محمد" in persons
+
+    def test_add_without_amount_rejected(self, db_session, monkeypatch):
+        replies = self._run(["add", "أبو", "محمد"], db_session, monkeypatch)
+        assert replies and "استخدم: /credit إضافة" in replies[0]
+
 
 # ---------- تنبيه الميزانيات: يصل لكل أعضاء المساحة ----------
 

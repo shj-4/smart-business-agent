@@ -122,6 +122,29 @@ def _parse_optional_args(args: list[str], defaults: dict | None = None) -> dict:
     return {"currency": currency, "person": person, "desc": desc}
 
 
+def split_name_and_amount(args: list[str]) -> tuple[str, Decimal | None, list[str]]:
+    """يقسّم وسائط إلى (الاسم متعدد الكلمات، المبلغ أو None، بقية الوسائط).
+
+    يلتقط كل الوسائط قبل أول رقم كاسم، ثم الرقم الأول كمبلغ، والباقي لواحق.
+    مثال: ["أبو", "محمد", "1000", "monthly"] -> ("أبو محمد", 1000, ["monthly"]).
+    يطبّق نفس نمط _BUDGET_TEXT_RE في conversation.py بدل args[N] الموضعي.
+    """
+    name_parts: list[str] = []
+    amount: Decimal | None = None
+    rest: list[str] = []
+    for i, token in enumerate(args):
+        val = token.strip()
+        if not val:
+            continue
+        try:
+            amount = Decimal(val.replace(",", "."))
+            rest = [x.strip() for x in args[i + 1:] if x.strip()]
+            break
+        except InvalidOperation:
+            name_parts.append(val)
+    return " ".join(name_parts).strip(), amount, rest
+
+
 def _db_call(fn):
     """ينفّذ fn على جلسة DB مُغلقة آليًا."""
     db = SessionLocal()
@@ -376,22 +399,23 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
         if len(args) < 2:
             await update.message.reply_text("استخدم: /bonus event إضافة اسم الفعالية [ميزانية] [عملة]")
             return
-        name = args[1].strip()
-        budget = None
+        raw_parts = [x for x in (v.strip() for v in args[1:]) if x]
         currency = None
-        for raw in args[2:]:
-            val = raw.strip()
-            if not val:
-                continue
-            if budget is None:
-                try:
-                    budget = Decimal(val)
-                    continue
-                except InvalidOperation:
-                    pass
+        for pos in range(len(raw_parts) - 1, -1, -1):
+            cur = _known_currency(raw_parts[pos])
+            if cur:
+                currency = cur
+                raw_parts.pop(pos)
+                break
+        name, budget, remaining = split_name_and_amount(raw_parts)
+        if not name:
+            await update.message.reply_text("استخدم: /bonus event إضافة اسم الفعالية [ميزانية] [عملة]")
+            return
+        for val in remaining:
             cur = _known_currency(val)
             if cur:
                 currency = cur
+                break
 
         from app.database.crud import create_bonus_event
         ev = await asyncio.to_thread(lambda: _db_call(lambda db: create_bonus_event(db, uid, name, budget=budget, currency=currency)))
@@ -443,21 +467,19 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
         if len(args) < 3:
             await update.message.reply_text("استخدم: /bonus plan إضافة <الشخص> <المبلغ> [monthly|quarterly|one_off] [سقف شهري]")
             return
-        person = args[1].strip()
-        try:
-            amount = Decimal(args[2])
-        except InvalidOperation:
-            await update.message.reply_text(f"المبلغ غير صالح: {args[2]}")
+        person, amount, remaining = split_name_and_amount(args[1:])
+        if amount is None or not person:
+            await update.message.reply_text("استخدم: /bonus plan إضافة <الشخص> <المبلغ> [monthly|quarterly|one_off] [سقف شهري]")
             return
         freq = "monthly"
-        if len(args) > 3:
-            raw = args[3].strip().lower()
+        if remaining:
+            raw = remaining[0].strip().lower()
             freq_map = {"monthly": "monthly", "شهري": "monthly", "quarterly": "quarterly", "ربع سنوي": "quarterly", "one_off": "one_off", "مرة واحدة": "one_off", "مرة": "one_off"}
             freq = freq_map.get(raw, "monthly")
         cap = None
-        if len(args) > 4:
+        if len(remaining) > 1:
             try:
-                cap = Decimal(args[4])
+                cap = Decimal(remaining[1])
             except InvalidOperation:
                 pass
         from app.database.crud import create_employee_bonus_plan
