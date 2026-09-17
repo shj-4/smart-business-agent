@@ -623,6 +623,88 @@ def format_user_stats(stats: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------- لوحة مؤشرات الأداء (/kpi) ----------
+
+
+def format_kpi_dashboard(payload: dict) -> str:
+    """يعرض لوحة KPI مختصرة: مال الشهر الحالي/السابق + مهام/فواتير/طلبيات/ميزانيات."""
+    cm = payload["current_month"]
+    pm = payload["prev_month"]
+    base = payload["base"] or ""
+
+    def _money(value, suffix: str = "") -> str:
+        if value is None:
+            return f"غير متاح {suffix}".rstrip()
+        return f"{_fmt_amount(value)} {suffix}".rstrip()
+
+    def _delta_txt(key: str, label: str) -> str:
+        pct = payload.get(key)
+        if pct is None:
+            return ""
+        if abs(pct) < 0.05:
+            return f"   {label}: بلا تغيير يُذكر"
+        if pct > 0:
+            return f"   {label}: ▲ +{pct:.1f}%"
+        return f"   {label}: ▼ {pct:.1f}%"
+
+    lines = [f"🧭 لوحة مؤشرات أعمالك — {payload['as_of']}\n"]
+
+    lines.append(f"📅 الشهر الحالي ({cm['label']}):")
+    lines.append(f"{INCOME} إيرادات: {_money(cm['income'], base)}")
+    lines.append(f"{EXPENSE} مصاريف: {_money(cm['expense'], base)}")
+    lines.append(f"💰 الصافي: {_money(cm['net'], base)}")
+
+    delta_lines = [
+        d
+        for d in (_delta_txt("expense_vs_prev_pct", "مصاريف عن السابق"), _delta_txt("income_vs_prev_pct", "إيرادات عن السابق"))
+        if d
+    ]
+    if delta_lines:
+        lines.append("")
+        lines.append(f"📈 مقارنة مع الشهر السابق ({pm['label']}):")
+        lines.extend(delta_lines)
+    else:
+        lines.append("")
+
+    tk = payload["tasks"]
+    iv = payload["invoices"]
+    bg = payload["budgets"]
+    overdue_tasks_txt = f" ({tk['overdue']} {WARNING} متأخرة)" if tk["overdue"] else ""
+    overdue_inv_txt = f" ({iv['overdue']} {WARNING} متأخرة)" if iv["overdue"] else ""
+    lines += [
+        f"{TASK} المهام: {tk['pending']} معلّقة{overdue_tasks_txt}",
+        f"🧾 الفواتير: {iv['pending']} آجلة{overdue_inv_txt}",
+        f"🛒 الطلبيات المفتوحة: {payload['orders_open']}",
+    ]
+    if bg["total"]:
+        warn = []
+        if bg["over"]:
+            warn.append(f"{bg['over']} تجاوزت السقف {WARNING}")
+        if bg["near"]:
+            warn.append(f"{bg['near']} تقترب من السقف")
+        suffix = f" — {' و '.join(warn)}" if warn else ""
+        lines.append(f"🎯 الميزانيات: {bg['total']} مفعّلة{suffix}")
+    if payload.get("debts_net") is not None:
+        dn = payload["debts_net"]
+        if dn > 0:
+            lines.append(f"💳 صافي الذمم: {_money(dn, base)} لك (يدين لك الآخرون)")
+        elif dn < 0:
+            lines.append(f"💳 صافي الذمم: {_money(-dn, base)} عليك (تدين أنت)")
+        else:
+            lines.append("💳 صافي الذمم: متوازن 0")
+
+    top = payload.get("top_categories") or []
+    if top:
+        lines.append("")
+        lines.append("🏆 أكثر تصنيفات الإنفاق هذا الشهر:")
+        for c in top:
+            suffix = f" ({c['count']} عملية)" if c["count"] > 1 else ""
+            lines.append(f"  {EXPENSE} {c['category']}: {_money(c['amount'], base)}{suffix}")
+
+    lines.append("\nللتفصيل: /report · /finance · /deviation · /forecast")
+    return "\n".join(lines)
+
+
 # ---------- الفحص الصحي (/health) ----------
 
 

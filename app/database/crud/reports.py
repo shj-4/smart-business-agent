@@ -287,6 +287,158 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
         "db_size_bytes": db_size_bytes(),
     }
 
+def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
+    """لوحة مؤشرات أداء مختصرة (KPI) — الشهر الحالي مقابل السابق + مهام/فواتير/ميزانيات.
+
+    لا شبكة حتمية: المبالغ المثبّتة بعملة الأساس وقت التسجيل تُفضَّل للتوحيد
+    (convert_totals_to_base بأسلوب stored)؛ ما لا يملك مبلغًا مخزَّنًا يُمتحن
+    بسعر اليوم عبر المصدر المشترك. أي فشل تحويل يجعل الحقل None بدل رقم ناقص.
+    يعيد dict يُنسَّق في العرض، والشهر الحالي دائمًا موجود حتى لو كان خاويًا.
+    """
+    from app.database.crud import (
+        _unified_totals_for_rows,
+        accessible_user_ids,
+        budget_usage,
+        list_budgets,
+        person_debts,
+    )
+
+    base = (settings.base_currency or "").upper().strip()
+    ids = accessible_user_ids(db, telegram_user_id) or {-1}
+
+    entries = monthly_totals(db, telegram_user_id, months=2, include_stored=True)
+    current = entries[-1]
+    previous = entries[-2] if len(entries) > 1 else {}
+
+    def _month_unified(entry: dict, kind: str) -> Decimal | None:
+        by = entry.get("by_currency") or {}
+        stored = entry.get("stored") or {}
+        totals = {
+            c: v.get(kind) for c, v in by.items() if v.get(kind) is not None
+        }
+        stored_map = {
+            c: v.get(kind) for c, v in stored.items() if v.get(kind) is not None
+        }
+        if not totals and not stored_map:
+            return Decimal("0.00")
+        conv = convert_totals_to_base(totals, base, stored=stored_map)
+        return conv.get("total")
+
+    cur_exp = _month_unified(current, "expense")
+    cur_inc = _month_unified(current, "income")
+    prev_exp = _month_unified(previous, "expense")
+    prev_inc = _month_unified(previous, "income")
+
+    def _delta(cur: Decimal | None, prev: Decimal | None) -> float | None:
+        if cur is None or prev is None or prev == 0:
+            return None
+        return round(float((cur - prev) / prev * 100), 1)
+
+    task_q = db.query(Task).filter(
+        Task.telegram_user_id.in_(ids), Task.deleted_at.is_(None)
+    )
+    tasks_pending = task_q.filter(Task.status == "pending").count()
+    tasks_overdue = task_q.filter(Task.status == "overdue").count()
+
+    inv_q = db.query(Invoice).filter(Invoice.telegram_user_id.in_(ids))
+    inv_pending = inv_q.filter(Invoice.status == "pending").count()
+    inv_overdue = inv_q.filter(Invoice.status == "overdue").count()
+
+    orders_open = (
+        db.query(Note)
+        .filter(
+            Note.telegram_user_id.in_(ids),
+            Note.deleted_at.is_(None),
+            Note.note_type == "order",
+            Note.status == "open",
+        )
+        .count()
+    )
+
+    budgets = list_budgets(db, telegram_user_id)
+    budgets_over = sum(1 for b in budgets if budget_usage(db, b).get("over"))
+    budgets_near = sum(
+        1
+        for b in budgets
+        if (u := budget_usage(db, b)).get("percent") >= 80 and not u.get("over")
+    )
+
+    debts_net = None
+    for d in person_debts(db, telegram_user_id):
+        bal = d.get("balance_unified")
+        if bal is None:
+            continue
+        debts_net = (debts_net or Decimal("0")) + bal
+    if debts_net is not None:
+        debts_net = debts_net.quantize(Decimal("0.01"))
+
+    local_now = now_local()
+    month_start = to_utc_naive(
+        local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    )
+    cat_rows = (
+        db.query(Transaction)
+        .filter(
+            Transaction.telegram_user_id.in_(ids),
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "expense",
+            Transaction.created_at >= month_start,
+        )
+        .all()
+    )
+    cat_groups: dict[str, list] = {}
+    for r in cat_rows:
+        cat_groups.setdefault(r.category or "بدون تصنيف", []).append(r)
+    top_categories = []
+    for cat, rows in cat_groups.items():
+        unified = _unified_totals_for_rows(rows, base).get("total")
+        if unified is None:
+            unified = sum(
+                (r.amount for r in rows if r.amount is not None), Decimal("0")
+            )
+        top_categories.append(
+            {
+                "category": cat,
+                "amount": unified.quantize(Decimal("0.01")) if unified else Decimal("0.00"),
+                "count": len(rows),
+            }
+        )
+    top_categories.sort(key=lambda x: x["amount"], reverse=True)
+
+    return {
+        "as_of": local_now.strftime("%Y-%m-%d"),
+        "base": base,
+        "workspace_size": len(ids),
+        "current_month": {
+            "label": current.get("label", ""),
+            "expense": cur_exp,
+            "income": cur_inc,
+            "net": (
+                (cur_inc - cur_exp).quantize(Decimal("0.01"))
+                if cur_inc is not None and cur_exp is not None
+                else None
+            ),
+        },
+        "prev_month": {
+            "label": previous.get("label", ""),
+            "expense": prev_exp,
+            "income": prev_inc,
+        },
+        "expense_vs_prev_pct": _delta(cur_exp, prev_exp),
+        "income_vs_prev_pct": _delta(cur_inc, prev_inc),
+        "tasks": {"pending": tasks_pending, "overdue": tasks_overdue},
+        "invoices": {"pending": inv_pending, "overdue": inv_overdue},
+        "orders_open": orders_open,
+        "budgets": {
+            "total": len(budgets),
+            "over": budgets_over,
+            "near": budgets_near,
+        },
+        "debts_net": debts_net,
+        "top_categories": top_categories[:5],
+    }
+
+
 def _linear_forecast(values: list[Decimal], steps: int = 1) -> list[Decimal | None]:
     """تنبؤ خطي بسيط (انحدار على آخر قيم) مع قصّ عند الصفر — بلا أي شبكة.
 

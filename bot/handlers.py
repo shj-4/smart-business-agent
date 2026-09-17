@@ -92,6 +92,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/credit — الحدود الائتمانية للأشخاص\n"
         "/bonus — البونس والمكافآت ونقاط الولاء\n"
         "/stats — إحصائيات استخدامك\n"
+        "/kpi — لوحة مؤشرات أداء أعمالك (مال الشهر/مهام/فواتير)\n"
         "/health — فحص صحة النظام\n"
         "/export pdf — تصدير PDF بكل السجلات\n"
         "/forecast — توقعات الأشهر القادمة\n"
@@ -1001,6 +1002,19 @@ async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(f"{SUCCESS} عُلِّم السجل كمراجَع." if ok else "لم أجد سجلًا بهذا الرقم.")
 
 
+async def kpi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /kpi — لوحة مؤشرات أداء مختصرة (مال هذا الشهر/السابق + مهام/فواتير/ميزانيات)."""
+    from app.database.crud import kpi_dashboard
+    from bot.formatters import format_kpi_dashboard
+
+    db = SessionLocal()
+    try:
+        payload = kpi_dashboard(db, update.effective_user.id)
+    finally:
+        db.close()
+    await update.message.reply_text(format_kpi_dashboard(payload))
+
+
 async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /work — إدارة الحساب المشترك (مساحة عمل لعدة معرّفات Telegram).
 
@@ -1172,6 +1186,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("orders", orders_command))
     app.add_handler(CommandHandler("credit", credit_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("kpi", kpi_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("forecast", forecast_command))
     app.add_handler(CommandHandler("deviation", deviation_command))

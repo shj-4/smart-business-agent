@@ -128,6 +128,7 @@ from .reports import (
     deviation_summary,
     forecast_totals,
     get_report_pref,
+    kpi_dashboard,
     list_report_prefs,
     mark_report_sent,
     monthly_totals,

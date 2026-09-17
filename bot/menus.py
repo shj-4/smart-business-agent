@@ -147,6 +147,7 @@ TOOLS_MENU = [
     [("🧾 الفواتير الآجلة", "tool:invoices")],
     [("🛒 طلبياتي", "tool:orders")],
     [(f"{WARNING} الحدود الائتمانية", "tool:credit")],
+    [("🧭 لوحة مؤشرات الأداء", "tool:kpi")],
     [("📈 الرسم البياني", "tool:chart")],
     [("🧾 تقرير شامل", "tool:summary")],
     [("📄 تصدير PDF", "tool:pdf")],
@@ -228,6 +229,7 @@ def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [("sb:start", t("btn_search", lang))],
         [("bg:list", t("btn_budget", lang))],
         [("bn:overview", t("btn_bonus", lang))],
+        [("tool:kpi", t("btn_kpi", lang))],
         [("tool:finance", t("btn_finance", lang))],
         [("tool:chart", t("btn_chart", lang))],
         [("tool:summary", t("btn_summary", lang))],
@@ -909,6 +911,8 @@ async def _handle_tool(
         await _tool_lists(query, context, act)
     elif act == "finance":
         await _handle_tool_finance(query, context)
+    elif act == "kpi":
+        await _handle_tool_kpi(query, context)
     else:
         await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
 
@@ -1123,6 +1127,19 @@ async def _handle_tool_finance(
         [(f"{HOME} القائمة الرئيسية", "menu:main")],
     ]
     await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _handle_tool_kpi(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """لوحة مؤشرات الأداء (/kpi) عبر زر القائمة."""
+    from app.database.crud import kpi_dashboard
+    from bot.formatters import format_kpi_dashboard
+
+    db = SessionLocal()
+    try:
+        text = format_kpi_dashboard(kpi_dashboard(db, query.from_user.id))
+    finally:
+        db.close()
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
 async def _handle_invoice_pay(

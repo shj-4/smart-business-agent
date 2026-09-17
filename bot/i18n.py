@@ -39,6 +39,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "btn_budget": {"ar": f"{EXPENSE} الميزانيات", "en": f"{EXPENSE} Budgets"},
     "btn_finance": {"ar": "💳 بطاقة الذمم الموحّدة", "en": "💳 Unified ledger card"},
     "btn_chart": {"ar": "📈 الرسم البياني", "en": "📈 Chart"},
+    "btn_kpi": {"ar": "🧭 لوحة مؤشرات الأداء", "en": "🧭 KPI dashboard"},
     "btn_export": {"ar": "📦 تصدير Excel", "en": "📦 Export Excel"},
     "btn_export_pdf": {"ar": "📄 تصدير PDF", "en": "📄 Export PDF"},
     "btn_summary": {"ar": "🧾 تقرير شامل", "en": "🧾 Summary report"},
