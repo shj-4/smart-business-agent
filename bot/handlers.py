@@ -93,6 +93,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/bonus — البونس والمكافآت ونقاط الولاء\n"
         "/stats — إحصائيات استخدامك\n"
         "/kpi — لوحة مؤشرات أداء أعمالك (مال الشهر/مهام/فواتير)\n"
+        "/brief — نشرة إدارة يومية ذكية عن حالة عملك\n"
         "/health — فحص صحة النظام\n"
         "/export pdf — تصدير PDF بكل السجلات\n"
         "/forecast — توقعات الأشهر القادمة\n"
@@ -1015,6 +1016,25 @@ async def kpi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(format_kpi_dashboard(payload))
 
 
+async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /brief — نشرة إدارة يومية بالذكاء الاصطناعي (تسقط للنص المحلي عند فشل Gemini)."""
+    from app.ai_service import generate_daily_brief
+    from app.database.crud import kpi_dashboard
+    from bot.formatters import format_brief_data, format_kpi_dashboard
+
+    db = SessionLocal()
+    try:
+        payload = kpi_dashboard(db, update.effective_user.id)
+    finally:
+        db.close()
+
+    brief = generate_daily_brief(format_brief_data(payload))
+    if brief:
+        await update.message.reply_text(brief)
+    else:
+        await update.message.reply_text(format_kpi_dashboard(payload))
+
+
 async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /work — إدارة الحساب المشترك (مساحة عمل لعدة معرّفات Telegram).
 
@@ -1187,6 +1207,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("credit", credit_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("kpi", kpi_command))
+    app.add_handler(CommandHandler("brief", brief_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("forecast", forecast_command))
     app.add_handler(CommandHandler("deviation", deviation_command))

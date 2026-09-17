@@ -705,6 +705,65 @@ def format_kpi_dashboard(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def format_brief_data(payload: dict) -> str:
+    """يحوّل بيانات لوحة KPI إلى نص سردي مضغوط بأرقام فقط — يُغذّى للذكاء.
+
+    بلا تنسيق رسائل (لا أيقونات/توابع) لأن المخرج يُرسَل كبيانات سياق لـ Gemini،
+    والمتلقّي النهائي يُنسَّق عنونةً في generate_daily_brief. أي وحدة نقدية
+    تُكتب مع المبلغ، والقيم غير المتاحة تُترك صراحةً (غير متاح) لا أرقامًا.
+    """
+    from decimal import Decimal
+
+    cm = payload["current_month"]
+    pm = payload["prev_month"]
+    base = payload["base"] or ""
+    tk = payload["tasks"]
+    iv = payload["invoices"]
+    bg = payload["budgets"]
+    dn = payload.get("debts_net")
+
+    def _num(value) -> str:
+        if value is None:
+            return "غير متاح"
+        if isinstance(value, Decimal):
+            return f"{value}"
+        return f"{value}"
+
+    lines = [
+        f"التاريخ المرجعي: {payload['as_of']}",
+        f"العملة الأساس: {base or 'غير محددة'}",
+        f"الشهر الحالي ({cm['label']}):",
+        f"  الإيرادات المجمّعة: {_num(cm['income'])} {base}",
+        f"  المصاريف المجمّعة: {_num(cm['expense'])} {base}",
+        f"  الصافي: {_num(cm['net'])} {base}",
+    ]
+    if pm.get("label"):
+        lines.append(f"الشهر السابق ({pm['label']}):")
+        lines.append(f"  الإيرادات: {_num(pm.get('income'))} · المصاريف: {_num(pm.get('expense'))}")
+    for key, label in (("expense_vs_prev_pct", "نسبة تغيّر المصاريف"), ("income_vs_prev_pct", "نسبة تغيّر الإيرادات")):
+        pct = payload.get(key)
+        lines.append(f"  {label} مقابل الشهر السابق: {pct}%" if pct is not None else f"  {label}: غير متاح")
+    lines += [
+        f"المهام المعلّقة: {tk['pending']} · المتأخرة: {tk['overdue']}",
+        f"الفواتير الآجلة: {iv['pending']} · المتأخرة: {iv['overdue']}",
+        f"الطلبيات المفتوحة: {payload['orders_open']}",
+        f"الميزانيات: {bg['total']} مفعّلة · تجاوزت السقف {bg['over']} · تقترب {bg['near']}",
+        (
+            f"صافي الذمم (لك/عليك): {_num(dn)} {base}"
+            if dn is not None
+            else "صافي الذمم: غير متاح"
+        ),
+        "أعلى تصنيفات الإنفاق هذا الشهر:",
+    ]
+    top = payload.get("top_categories") or []
+    if top:
+        for c in top[:3]:
+            lines.append(f"  {c['category']}: {_num(c['amount'])} {base} ({c['count']} عملية)")
+    else:
+        lines.append("  لا توجد مصاريف هذا الشهر")
+    return "\n".join(lines)
+
+
 # ---------- الفحص الصحي (/health) ----------
 
 

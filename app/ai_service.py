@@ -420,6 +420,48 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
     return normalize_analysis(parsed)
 
 
+def _generate_text_with_prompt(contents: str, system_prompt: str) -> str:
+    """استدعاء نصّي حر لـ Gemini مع retry — يعيد نصًا أو فراغًا عند الفشل.
+
+    يُستخدم للإنشائية (نشرة إدارة/ملاحظات) حيث المخرج نص عربي حر لا يُفسَّر
+    JSON ولا يُنفَّذ — لا يمرّ عبر normalize_analysis إطلاقًا (ليس intent).
+    """
+    if has_injection_pattern(contents):
+        logger.info("رُصدت محاولة حقن برومبت في بيانات النشرة — رُفض التوليد: %.60s", contents)
+        return ""
+    try:
+        response = retry(
+            stop=_RETRY_STOP,
+            wait=_RETRY_WAIT,
+            retry=_RETRY_RETRY,
+        )(
+            lambda: _call_gemini(
+                contents=contents,
+                config={"safety_settings": [], "system_instruction": system_prompt},
+            )
+        )()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("فشل توليد النص عبر Gemini: %s", exc)
+        return ""
+    return (response.text or "").strip()
+
+
+DAILY_BRIEF_PROMPT = _prompt_fallback("daily_brief.md")
+
+
+def generate_daily_brief(brief_data: str) -> str:
+    """ينشئ نشرة إدارة يومية (نص حر) من بيانات مجمّعة نصية جاهزة.
+
+    brief_data نص سردي مُجمَّع من القاعدة (أرقام موثوقة لا تتضمن تعليمات)،
+    والمخرج نص للعرض فقط — لا يُنفَّذ ولا يُفسَّر. يعيد فراغًا عند الفشل فيسقط
+    المتصل إلى الملخص النصي المحلي (format_kpi_dashboard) دون كسر التجربة.
+    """
+    return _generate_text_with_prompt(
+        contents=f"البيانات المالية والإدارية المجمّعة اليوم:\n{brief_data}",
+        system_prompt=DAILY_BRIEF_PROMPT,
+    )
+
+
 def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
     try:
         response = retry(
@@ -453,4 +495,5 @@ from app.prompt_loader import load_prompt as _load_prompt  # noqa: E402
 SYSTEM_PROMPT = _load_prompt("system_general.md", _prompt_fallback("system_general.md"))
 RECEIPT_SYSTEM_PROMPT = _load_prompt("receipt_system.md", _prompt_fallback("receipt_system.md"))
 STT_PROMPT = _load_prompt("stt.md", _prompt_fallback("stt.md"))
+DAILY_BRIEF_PROMPT = _load_prompt("daily_brief.md", _prompt_fallback("daily_brief.md"))
 REPAIR_PROMPT = _load_prompt("repair_json.md", _prompt_fallback("repair_json.md"))
