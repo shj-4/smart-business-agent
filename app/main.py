@@ -102,9 +102,24 @@ def _restrict_file_windows(path: str) -> None:
             )
             return
 
-        # أزل الوراثة وامنح المالك الحالي فقط
+        # أزل الوراثة وامنح المالك الحالي + SYSTEM (للخدمة)
         subprocess.run(
             ["icacls", path, "/inheritance:r"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # امنح المستخدم الحالي
+        subprocess.run(
+            ["icacls", path, "/grant:r", f"{username}:(F)"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # امنح SYSTEM أيضًا لخدمات nssm (LocalSystem)
+        subprocess.run(
+            ["icacls", path, "/grant:r", "SYSTEM:(F)"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
