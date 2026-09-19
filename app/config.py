@@ -103,6 +103,11 @@ class Settings(BaseSettings):
         "مرور مؤقتة عند كل إقلاع وتُحفظ في ملف منفصل (data/dashboard_credentials.txt) "
         "بصلاحيات 0600 — لا تُكتب في السجلات.",
     )
+    gemini_model: str = Field(
+        default="gemini-3.1-flash-lite",
+        description="نموذج Gemini المستخدم للتحليل ونسخ الصوت (GEMINI_MODEL) — يتيح "
+        "تبديل النموذج من .env دون إعادة نشر الكود.",
+    )
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod
@@ -144,7 +149,13 @@ def validate_env() -> list[str]:
         missing.append(
             "  ENCRYPTION_KEY — إجباري في الإنتاج لتشفير الحقول الحساسة (بدونه لن يبدأ البوت)."
         )
-    elif (settings.encryption_key or "").strip():
+    if settings.app_env == "production" and not (settings.dashboard_password or "").strip():
+        missing.append(
+            "  DASHBOARD_PASSWORD — إجباري في الإنتاج؛ يمنع توليد كلمة مرور مؤقتة "
+            "لأن ملف data/dashboard_credentials.txt لا يُحمى تلقائيًا بـ 0o600 على Windows "
+            "(يحتاج icacls). اضبطه صراحة في .env."
+        )
+    if (settings.encryption_key or "").strip():
         # مفتاح مضبوط لكن غير صالح: ممنوع في الإنتاج (كان يُكتشف فقط عند أول
         # كتابة — بانهيار — أو يكتب نصًا واضحًا صامتًا). استيراد محلي لتجنب
         # الدورة: app.security يستورد settings من هذا الملف.

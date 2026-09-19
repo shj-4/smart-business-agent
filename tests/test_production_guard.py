@@ -13,9 +13,10 @@ from app.config import Settings, ensure_env_or_exit, validate_env
 _TEST_KEY = base64.b64encode(b"0" * 32).decode("ascii")
 
 
-def _isolate_env(monkeypatch, app_env="development", encryption_key=""):
+def _isolate_env(monkeypatch, app_env="development", encryption_key="", dashboard_password="test-dashboard-pass"):
     monkeypatch.setattr("app.config.settings.app_env", app_env)
     monkeypatch.setattr("app.config.settings.encryption_key", encryption_key)
+    monkeypatch.setattr("app.config.settings.dashboard_password", dashboard_password)
     monkeypatch.setattr("app.config.settings.telegram_bot_token", "token")
     monkeypatch.setattr("app.config.settings.gemini_api_key", "key")
 

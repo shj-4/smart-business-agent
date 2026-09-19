@@ -606,8 +606,8 @@ class TestBudgetCheckSessionCleanup:
 
         asyncio.run(reminders.budget_check(None))
 
-        # جلسة واحدة خارجية + جلسة داخلية لكل ميزانية (معرّف) — وكلها مغلقة
-        assert len(created) == 1 + len(budget_ids)
+        # بعد التحسين: جلسة واحدة لكل الدورة (بدل N+1) مع عزل أخطاء كل ميزانية عبر rollback — وكلها مغلقة
+        assert len(created) == 1
         assert len(closed) == len(created)
         assert all(s.closed for s in created)
 

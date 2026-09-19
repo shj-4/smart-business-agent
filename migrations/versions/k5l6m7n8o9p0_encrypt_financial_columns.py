@@ -31,6 +31,17 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # خط دفاع إضافي: نسخ احتياطي تلقائي قبل migrations الخطرة (batch_alter_table يعيد بناء الجدول على SQLite)
+    # التعليق الأصلي حذّر يدويًا؛ الآن نستدعي run_backup() كسجل أمان ثانٍ — لا يُسقط الترحيل عند الفشل.
+    try:
+        from app.database.backup import run_backup
+
+        run_backup()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("فشل النسخ الاحتياطي التلقائي قبل migration k5l6m7n8o9p0 — المتابعة مع تحذير")
+
     # invoices.amount: NOT NULL
     # recreate="auto" (الافتراضي) يعيد بناء الجدول على SQLite عند تغيير النوع
     with op.batch_alter_table("invoices") as batch:

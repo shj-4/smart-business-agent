@@ -27,13 +27,13 @@ def create_invoice(
         _clean_person,
         _clean_text,
         _invalidate_caches,
-        _to_decimal,
+        _to_valid_amount,
         normalize_currency,
     )
 
 
-    amount = _to_decimal(data.get("amount"))
-    if amount is None or amount <= 0:
+    amount = _to_valid_amount(data.get("amount"))
+    if amount is None:
         return None
     currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper()
     due_date = data.get("due_date")

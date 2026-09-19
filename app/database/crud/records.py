@@ -39,13 +39,14 @@ def create_transaction(
         _invalidate_caches,
         _is_duplicate_message,
         _to_decimal,
+        _to_valid_amount,
         normalize_currency,
     )
 
     if _is_duplicate_message(db, Transaction, telegram_user_id, telegram_message_id):
         return None
 
-    amount = _to_decimal(data.get("amount"))
+    amount = _to_valid_amount(data.get("amount"))
     # عملة مفقودة تمامًا = عملة الأساس (مثلما تفعل invoices) — دون ذلك تُتسمم
     # الإجماليات الموحّدة كاملة بصندوق "" غير قابل للتحويل.
     currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper() or None
@@ -813,7 +814,7 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
         _clean_person,
         _clean_text,
         _invalidate_caches,
-        _to_decimal,
+        _to_valid_amount,
         normalize_currency,
     )
 
@@ -825,7 +826,7 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
     for key in ("amount", "currency", "person", "category", "description"):
         if key in fields and fields[key] is not None:
             if key == "amount":
-                row.amount = _to_decimal(fields[key])
+                row.amount = _to_valid_amount(fields[key])
             elif key == "currency":
                 row.currency = (
                     normalize_currency(fields[key])
@@ -921,7 +922,13 @@ def merge_person(db: Session, source: str, target: str) -> int:
 
     def _resolve_unique_per_user(model, source_uids: set[int], extra=None) -> None:
         """يعيد تسمية source UID-بـ-UID متجنّبًا تصادم القيد الفريد (مستخدم+اسم):
-        من له اسمان معًا يبقى اسم الهدف ويسقط صف المصدر."""
+        من له اسمان معًا يبقى اسم الهدف ويسقط صف المصدر.
+
+        يُطبَّق فقط على النماذج التي تملك UniqueConstraint على
+        (telegram_user_id, person) — مثل CreditLimit/Budget/LoyaltyAccount.
+        EmployeeBonusPlan بلا قيد فريد (يمكن للمستخدم امتلاك أكثر من خطة لنفس
+        الشخص) فلا يجوز حذفه عند التصادم.
+        """
         nonlocal changed
         if not source_uids:
             return
@@ -947,7 +954,8 @@ def merge_person(db: Session, source: str, target: str) -> int:
                 {model.person: target}, synchronize_session=False
             )
 
-    for model in (Transaction, Note, Task, Invoice):
+    # النماذج بلا قيد فريد: تحديث مباشر بلا حذف — يحافظ على كل الصفوف
+    for model in (Transaction, Note, Task, Invoice, EmployeeBonusPlan):
         changed += (
             db.query(model)
             .filter(model.person == source)
@@ -965,10 +973,6 @@ def merge_person(db: Session, source: str, target: str) -> int:
     _resolve_unique_per_user(
         LoyaltyAccount,
         {uid for (uid,) in db.query(LoyaltyAccount.telegram_user_id).filter(LoyaltyAccount.person == source).all()},
-    )
-    _resolve_unique_per_user(
-        EmployeeBonusPlan,
-        {uid for (uid,) in db.query(EmployeeBonusPlan.telegram_user_id).filter(EmployeeBonusPlan.person == source).all()},
     )
 
     db.commit()

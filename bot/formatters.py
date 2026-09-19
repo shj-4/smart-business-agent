@@ -349,22 +349,38 @@ def _build_confirm_text(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def _build_confirm_keyboard(data: dict | None = None) -> InlineKeyboardMarkup:
+    """يبني لوحة تأكيد — زر «تكرار» يظهر فقط للعمليات المالية (expense/income).
+
+    كان الزر يظهر لكل الأنواع ويضبط pending_missing=["amount"] دائمًا، فيظهر
+    لمهمة/طلبية سؤال غير منطقي «ما هو المبلغ؟». الآن يُخفى لغير المالية.
+    """
+    rows = [
         [
-            [
-                InlineKeyboardButton(f"{SUCCESS} تأكيد", callback_data="confirm:yes"),
-                InlineKeyboardButton("✏️ تعديل", callback_data="confirm:edit"),
-            ],
+            InlineKeyboardButton(f"{SUCCESS} تأكيد", callback_data="confirm:yes"),
+            InlineKeyboardButton("✏️ تعديل", callback_data="confirm:edit"),
+        ],
+    ]
+    # إظهار «تكرار» فقط للمصاريف/الإيرادات (التي يُعاد فيها المبلغ)
+    if data is None or data.get("type") in ("expense", "income"):
+        rows.append(
             [
                 InlineKeyboardButton("🔁 تكرار العملية", callback_data="confirm:repeat"),
                 InlineKeyboardButton(f"{HOME} القائمة الرئيسية", callback_data="menu:main"),
-            ],
+            ]
+        )
+    else:
+        rows.append(
             [
-                InlineKeyboardButton("❌ إلغاء", callback_data="confirm:no"),
-            ],
+                InlineKeyboardButton(f"{HOME} القائمة الرئيسية", callback_data="menu:main"),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data="confirm:no"),
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
 # ---------- ديون الأشخاص (#21) ----------

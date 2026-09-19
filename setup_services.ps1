@@ -2,8 +2,12 @@
 # Run as Administrator:  powershell -ExecutionPolicy Bypass -File .\setup_services.ps1
 
 $ErrorActionPreference = 'Stop'
-$NSSM   = 'C:\nssm\win64\nssm.exe'
-$ROOT   = 'C:\smart-business-agent'
+# مسار النشر مرن: متغير بيئة SMART_BUSINESS_AGENT_ROOT أو SMART_BUSINESS_ROOT
+# يتيح نقل المجلد دون تعديل السكربت؛ وإلا يُستنتج من مكان السكربت نفسه.
+$NSSM   = if ($env:NSSM_PATH) { $env:NSSM_PATH } elseif ($env:SMART_BUSINESS_AGENT_ROOT) { Join-Path $env:SMART_BUSINESS_AGENT_ROOT "nssm\win64\nssm.exe" } else { 'C:\nssm\win64\nssm.exe' }
+# بدائل: SMART_BUSINESS_AGENT_ROOT / SMART_BUSINESS_ROOT / $PSScriptRoot
+$ROOT   = if ($env:SMART_BUSINESS_AGENT_ROOT) { $env:SMART_BUSINESS_AGENT_ROOT } elseif ($env:SMART_BUSINESS_ROOT) { $env:SMART_BUSINESS_ROOT } elseif ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $ROOT) { $ROOT = 'C:\smart-business-agent' }
 
 if (-not (Test-Path $NSSM))                { Write-Error "nssm not found: $NSSM" }
 if (-not (Test-Path "$ROOT\bot.py"))       { Write-Error "bot.py not found: $ROOT\bot.py" }

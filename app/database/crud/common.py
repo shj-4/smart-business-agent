@@ -38,6 +38,32 @@ CURRENCY_ALIASES = {
     "€": "EUR",
     "euro": "EUR",
     "eur": "EUR",
+    # عملات كانت في KNOWN_CURRENCIES دون alias عربي — توحيد القوائم البيضاء
+    "جنيه": "GBP",
+    "استرليني": "GBP",
+    "gbp": "GBP",
+    "pound": "GBP",
+    "جنيه مصري": "EGP",
+    "egp": "EGP",
+    "ريال سعودي": "SAR",
+    "sar": "SAR",
+    "درهم": "AED",
+    "درهم اماراتي": "AED",
+    "aed": "AED",
+    "دينار كويتي": "KWD",
+    "kwd": "KWD",
+    "دينار بحريني": "BHD",
+    "bhd": "BHD",
+    "ريال قطري": "QAR",
+    "qar": "QAR",
+    "ريال عماني": "OMR",
+    "omr": "OMR",
+    "ليرة لبنانية": "LBP",
+    "lbp": "LBP",
+    "ليرة تركية": "TRY",
+    "try": "TRY",
+    "دولار كندي": "CAD",
+    "cad": "CAD",
 }
 
 MAX_DESCRIPTION_LEN = 500  # حد أقصى لطول النصوص الحرة (الوصف/الطلبية/الملاحظة)
@@ -50,8 +76,9 @@ def normalize_currency(raw: str | None) -> str | None:
     if key in CURRENCY_ALIASES:
         return CURRENCY_ALIASES[key]
     # تطابق جزئي (مثل "شيكل جديد", "دولار امريكي") — بمقارنة غير حساسة لحالة الأحرف
+    # نُرتّب حسب طول الاسم تنازليًا حتى لا يطغى "دولار" على "دولار كندي"
     raw_lower = raw.strip().lower()
-    for alias, code in CURRENCY_ALIASES.items():
+    for alias, code in sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
         if alias in raw_lower:
             return code
     return raw.strip() or None
@@ -84,6 +111,31 @@ def _to_decimal(value) -> Decimal | None:
         return Decimal(str(value)).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError, TypeError):
         return None
+
+
+def _to_valid_amount(value) -> Decimal | None:
+    """حارس مركزي للمبالغ المالية: يحوّل عبر _to_decimal ثم يرفض أي قيمة
+    غير موجبة أو خارج المدى المالي المسموح [AMOUNT_MIN, AMOUNT_MAX].
+
+    يُستخدم لكل مسارات حفظ المعاملات (create_transaction, update_transaction,
+    record_bonus_grant...) بدل الاعتماد فقط على طبقة AI schema — فيمنع تسريب
+    مبالغ سالبة/صفرية/فاحشة حتى من أوامر يدوية أو استجابة AI مموّهة.
+    """
+    d = _to_decimal(value)
+    if d is None:
+        return None
+    try:
+        from app.validation import AMOUNT_MAX, AMOUNT_MIN
+
+        if d < AMOUNT_MIN or d > AMOUNT_MAX:
+            return None
+        if d <= 0:
+            return None
+        if not d.is_finite():
+            return None
+    except Exception:
+        return None
+    return d
 
 def _is_duplicate_message(
     db: Session, model, telegram_user_id: int, telegram_message_id: int | None

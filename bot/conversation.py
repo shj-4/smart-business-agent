@@ -628,7 +628,7 @@ async def _handle_record_result(
     _clear_pending(context)
     await update.message.reply_text(
         _build_confirm_text(result),
-        reply_markup=_build_confirm_keyboard(),
+        reply_markup=_build_confirm_keyboard(result),
     )
     return _send_confirm(update, context, result, raw_text, msg_id)
 
@@ -763,7 +763,7 @@ async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     _clear_pending(context)
     await update.message.reply_text(
         _build_confirm_text(partial),
-        reply_markup=_build_confirm_keyboard(),
+        reply_markup=_build_confirm_keyboard(partial),
     )
     return _send_confirm(update, context, partial, raw_confirm, pending_msg_id)
 
@@ -1064,6 +1064,15 @@ async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _clear_all_pending(context)
         return None
 
+    # التكرار متاح فقط للعمليات المالية (له معنى «نفس التفاصيل بمبلغ جديد»)
+    if data_type not in ("expense", "income"):
+        await query.edit_message_text(
+            "زر التكرار متاح فقط للمصاريف والإيرادات.",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+        _clear_all_pending(context)
+        return None
+
     def _save():
         db = SessionLocal()
         try:
@@ -1083,15 +1092,24 @@ async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     repeat = {k: v for k, v in result.items() if k in ("type", "currency", "person", "category", "description")}
     repeat["intent"] = "record"
 
+    # احسب الحقول الناقصة فعليًا بدل تثبيتها على ["amount"]
+    missing = missing_fields_for(repeat)
+    # للمصاريف/الإيرادات يجب أن يكون المبلغ هو الناقص (repeat بلا amount)
+    if not missing:
+        # احتياطي: إن لم يكن هناك نقص (حالة نظرية)، اطلب المبلغ صراحة
+        missing = ["amount"]
+
     context.user_data["pending_record"] = repeat
     context.user_data["pending_type"] = data_type
-    context.user_data["pending_missing"] = ["amount"]
+    context.user_data["pending_missing"] = missing
     context.user_data["pending_raw"] = None
     context.user_data["pending_message_id"] = msg_id
 
+    # رسالة حسب الحقل الناقص
+    first_missing = missing[0] if missing else "amount"
     prompt = (
         f"{SUCCESS} حُفظت العملية.\n"
-        "🔁 سأكرّر نفس التفاصيل — أرسل المبلغ فقط (مثال: 300 أو 300 شيكل)"
+        f"🔁 سأكرّر نفس التفاصيل — {ask_for_field_prompt(data_type, first_missing)}"
     )
     await query.edit_message_text(
         prompt, reply_markup=MAIN_HOME_KEYBOARD
@@ -1119,7 +1137,7 @@ async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def _reshow_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> int:
     result = context.user_data.get("confirm_result") or {}
     await query.edit_message_text(
-        _build_confirm_text(result), reply_markup=_build_confirm_keyboard()
+        _build_confirm_text(result), reply_markup=_build_confirm_keyboard(result)
     )
     return CONFIRM
 
@@ -1156,7 +1174,7 @@ async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT
         return CONFIRM
     context.user_data["confirm_result"] = new_result
     await update.message.reply_text(
-        _build_confirm_text(new_result), reply_markup=_build_confirm_keyboard()
+        _build_confirm_text(new_result), reply_markup=_build_confirm_keyboard(new_result)
     )
     return CONFIRM
 

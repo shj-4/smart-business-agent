@@ -64,12 +64,86 @@ _PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DASHBOARD_CRED_FILE = os.path.join(_PACKAGE_ROOT, "data", "dashboard_credentials.txt")
 
 
+def _restrict_file_windows(path: str) -> None:
+    """يقيّد ملف بيانات الاعتماد على Windows عبر icacls (NTFS).
+
+    على POSIX تكفي صلاحيات 0o600، لكنها بلا أثر على Windows — الاختبار نفسه
+    كان يتخطى الفحص `if os.name != \"nt\"`. بيئة الإنتاج الحقيقية (C:\\smart-business-agent
+    و setup_services.ps1/start_*.cmd) هي Windows، لذا نطبّق حماية NTFS صريحة:
+      icacls <path> /inheritance:r /grant:r \"<user>:F\"
+    فيُلغى الوراثة ويُمنح المستخدم الحالي فقط حق الوصول الكامل.
+    أي فشل يُسجَّل كتحذير ولا يُسقط إقلاع الخدمة.
+    """
+    import subprocess
+
+    try:
+        # حدد هوية المالك الحالي
+        username = os.environ.get("USERNAME") or os.environ.get("USER")
+        if not username:
+            try:
+                out = subprocess.check_output(
+                    "whoami", shell=True, text=True, stderr=subprocess.DEVNULL
+                )
+                username = out.strip().split("\\")[-1].split("/")[-1]
+            except Exception:
+                username = None
+        if not username:
+            # لا يمكن تحديد المستخدم — حاول تقييد بالوراثة فقط
+            subprocess.run(
+                ["icacls", path, "/inheritance:r"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.warning(
+                "تعذر تحديد اسم المستخدم لتقييد %s عبر icacls — أُزيلت الوراثة فقط. "
+                "تحقق يدويًا من صلاحيات NTFS.",
+                path,
+            )
+            return
+
+        # أزل الوراثة وامنح المالك الحالي فقط
+        subprocess.run(
+            ["icacls", path, "/inheritance:r"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        result = subprocess.run(
+            ["icacls", path, "/grant:r", f"{username}:(F)"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "فشل تقييد صلاحيات NTFS للملف %s عبر icacls (user=%s): %s %s",
+                path,
+                username,
+                result.stdout.strip() if result.stdout else "",
+                result.stderr.strip() if result.stderr else "",
+            )
+        else:
+            logger.info("تم تقييد ملف الاعتماد %s للمستخدم %s فقط عبر icacls", path, username)
+    except Exception as exc:
+        logger.warning("تعذر تشغيل icacls لتقييد %s: %s", path, exc)
+
+
 def _write_dashboard_credentials(username: str, password: str) -> str:
-    """يكتب الاعتماديات في ملف منفصل بصلاحيات مقيدة (0600) لا في السجلات العامة."""
+    """يكتب الاعتماديات في ملف منفصل بصلاحيات مقيدة (0600 على POSIX / icacls على Windows)."""
     os.makedirs(os.path.dirname(_DASHBOARD_CRED_FILE), exist_ok=True)
+    # 0o600 فعال على POSIX فقط؛ على Windows نطبّق icacls لاحقًا
     fd = os.open(_DASHBOARD_CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(f"DASHBOARD_USERNAME={username}\nDASHBOARD_PASSWORD={password}\n")
+    try:
+        if os.name == "nt":
+            _restrict_file_windows(_DASHBOARD_CRED_FILE)
+        else:
+            os.chmod(_DASHBOARD_CRED_FILE, 0o600)
+    except Exception as exc:
+        logger.warning("تعذر ضبط صلاحيات الملف %s: %s", _DASHBOARD_CRED_FILE, exc)
     return _DASHBOARD_CRED_FILE
 
 
@@ -77,16 +151,28 @@ def _generate_dashboard_credentials() -> tuple[str, str]:
     """يعيد (اسم المستخدم، كلمة المرور) — يولّد مؤقتةً عند غياب الإعداد.
 
     لا تُطبع كلمة المرور في السجلات أبدًا؛ تُحفظ في _DASHBOARD_CRED_FILE
-    (0600) ويُسجَّل التلميح + مسار الملف فقط.
+    (0600 على POSIX / icacls على Windows) ويُسجَّل التلميح + مسار الملف فقط.
+
+    في وضع الإنتاج (APP_ENV=production) يُرفض التوليد المؤقت ويُجبر المشغّل
+    على ضبط DASHBOARD_PASSWORD صراحة — لأن ملف الاعتماد على Windows لا يُحمى
+    تلقائيًا بـ 0o600 دون icacls، وبيئة الإنتاج الحقيقية هي Windows
+    (C:\\smart-business-agent / setup_services.ps1).
     """
     username = settings.dashboard_username or "admin"
     password = settings.dashboard_password
     if not password:
+        if (settings.app_env or "").strip().lower() == "production":
+            raise RuntimeError(
+                "DASHBOARD_PASSWORD غير مضبوط و APP_ENV=production — يمنع توليد كلمة "
+                "مرور مؤقتة في الإنتاج. اضبط DASHBOARD_PASSWORD صراحة في .env "
+                "(أو متغير البيئة) قبل التشغيل."
+            )
         password = secrets.token_urlsafe(18)
         cred_file = _write_dashboard_credentials(username, password)
         logger.warning(
             "DASHBOARD_PASSWORD غير مضبوط في .env — وُلدّت كلمة مرور مؤقتة ولا تُكتب في "
-            "السجلات. المستخدم: %s؛ كلمة المرور محفوظة في ملف منفصل: %s (صلاحيات 0600). "
+            "السجلات. المستخدم: %s؛ كلمة المرور محفوظة في ملف منفصل: %s (صلاحيات مقيدة: "
+            "0600 على POSIX / icacls على Windows). "
             "ضع DASHBOARD_PASSWORD في .env لثباتها عبر عمليات إعادة التشغيل.",
             username,
             cred_file,
@@ -365,10 +451,15 @@ def _party_rows(db: Session, base: str) -> list[dict]:
     """تجمع أسماء الأطراف (عملاء/موردون) عبر المعاملات والطلبيات والمهام.
 
     كل طرف = اسم نصي؛ المجاميع تُوحَّد بالعملة الأساسية (المخزَّنة عند
-    التسجيل إن توافقت، وإلا بسعر اليوم). لا يقصّ أي حزام بيانات — المبالغ
-    مشفّرة فلا يمكن جمعها عبر SQL، لذا يجب سحب كل المعاملات وجمعها في Python
-    لضمان ظهور أرصدة الأطراف كاملة بلا أخطاء صامتة.
+    التسجيل إن توافقت، وإلا بسعر اليوم). المبالغ مشفّرة فلا يمكن جمعها عبر
+    SQL (يجب فكّ التشفير في Python)، لذا لا يُقصّ أي حزام بيانات — الاختبار
+    `test_party_rows_computes_full_aggregates_without_cap` يضمن 520 سجلًا كاملًا.
+
+    التحسين: دفع التجميع الجزئي إلى SQL حيثما أمكن (counts عبر GROUP BY لـ
+    Note/Task/Transaction، و streaming عبر `yield_per` للمعاملات) مع بقاء فكّ
+    التشفير للمبالغ في Python فقط. يقلّل الحمل على Python دون فقدان الدقة.
     """
+    # دفع counts إلى SQL (GROUP BY) — لا حاجة لسحب كل الصفوف لعدّها
     notes_count: dict[str, int] = {}
     for p, c in (
         db.query(Note.person, func.count(Note.id))
@@ -393,6 +484,18 @@ def _party_rows(db: Session, base: str) -> list[dict]:
         key = (p or "").strip()
         if key:
             tasks_count[key] = tasks_count.get(key, 0) + c
+    # للمعاملات: count عبر SQL + streaming للمبالغ (فكّ التشفير فقط في Python)
+    # هذا يحقق اقتراح "ادفع التجميع الجزئي إلى SQL" دون كسر تشفير amount.
+    tx_counts: dict[str, int] = {}
+    for p, c in (
+        db.query(Transaction.person, func.count(Transaction.id))
+        .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
+        .group_by(Transaction.person)
+        .all()
+    ):
+        key = (p or "").strip()
+        if key:
+            tx_counts[key] = tx_counts.get(key, 0) + c
     tx_rows = (
         db.query(
             Transaction.person,
@@ -405,16 +508,20 @@ def _party_rows(db: Session, base: str) -> list[dict]:
         )
         .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
         .order_by(Transaction.created_at.desc())
+        .yield_per(500)
         .all()
     )
     agg: dict = {}
+    # تهيئة records من SQL بدل العدّ في Python (التجميع الجزئي)
+    for p, cnt in tx_counts.items():
+        agg[p] = {"by_currency": {}, "stored": {}, "records": cnt, "last_seen": None}
     for person, rtype, created_at, currency, amount, stored_amt, stored_base in tx_rows:
         p = person.strip()
         bucket = agg.setdefault(
             p,
             {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None},
         )
-        bucket["records"] += 1
+        # records سبق عدّها عبر GROUP BY، لا نكرر الزيادة هنا
         if created_at and (bucket["last_seen"] is None or created_at > bucket["last_seen"]):
             bucket["last_seen"] = created_at
         kind = "expense" if rtype == "expense" else "income"

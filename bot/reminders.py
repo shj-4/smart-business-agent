@@ -163,37 +163,46 @@ async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     الميزانيات ثم list_budgets (الذي يوسّع لكل أعضاء المساحة)، والذي كان
     يُعيد الميزانية نفسها مرة واحدة لكل مبتدئ ميزانية في المساحة — فتُحسب
     N مرات دون داعٍ، وتحتمل أي تعديل مستقبلي تكرار تنبيهات فعلية.
+
+    تحسين الأداء: جلسة DB واحدة لكل الدورة (بدل N اتصالات كل 15 دقيقة) مع
+    عزل أخطاء كل ميزانية عبر try/rollback و commit دوري. مع مئات الميزانيات
+    كان النمط السابق `for bid: db=SessionLocal()` مكلفًا.
     """
     from app.database.crud import budget_monthly_reset, budget_usage
     from app.database.models import Budget
 
     db = SessionLocal()
     try:
-        budget_ids = [
-            bid
-            for (bid,) in db.query(Budget.id).order_by(Budget.created_at.asc()).all()
-        ]
-    except Exception:
-        logger.exception("خطأ في جلب الميزانيات")
-        db.close()
-        return
-    db.close()
-
-    for bid in budget_ids:
-        db = SessionLocal()
         try:
-            budget = db.query(Budget).filter(Budget.id == bid).first()
-            if budget is None:
-                continue
-            if not _user_pref_flag(db, budget.telegram_user_id, "notif_budget_alert"):
-                continue
-            budget_monthly_reset(db, budget)
-            usage = budget_usage(db, budget)
-            await _notify_budget(context, db, budget, usage)
+            budget_ids = [
+                bid
+                for (bid,) in db.query(Budget.id).order_by(Budget.created_at.asc()).all()
+            ]
         except Exception:
-            logger.exception("خطأ في فحص ميزانية #%s", bid)
-        finally:
+            logger.exception("خطأ في جلب الميزانيات")
+            return
+
+        for bid in budget_ids:
+            try:
+                budget = db.query(Budget).filter(Budget.id == bid).first()
+                if budget is None:
+                    continue
+                if not _user_pref_flag(db, budget.telegram_user_id, "notif_budget_alert"):
+                    continue
+                budget_monthly_reset(db, budget)
+                usage = budget_usage(db, budget)
+                await _notify_budget(context, db, budget, usage)
+            except Exception:
+                logger.exception("خطأ في فحص ميزانية #%s", bid)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+    finally:
+        try:
             db.close()
+        except Exception:
+            pass
 
 
 async def _broadcast_budget_alert(
@@ -356,41 +365,49 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     تُعالَج كل حدود ائتمانية مرة واحدة بالضبط لكل دورة — كما في budget_check
     (الوضع السابق كان يكرر الحساب مرة لكل منشئ حدّ في المساحة المشتركة).
+
+    تحسين الأداء: جلسة واحدة لكل الدورة بدل N اتصالات كل 15 دقيقة، مع عزل
+    أخطاء كل حدّ عبر rollback.
     """
     from app.database.crud import credit_monthly_reset, credit_usage
     from app.database.models import CreditLimit
 
     db = SessionLocal()
     try:
-        limit_ids = [
-            lid for (lid,) in db.query(CreditLimit.id).order_by(CreditLimit.created_at.asc()).all()
-        ]
-    except Exception:
-        logger.exception("خطأ في جلب الحدود الائتمانية")
-        db.close()
-        return
-    db.close()
-
-    for lid in limit_ids:
-        db = SessionLocal()
         try:
-            limit_row = db.query(CreditLimit).filter(CreditLimit.id == lid).first()
-            if limit_row is None:
-                continue
-            if not _user_pref_flag(db, limit_row.telegram_user_id, "notif_credit_alert"):
-                continue
-            credit_monthly_reset(db, limit_row)
-            usage = credit_usage(db, limit_row)
-            # عملات متعددة بلا توحيد (لا أسعار) — لا نبني رقمًا مختلطًا ولا ننبه عليه
-            if not usage.get("unified_ok"):
-                continue
-            if not usage.get("amount") or usage.get("limit", 0) <= 0:
-                continue
-            await _notify_credit(context, db, limit_row, usage)
+            limit_ids = [
+                lid for (lid,) in db.query(CreditLimit.id).order_by(CreditLimit.created_at.asc()).all()
+            ]
         except Exception:
-            logger.exception("خطأ في فحص حد ائتماني #%s", lid)
-        finally:
+            logger.exception("خطأ في جلب الحدود الائتمانية")
+            return
+
+        for lid in limit_ids:
+            try:
+                limit_row = db.query(CreditLimit).filter(CreditLimit.id == lid).first()
+                if limit_row is None:
+                    continue
+                if not _user_pref_flag(db, limit_row.telegram_user_id, "notif_credit_alert"):
+                    continue
+                credit_monthly_reset(db, limit_row)
+                usage = credit_usage(db, limit_row)
+                # عملات متعددة بلا توحيد (لا أسعار) — لا نبني رقمًا مختلطًا ولا ننبه عليه
+                if not usage.get("unified_ok"):
+                    continue
+                if not usage.get("amount") or usage.get("limit", 0) <= 0:
+                    continue
+                await _notify_credit(context, db, limit_row, usage)
+            except Exception:
+                logger.exception("خطأ في فحص حد ائتماني #%s", lid)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+    finally:
+        try:
             db.close()
+        except Exception:
+            pass
 
 
 async def _notify_credit(

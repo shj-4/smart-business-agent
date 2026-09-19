@@ -20,7 +20,7 @@ from tenacity import (
     stop_after_attempt,
 )
 
-from app.config import GEMINI_API_KEY
+from app.config import GEMINI_API_KEY, settings
 from app.normalize import fold_text
 
 logger = logging.getLogger(__name__)
@@ -84,8 +84,9 @@ def has_injection_pattern(text: str | None) -> bool:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# نموذج Gemini المستخدم للتحليل ونسخ الصوت
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+# نموذج Gemini المستخدم للتحليل ونسخ الصوت — قابل للضبط من .env عبر Settings.gemini_model
+# كان مثبّتًا حرفيًا في الكود؛ الآن GEMINI_MODEL يُستمد من settings للسماح بتبديله دون إعادة نشر.
+GEMINI_MODEL = getattr(settings, "gemini_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
 
 # إعدادات retry:最多 3 محاولات، انتظار تصاعدي، مع تمييز أخطاء الفترة (quota) عن
 # أخطاء الشبكة العابرة: نعيد المحاولة فقط على (شبكة/مهلة/5xx/429) ونحترم
@@ -170,8 +171,10 @@ SYSTEM_PROMPT = _prompt_fallback("system_general.md")
 
 def _call_gemini(contents, config):
     """استدعاء Gemini مع retry تلقائي (最多 3 محاولات)."""
+    # قراءة النموذج من Settings في كل استدعاء ليتجاوب مع تغيير .env أو monkeypatch في الاختبارات
+    model = getattr(settings, "gemini_model", GEMINI_MODEL) or GEMINI_MODEL
     return client.models.generate_content(
-        model=GEMINI_MODEL,
+        model=model,
         contents=contents,
         config=config,
     )

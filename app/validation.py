@@ -20,13 +20,21 @@ RECORD_TYPES = frozenset({"expense", "income", "task", "order", "note", "complet
 # النوايا الثلاث التي يوجّه بها نظام المحادثة
 INTENT_TYPES = frozenset({"record", "query", "chat"})
 
-# عملات مقبولة: مجموعة منطقية مشتركة (الشرق الأوسط + عملات تداول شائعة)
-KNOWN_CURRENCIES = frozenset(
-    {
-        "ILS", "USD", "JOD", "EUR", "GBP", "EGP", "SAR", "AED",
-        "KWD", "BHD", "QAR", "OMR", "LBP",
-    }
-)
+# عملات مقبولة: مصدر موحّد مع app/exchange.CURRENCY_NAMES (كان 13 فقط بينما
+# exchange/aliases أوسع، فيُرفض TRY/CAD في مسار AI ويُقبل في التحويل — غير متسق)
+# لتجنب التكرار والاختلاف، نستورد القائمة من exchange كمصدر وحيد للحقيقة.
+try:
+    from app.exchange import CURRENCY_NAMES as _EXCHANGE_CURRENCY_NAMES
+
+    KNOWN_CURRENCIES = frozenset(_EXCHANGE_CURRENCY_NAMES.keys())
+except Exception:
+    # احتياطي عند فشل الاستيراد المبكر (اختبارات/دورة استيراد)
+    KNOWN_CURRENCIES = frozenset(
+        {
+            "ILS", "USD", "JOD", "EUR", "GBP", "EGP", "SAR", "AED",
+            "KWD", "BHD", "QAR", "OMR", "LBP", "TRY", "CAD",
+        }
+    )
 
 # مدى مالي مقبول للمعاملة الواحدة
 AMOUNT_MIN = Decimal("0.01")
@@ -75,7 +83,7 @@ def valid_amount(amount) -> bool:
         return False
     if not value.is_finite():
         return False
-    return AMOUNT_MIN <= abs(value) <= AMOUNT_MAX
+    return AMOUNT_MIN <= value <= AMOUNT_MAX
 
 
 def clamp_amount(amount) -> float | None:

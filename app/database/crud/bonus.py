@@ -514,7 +514,7 @@ def bonus_grant_would_overshoot_cap(db: Session, plan: EmployeeBonusPlan) -> boo
 
     يقارن بصرف «الشهر الحالي» المقاس (بعملة الخطة أو بعملة الأساس عند
     التوحيد) بعد تحويل السقف إلى نفس العملة عند الاختلاف — وعند تعذّر
-    التحويل لا نحكم مقابلته أصلاً (نمنح) فلا نمنع بلا دليل.
+    التحويل نفشل بأمان (نمنع المنح) بدل السماح الصامت، لأن السقف ضابط مالي.
     """
     if plan.monthly_cap is None:
         return False
@@ -528,7 +528,17 @@ def bonus_grant_would_overshoot_cap(db: Session, plan: EmployeeBonusPlan) -> boo
         if conv and conv.get("result") is not None:
             cap = Decimal(str(conv["result"]))
         else:
-            return False  # عملتان مختلفتان بلا تحويل — لا نُرجّح على حساب المنحة
+            # فشل التحويل — لا يمكن التحقق من السقف → افشل بأمان (امنع المنح)
+            # بدل السماح بلا رقابة (كان return False).
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "تعذر تحويل سقف المكافأة %s %s → %s للتحقق من التجاوز؛ يُمنع المنح احتياطيًا (fail-safe)",
+                cap,
+                plan_cur,
+                unit,
+            )
+            return True
     return spent + (plan.amount or Decimal("0")) > cap
 
 
