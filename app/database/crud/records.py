@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app import timeutil as _timeutil
 from app.audit import log_audit
+from app.database.crud.company import company_filter
 from app.cache import get_or_set
 from app.config import settings
 from app.database.models import (
@@ -78,8 +79,12 @@ def create_transaction(
         if abs(vat_amount - expected) > tolerance:
             vat_amount = expected
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         telegram_message_id=telegram_message_id,
         type=data.get("type"),
         amount=amount,
@@ -139,8 +144,12 @@ def create_note(
     if _is_duplicate_message(db, Note, telegram_user_id, telegram_message_id):
         return None
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid2 = _cid_for(db, telegram_user_id)
     note = Note(
         telegram_user_id=telegram_user_id,
+        company_id=_cid2,
         telegram_message_id=telegram_message_id,
         note_type=data.get("type"),  # order | note
         description=_clean_text(data.get("description") or data.get("raw") or raw_message)
@@ -280,11 +289,14 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
 
 def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     from app.database.crud import (
-        accessible_user_ids,
         list_overdue_tasks,
         list_pending_tasks,
         mark_overdue_tasks,
+        report_scope_ids,
     )
+
+    # للتوافق مع مسارات المقارنة القديمة التي تستخدم accessible_user_ids مباشرة
+    from app.database.crud import accessible_user_ids as _accessible  # noqa: F401
 
 
     metric = query_details.get("metric")
@@ -321,8 +333,9 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             "kind": "list",
         }
 
+    scope = report_scope_ids(db, telegram_user_id)
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        Transaction.telegram_user_id.in_(scope),
         Transaction.deleted_at.is_(None),
     )
 
@@ -368,13 +381,13 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 "error": "no_person",
             }
         q_income = db.query(Transaction).filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Transaction.telegram_user_id.in_(scope),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
             Transaction.person == person,
         )
         q_expense = db.query(Transaction).filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Transaction.telegram_user_id.in_(scope),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
             Transaction.person == person,
@@ -420,7 +433,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
 
         def _totals_by_currency(lo, hi, tx_type):
             qq = db.query(Transaction).filter(
-                Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+                company_filter(db, telegram_user_id, Transaction),
                 Transaction.deleted_at.is_(None),
                 Transaction.type == tx_type,
                 Transaction.created_at >= lo,
@@ -462,13 +475,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         }
 
 def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
-    """تراجع/يحذف (soft delete) آخر سجل أضافه المستخدم (عبر /undo).
-
-    يفحص الجداول الثلاثة (معاملات/مهام/طلبيات&ملاحظات)، يختار الأحدث
-    ويثبّت deleted_at عليه — فيختفي من كل الاستعلامات لكن يبقى في DB.
-
-    أمن المساحة: أعضاء عاديون لا يتراجعون (المرتكز أو الأفراد فقط).
-    """
+    """تراجع/يحذف (soft delete) آخر سجل أضافه المستخدم (عبر /undo)."""
     from app.database.crud import _invalidate_caches, can_manage_records, soft_delete_last
 
 
@@ -509,11 +516,7 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
     return {"kind": kind, "label": label}
 
 def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
-    """يستعيد أحدث سجل محذوف (soft-delete) — أمر /redo (عكس /undo).
-
-    يبحث عن أحدث deleted_at بين المعاملات/المهام/الملاحظات المحذوفة في نطاق
-    المستخدم ويزيله — فيعود السجل للظهور في كل الاستعلامات.
-    """
+    """يستعيد أحدث سجل محذوف (soft-delete) — أمر /redo."""
     from app.database.crud import _invalidate_caches, accessible_user_ids, can_manage_records
 
 
@@ -527,7 +530,7 @@ def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
         row = (
             db.query(model)
             .filter(
-                model.telegram_user_id.in_(accessible),
+                company_filter(db, telegram_user_id, model),
                 model.deleted_at.isnot(None),
             )
             .order_by(model.deleted_at.desc())
@@ -568,7 +571,7 @@ def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> 
         rows = (
             db.query(model)
             .filter(
-                model.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+                company_filter(db, telegram_user_id, model),
                 model.deleted_at.is_(None),
             )
             .order_by(model.created_at.desc())
@@ -627,7 +630,7 @@ def get_record_by_id(db: Session, telegram_user_id: int, model_name: str, record
         db.query(model)
         .filter(
             model.id == record_id,
-            model.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, model),
             model.deleted_at.is_(None),
         )
         .first()
@@ -637,11 +640,7 @@ def get_record_by_id(db: Session, telegram_user_id: int, model_name: str, record
 def delete_record_by_id(
     db: Session, telegram_user_id: int, model_name: str, record_id: int
 ) -> str | None:
-    """Soft-delete لسجل محدد بنوعه (معاملة/مهمة/ملاحظة) بضوابط الأدوار.
-
-    الأفراد يمسحون سجلاتهم؛ أعضاء المساحة المشتركة يمسحها المرتكز (المالك) فقط —
-    وأي رفض يُسجَّل في سجل التدقيق. ترجع تسمية السجل المحذوف أو None.
-    """
+    """Soft-delete لسجل محدد بنوعه (معاملة/مهمة/ملاحظة) بضوابط الأدوار."""
     from app.database.crud import _invalidate_caches, can_manage_records, get_record_by_id
 
 
@@ -650,7 +649,7 @@ def delete_record_by_id(
             telegram_user_id,
             "denied_record_delete",
             f"{model_name}:{record_id}",
-            detail="عضو في مساحة مشتركة وليس المرتكز",
+            detail="ليس لديك صلاحية الحذف",
         )
         return None
     row, _ = get_record_by_id(db, telegram_user_id, model_name, record_id)
@@ -781,7 +780,7 @@ def search_records(
         rows = (
             db.query(model)
             .filter(
-                model.telegram_user_id.in_(accessible),
+                company_filter(db, telegram_user_id, model),
                 model.deleted_at.is_(None),
             )
             .order_by(model.created_at.desc())

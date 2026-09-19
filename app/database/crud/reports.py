@@ -61,16 +61,8 @@ def mark_report_sent(db: Session, pref: ReportPref) -> None:
 def monthly_totals(
     db: Session, telegram_user_id: int, months: int = 6, include_stored: bool = False
 ) -> list[dict]:
-    """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي).
-
-    يعيد قائمة مرتبة زمنيًا: [{year, month, label, expense: Decimal, income: Decimal, key: "YYYY-MM"}]
-    القيم الخام بعملاتها الأصلية (تُوحَّد عند الرسم).
-
-    include_stored=True يضيف لكل شهر stored: {currency: {expense, income}} بمقدار
-    المبالغ المحوَّلة بعملة الأساس لحظة التسجيل (struct الدقة التاريخية)، مع
-    stored_base: العملة الأساس المعتمدة — تُستخدم في الرسم إن طابقت العملة المطلوبة.
-    """
-    from app.database.crud import accessible_user_ids
+    """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي)."""
+    from app.database.crud.company import report_company_filter, report_scope_ids
 
 
     months = max(1, int(months))
@@ -112,7 +104,7 @@ def monthly_totals(
     rows = (
         db.query(*cols)
         .filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.created_at >= start,
         )
@@ -186,20 +178,20 @@ def db_size_bytes() -> int | None:
 
 def user_stats(db: Session, telegram_user_id: int) -> dict:
     """إحصائيات مخطط الاستخدام حسب مساحة عمل المستخدم — بلا أي شبكة."""
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import report_company_filter, report_scope_ids
 
 
-    uids = accessible_user_ids(db, telegram_user_id)
+    uids = report_scope_ids(db, telegram_user_id)
     empty_uids = uids if uids else {-1}
 
     def _counts(model, **filters) -> int:
-        q = db.query(model).filter(model.telegram_user_id.in_(empty_uids))
+        q = db.query(model).filter(report_company_filter(db, telegram_user_id, model))
         for col, value in filters.items():
             q = q.filter(getattr(model, col) == value)
         return q.count()
 
     tx_base = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(empty_uids),
+        report_company_filter(db, telegram_user_id, Transaction),
         Transaction.deleted_at.is_(None),
     )
     expense_count = tx_base.filter(Transaction.type == "expense").count()
@@ -217,7 +209,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
         r
         for r in db.query(Transaction.amount, Transaction.currency)
         .filter(
-            Transaction.telegram_user_id.in_(empty_uids),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
         )
@@ -227,7 +219,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
         r
         for r in db.query(Transaction.amount, Transaction.currency)
         .filter(
-            Transaction.telegram_user_id.in_(empty_uids),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
         )
@@ -240,7 +232,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
     for (created_at,) in (
         db.query(Transaction.created_at)
         .filter(
-            Transaction.telegram_user_id.in_(empty_uids),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.created_at >= cutoff,
         )
@@ -288,23 +280,17 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
     }
 
 def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
-    """لوحة مؤشرات أداء مختصرة (KPI) — الشهر الحالي مقابل السابق + مهام/فواتير/ميزانيات.
-
-    لا شبكة حتمية: المبالغ المثبّتة بعملة الأساس وقت التسجيل تُفضَّل للتوحيد
-    (convert_totals_to_base بأسلوب stored)؛ ما لا يملك مبلغًا مخزَّنًا يُمتحن
-    بسعر اليوم عبر المصدر المشترك. أي فشل تحويل يجعل الحقل None بدل رقم ناقص.
-    يعيد dict يُنسَّق في العرض، والشهر الحالي دائمًا موجود حتى لو كان خاويًا.
-    """
+    """لوحة مؤشرات أداء مختصرة (KPI) — الشهر الحالي مقابل السابق + مهام/فواتير/ميزانيات."""
     from app.database.crud import (
         _unified_totals_for_rows,
-        accessible_user_ids,
         budget_usage,
         list_budgets,
         person_debts,
+        report_company_filter, report_scope_ids,
     )
 
     base = (settings.base_currency or "").upper().strip()
-    ids = accessible_user_ids(db, telegram_user_id) or {-1}
+    ids = report_scope_ids(db, telegram_user_id) or {-1}
 
     entries = monthly_totals(db, telegram_user_id, months=2, include_stored=True)
     current = entries[-1]

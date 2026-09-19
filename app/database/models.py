@@ -5,10 +5,12 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 
@@ -52,6 +54,7 @@ class Transaction(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     telegram_message_id = Column(BigInteger, nullable=True)
 
     type = Column(String(16), nullable=False)  # expense | income
@@ -92,6 +95,7 @@ class Note(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     telegram_message_id = Column(BigInteger, nullable=True)
 
     note_type = Column(String(16), nullable=False)  # order | note
@@ -118,6 +122,7 @@ class Task(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     telegram_message_id = Column(BigInteger, nullable=True)
 
     description = Column(EncryptedString(), nullable=False)  # وصف المهمة (مشفر)
@@ -178,6 +183,57 @@ class WorkspaceMember(Base):
     joined_at = Column(DateTime, default=now_utc)
 
 
+class Company(Base):
+    """شركة مستقلة: هويتها + إعداداتها. المالك = owner_telegram_user_id."""
+
+    __tablename__ = "companies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    description = Column(Text, nullable=True)  # يُغذّى للـ AI
+    business_type = Column(String(32), nullable=True)  # trade|services|...
+    base_currency = Column(String(16), nullable=True)
+    owner_telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class CompanyMember(Base):
+    """عضوية شركة. v1: مستخدم واحد = شركة واحدة (PK = telegram_user_id)."""
+
+    __tablename__ = "company_members"
+
+    telegram_user_id = Column(BigInteger, primary_key=True)
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role = Column(String(16), nullable=False, default="staff")
+    status = Column(String(16), nullable=False, default="active")  # pending|active
+    display_name = Column(String(100), nullable=True)
+    invited_by = Column(BigInteger, nullable=True)
+    joined_at = Column(DateTime, default=now_utc)
+
+
+class InviteLink(Base):
+    """دعوة: رابط (token طويل) أو كود يدوي (6 أرقام) بدور محدد مسبقًا."""
+
+    __tablename__ = "invite_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token = Column(String(64), nullable=False, unique=True)
+    kind = Column(String(8), nullable=False, default="link")  # link|code
+    role = Column(String(16), nullable=False, default="staff")
+    max_uses = Column(Integer, nullable=False, default=1)
+    uses = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime, nullable=True)
+    revoked = Column(Boolean, nullable=False, default=False)
+    created_by = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=now_utc)
+
+
 class Budget(Base):
     """
     ميزانية شهرية (سقف مصروف).
@@ -204,6 +260,7 @@ class Budget(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
 
     name = Column(String(255), nullable=True)  # وصف/اسم اختياري
     scope = Column(String(16), nullable=False)  # currency | person | category
@@ -231,6 +288,7 @@ class CreditLimit(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     person = Column(String(255), nullable=False)
     limit_amount = Column(EncryptedNumeric(), nullable=False)
 
@@ -250,6 +308,7 @@ class Invoice(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     person = Column(String(255), nullable=True)  # المورّد/الجهة المستحقة
     amount = Column(EncryptedNumeric(), nullable=False)
     currency = Column(String(16), nullable=True)
@@ -321,6 +380,7 @@ class BonusEvent(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
 
     name = Column(String(255), nullable=False)  # عنوان الفعالية
     start_at = Column(DateTime, nullable=True)  # بداية الفعالية
@@ -350,6 +410,7 @@ class EmployeeBonusPlan(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
 
     person = Column(String(255), nullable=False)  # اسم الموظف
     amount = Column(EncryptedNumeric(), nullable=False)
@@ -378,6 +439,7 @@ class LoyaltyAccount(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
     person = Column(String(255), nullable=False)
 
     points_balance = Column(Integer, nullable=False, default=0)
@@ -400,6 +462,7 @@ class LoyaltyConfig(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
 
     points_rate = Column(Numeric(12, 4), nullable=False, default=1)
     points_value = Column(Numeric(12, 6), nullable=False, default=Decimal("0.01"))

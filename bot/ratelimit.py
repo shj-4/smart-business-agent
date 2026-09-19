@@ -17,6 +17,8 @@ GLOBAL_RATE_LIMIT_MAX = 100  # حد كلي لكل العملية (حماية م�
 GLOBAL_RATE_LIMIT_WINDOW = 60.0
 ADMIN_ATTEMPTS_MAX = 5  # عتبة محاولات الوصول الفاشلة قبل اعتبارها استكشاف صلاحيات
 ADMIN_ATTEMPTS_WINDOW = 300.0
+JOIN_ATTEMPTS_MAX = 5  # محاولات /join الفاشلة قبل الحظر
+JOIN_ATTEMPTS_WINDOW = 900.0  # 15 دقيقة
 _RATE_BUCKET_MAX_ENTRIES = 1024  # حد أقصى للإدخالات قبل التنظيف الفوري
 _CLEANUP_INTERVAL = RATE_LIMIT_WINDOW  # دورة التنظيف الدوري
 
@@ -24,6 +26,7 @@ _RATE_LOCK = threading.Lock()
 _rate_buckets: dict = {}
 _global_stamps: list = []
 _admin_denied: dict = {}
+_join_denied: dict = {}
 _last_prune: float = 0.0
 _cleanup_timer = None
 
@@ -88,6 +91,13 @@ def _prune_admin_denied(now: float) -> None:
         _admin_denied.pop(uid, None)
 
 
+def _prune_join_denied(now: float) -> None:
+    window_start = now - JOIN_ATTEMPTS_WINDOW
+    expired = [uid for uid, stamps in _join_denied.items() if not stamps or stamps[-1] <= window_start]
+    for uid in expired:
+        _join_denied.pop(uid, None)
+
+
 def register_admin_denied(user_id: int) -> int:
     """يسجّل محاولة وصول فاشلة لأمر أدمن ويعيد عددها خلال النافذة بعد التسجيل."""
     with _RATE_LOCK:
@@ -114,6 +124,29 @@ def is_admin_probing(user_id: int) -> bool:
     return admin_denied_count(user_id) >= ADMIN_ATTEMPTS_MAX
 
 
+def register_join_denied(user_id: int) -> int:
+    with _RATE_LOCK:
+        now = time.monotonic()
+        _prune_join_denied(now)
+        window_start = now - JOIN_ATTEMPTS_WINDOW
+        stamps = [t for t in _join_denied.get(user_id, []) if t > window_start]
+        stamps.append(now)
+        _join_denied[user_id] = stamps
+        return len(stamps)
+
+
+def join_denied_count(user_id: int) -> int:
+    with _RATE_LOCK:
+        now = time.monotonic()
+        _prune_join_denied(now)
+        window_start = now - JOIN_ATTEMPTS_WINDOW
+        return len([t for t in _join_denied.get(user_id, []) if t > window_start])
+
+
+def is_join_blocked(user_id: int) -> bool:
+    return join_denied_count(user_id) >= JOIN_ATTEMPTS_MAX
+
+
 def _new_cleanup_timer():
     """مؤقت تنظيف دوري (خيط daemon) — يتجنّب كلمة ``daemon`` في منشئ Timer
     لأن Python 3.14 رفضها في threading.Timer؛ الضبط بعد الإنشاء متوافق مع كل النسخ."""
@@ -129,6 +162,7 @@ def _cleanup_loop() -> None:
         now = time.monotonic()
         _prune_rate_buckets(now)
         _prune_admin_denied(now)
+        _prune_join_denied(now)
         _last_prune = now
     _cleanup_timer = _new_cleanup_timer()
     _cleanup_timer.start()

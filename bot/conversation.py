@@ -401,6 +401,12 @@ def _clear_seeds(context: ContextTypes.DEFAULT_TYPE) -> None:
         "pending_record_edit_field",
         "pending_search",
         "pending_search_term",
+        "co_name",
+        "co_desc",
+        "co_type",
+        "co_currency",
+        "co_pending_invite",
+        "pending_company_edit",
     ):
         context.user_data.pop(key, None)
 
@@ -409,6 +415,9 @@ def _clear_all_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     _clear_pending(context)
     _clear_confirm_state(context)
     _clear_seeds(context)
+    # تنظيف إضافي لمفاتيح onboarding المتناثرة
+    for key in ("co_name", "co_desc", "co_type", "co_currency", "co_pending_invite", "pending_company_edit"):
+        context.user_data.pop(key, None)
 
 
 # ---------- منطق التسجيل (مشترك بين النص والوسائط) ----------
@@ -650,6 +659,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return await task_edit_value(update, context)
     if context.user_data.get("pending_record_edit_id"):
         return await record_edit_value(update, context)
+    if context.user_data.get("pending_company_edit"):
+        return await company_edit_value(update, context)
     if context.user_data.get("pending_search"):
         return await search_value(update, context)
     if context.user_data.get("pending_budget"):
@@ -661,6 +672,61 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if context.user_data.get("pending_missing"):
         return await collect_reply(update, context)
     return await fresh_entry(update, context)
+
+
+def _company_dict_for_user(telegram_user_id: int) -> dict | None:
+    """يبني dict جاهز للـ AI (name/description) بلا كائن ORM."""
+    try:
+        db = SessionLocal()
+        try:
+            from app.database.crud.company import company_id_for_user, get_company
+
+            cid = company_id_for_user(db, telegram_user_id)
+            if cid is None:
+                return None
+            comp = get_company(db, cid)
+            if comp is None:
+                return None
+            return {"name": comp.name, "description": comp.description}
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def _company_info_reply(telegram_user_id: int) -> str:
+    """رد مباشر من DB عن شركتك (بلا Gemini)."""
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, company_member_ids, get_company, get_company_member
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, telegram_user_id)
+        if cid is None:
+            return "لست عضوًا في أي شركة بعد. أنشئ شركة عبر /start."
+        comp = get_company(db, cid)
+        if comp is None:
+            return "لم أجد بيانات شركتك."
+        m = get_company_member(db, telegram_user_id)
+        role_label = ROLE_LABELS.get(m.role, m.role) if m else "غير معروف"
+        members = company_member_ids(db, cid)
+        count = len(members)
+        lines = [
+            f"🏢 شركتك: {comp.name}",
+            f"📝 النشاط: {comp.description or '—'}",
+        ]
+        if getattr(comp, "business_type", None):
+            from app.permissions import BUSINESS_TYPES
+
+            btype = BUSINESS_TYPES.get(comp.business_type, comp.business_type)
+            lines.append(f"🏷️ النوع: {btype}")
+        if getattr(comp, "base_currency", None):
+            lines.append(f"💱 العملة: {comp.base_currency}")
+        lines.append(f"👥 الأعضاء: {count}")
+        lines.append(f"🎖️ دورك: {role_label}")
+        return "\n".join(lines)
+    finally:
+        db.close()
 
 
 async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -692,7 +758,15 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
         return None
 
-    result = await asyncio.to_thread(analyze_message, user_text)
+    company_dict = _company_dict_for_user(telegram_user_id)
+
+    def _safe_analyze(text, comp):
+        try:
+            return analyze_message(text, comp)
+        except TypeError:
+            return analyze_message(text)
+
+    result = await asyncio.to_thread(_safe_analyze, user_text, company_dict)
     logger.info("نتيجة التحليل: %s", result)
 
     if seed and result.get("intent") == "record":
@@ -705,6 +779,11 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         result["type"] = None
 
     intent = result.get("intent")
+
+    if intent == "company_info":
+        reply = _company_info_reply(telegram_user_id)
+        await update.message.reply_text(reply)
+        return None
 
     if intent == "record":
         return await _handle_record_result(update, context, result, user_text, msg_id)
@@ -1191,16 +1270,14 @@ async def task_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     uid = update.effective_user.id
     db = SessionLocal()
     try:
-        from app.database.crud import can_manage_records
-
-        if not can_manage_records(db, uid):
-            await update.message.reply_text(
-                "أعضاء المساحة المشتركة لا يعدّلون المهام — المرتكز (المالك) فقط."
-            )
-            return None
         row, _ = get_record_by_id(db, uid, "Task", task_id)
         if row is None:
             await update.message.reply_text("لم أجد المهمة (ربما حُذفت).")
+            return None
+        from app.database.crud import can_edit_record
+
+        if not can_edit_record(db, uid, row.telegram_user_id):
+            await update.message.reply_text("ليس لديك صلاحية تعديل هذه المهمة.")
             return None
         update_task(db, row, {"description": new_desc})
         await update.message.reply_text(f"تم تحديث الوصف:\n{new_desc}")
@@ -1263,17 +1340,17 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     uid = update.effective_user.id
     db = SessionLocal()
     try:
-        from app.database.crud import can_manage_records
-
-        if not can_manage_records(db, uid):
-            await update.message.reply_text(
-                "أعضاء المساحة المشتركة لا يعدّلون السجلات — المرتكز (المالك) فقط.",
-                reply_markup=MAIN_HOME_KEYBOARD,
-            )
-            return None
         row, _ = get_record_by_id(db, uid, model_name, record_id)
         if row is None:
             await update.message.reply_text("لم أجد السجل (ربما حُذف).")
+            return None
+        from app.database.crud import can_edit_record
+
+        if not can_edit_record(db, uid, row.telegram_user_id):
+            await update.message.reply_text(
+                "ليس لديك صلاحية تعديل هذا السجل.",
+                reply_markup=MAIN_HOME_KEYBOARD,
+            )
             return None
         fields = {field: value}
         if model_name == "Transaction":
@@ -1289,6 +1366,43 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     label = FIELD_LABELS_AR.get(field, field)
     await update.message.reply_text(f"تم تحديث {label} بنجاح {SUCCESS}", reply_markup=MAIN_HOME_KEYBOARD)
+    return None
+
+
+async def company_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """تحرير اسم/وصف الشركة عبر /company."""
+    field = context.user_data.pop("pending_company_edit", None)
+    if not field:
+        return await fresh_entry(update, context)
+    new_value = (update.message.text or "").strip()
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if not new_value:
+        await update.message.reply_text("القيمة فارغة. أرسل قيمة صالحة أو /cancel.", reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+    uid = update.effective_user.id
+    from app.validation import clean_free_text
+
+    cleaned = clean_free_text(new_value, 150 if field == "name" else 500)
+    if not cleaned:
+        await update.message.reply_text("القيمة غير صالحة.", reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, update_company
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await update.message.reply_text("لست عضوًا في شركة.", reply_markup=MAIN_HOME_KEYBOARD)
+            return None
+        kwargs = {"name": cleaned} if field == "name" else {"description": cleaned}
+        comp = update_company(db, uid, cid, **kwargs)
+        if comp is None:
+            await update.message.reply_text("تعذر التحديث. تأكد من صلاحياتك.", reply_markup=MAIN_HOME_KEYBOARD)
+            return None
+        await update.message.reply_text(f"✅ تم تحديث {'الاسم' if field=='name' else 'الوصف'} بنجاح.", reply_markup=MAIN_HOME_KEYBOARD)
+    finally:
+        db.close()
     return None
 
 

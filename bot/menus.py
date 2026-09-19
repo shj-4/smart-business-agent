@@ -222,7 +222,7 @@ def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
         return label
 
 
-def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
+def _tools_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardMarkup:
     base = [
         [("el:last", t("btn_edit_last", lang))],
         [("his:p:1", t("btn_history", lang))],
@@ -239,6 +239,21 @@ def _tools_keyboard(lang: str = "ar") -> InlineKeyboardMarkup:
         [("ws:status", t("btn_workspace", lang))],
         [("menu:main", t("btn_back", lang))],
     ]
+    # زر الفريق — يظهر فقط لمن عنده members.manage
+    if uid is not None:
+        try:
+            from app.database.crud import has_permission
+            from app.database.db import SessionLocal as _SL
+
+            db = _SL()
+            try:
+                if has_permission(db, uid, "members.manage"):
+                    # إدراج قبل زر الرجوع
+                    base.insert(-1, [("team:menu", "👥 الفريق")])
+            finally:
+                db.close()
+        except Exception:
+            pass
     return build_menu([[(label, cb) for cb, label in row] for row in base])
 
 
@@ -296,7 +311,7 @@ async def _handle_menu(
         return
     if target == "tools":
         title = t("tools_title", lang)
-        await query.edit_message_text(title, reply_markup=_tools_keyboard(lang))
+        await query.edit_message_text(title, reply_markup=_tools_keyboard(lang, uid=query.from_user.id))
         return
     title, rows = PAGES.get(target, ("القائمة الرئيسية", MAIN_MENU))
     await query.edit_message_text(title, reply_markup=build_menu(rows))
@@ -584,6 +599,21 @@ async def _handle_budget_list(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
 
     def _payload() -> tuple[list[str], list[Budget]]:
         db = SessionLocal()
@@ -607,6 +637,22 @@ async def _handle_budget_list(
 async def _handle_budget_add(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, scope: str
 ) -> None:
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
     _clear_all_pending(context)
     context.user_data["pending_budget"] = {"scope": scope}
     if scope == "person":
@@ -626,6 +672,21 @@ async def _handle_budget_delete(
     from app.database.crud import delete_budget
 
     uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
     db = SessionLocal()
     try:
         ok = delete_budget(db, uid, int(budget_id))
@@ -1187,6 +1248,16 @@ async def _handle_order_done(
 async def _handle_export(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
 ) -> None:
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        if not has_permission(db_perm, uid, "export"):
+            await query.edit_message_text("ليس لديك صلاحية التصدير.", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
     if not parts or parts[0] not in EXPORT_CAPTIONS:
         await query.edit_message_text(
             "تصدير Excel — اختر الفترة:", reply_markup=build_menu(EXPORT_MENU)
@@ -1197,7 +1268,6 @@ async def _handle_export(
 
     period = parts[0]
     start, label = export_period_start(period)
-    uid = query.from_user.id
     db = SessionLocal()
     try:
         buf = generate_export_excel(db, uid, start_utc=start)
@@ -1486,10 +1556,414 @@ async def _handle_lang(
     )
 
 
+# ---------- الفريق / الدعوات (team) ----------
+
+
+def _team_assignable_roles(actor_role: str) -> list[str]:
+    from app.permissions import ASSIGNABLE_BY_MANAGER, ROLE_PERMISSIONS
+
+    if actor_role == "owner":
+        return [r for r in ROLE_PERMISSIONS if r != "owner"]
+    if actor_role == "manager":
+        return sorted(ASSIGNABLE_BY_MANAGER)
+    return []
+
+
+def _team_role_keyboard(kind: str, actor_role: str) -> InlineKeyboardMarkup:
+    from app.permissions import ROLE_LABELS
+
+    roles = _team_assignable_roles(actor_role)
+    rows = [[(f"{ROLE_LABELS.get(r, r)} ({r})", f"team:role:{kind}:{r}")] for r in roles]
+    rows.append([(f"{BACK} رجوع", "team:menu")])
+    return build_menu(rows)
+
+
+async def _team_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user, get_company_member, has_permission
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في أي شركة بعد. أنشئ شركة عبر /start.", reply_markup=_home_keyboard())
+            return
+        if not has_permission(db, uid, "members.manage"):
+            await query.edit_message_text("عذرًا، ليس لديك صلاحية إدارة الفريق.", reply_markup=_home_keyboard())
+            return
+        m = get_company_member(db, uid)
+        company = db.query(__import__("app.database.models", fromlist=["Company"]).Company).filter_by(id=cid).first()
+        cname = company.name if company else f"#{cid}"
+        text = f"👥 فريق {cname} — اختر إجراءً:"
+        rows = [
+            [("🔗 رابط دعوة", "team:pick:link"), ("🔢 كود مؤقت", "team:pick:code")],
+            [("📋 الأعضاء", "team:members")],
+            [("🚫 دعوات نشطة", "team:invites")],
+            [(f"{BACK} رجوع", "menu:tools")],
+        ]
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_pick_role(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, kind: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import get_company_member
+
+        m = get_company_member(db, uid)
+        if m is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        label = "رابط دعوة" if kind == "link" else "كود مؤقت"
+        await query.edit_message_text(f"اختر دور {label}:", reply_markup=_team_role_keyboard(kind, m.role))
+    finally:
+        db.close()
+
+
+async def _team_create_invite(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, kind: str, role: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import create_invite
+
+        inv = create_invite(db, uid, role, kind=kind)
+        if inv is None:
+            await query.edit_message_text("تعذر إنشاء الدعوة. تأكد من صلاحياتك والدور المطلوب.", reply_markup=_home_keyboard([(f"{BACK} رجوع", "team:menu")]))
+            return
+        bot_username = (getattr(context.bot, "username", None) or getattr(query, "_bot_username", None) or "bot").lstrip("@")
+        # bot_username قد يكون None في الاختبارات — نستخدم قيمة افتراضية
+        if kind == "link":
+            link = f"https://t.me/{bot_username}/?start=inv_{inv.token}"
+            text = f"🔗 رابط الدعوة ({role}):\n{link}\n\nصالح حتى {inv.expires_at or 'غير محدد'} — استخدامات: {inv.max_uses}"
+        else:
+            text = f"🔢 كود الدعوة ({role}):\n`{inv.token}`\n\nأرسل للموظف: /join {inv.token}\nصالح لساعة واحدة."
+        rows = [[("🚫 إلغاء الدعوة", f"team:revoke:{inv.id}")], [(f"{BACK} رجوع", "team:menu")]]
+        # للكود نعرض كنص قابل للنسخ؛ للرابط نعرضه أيضًا
+        await query.edit_message_text(text, reply_markup=build_menu(rows), parse_mode="Markdown")
+    finally:
+        db.close()
+
+
+async def _team_members(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user, company_member_ids, get_company_member
+        from app.database.models import CompanyMember
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        members = db.query(CompanyMember).filter(CompanyMember.company_id == cid, CompanyMember.status == "active").all()
+        if not members:
+            await query.edit_message_text("لا يوجد أعضاء.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:menu")]]))
+            return
+        lines = ["📋 أعضاء الفريق:"]
+        rows = []
+        for m in members:
+            label = ROLE_LABELS.get(m.role, m.role)
+            lines.append(f"• {m.telegram_user_id} — {label}" + (f" ({m.display_name})" if m.display_name else ""))
+            if m.telegram_user_id != uid:
+                rows.append([(f"⚙️ {m.telegram_user_id}", f"team:member:{m.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "team:menu")])
+        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_member_detail(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user, get_company_member
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        target = get_company_member(db, int(target_id))
+        if target is None or target.company_id != cid:
+            await query.edit_message_text("لم أجد هذا العضو.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:members")]]))
+            return
+        label = ROLE_LABELS.get(target.role, target.role)
+        text = f"👤 العضو {target.telegram_user_id}\nالدور الحالي: {label}"
+        # أزرار تغيير الدور
+        from app.permissions import ROLE_PERMISSIONS
+
+        actor = get_company_member(db, uid)
+        assignable = _team_assignable_roles(actor.role if actor else "")
+        rows = []
+        for r in assignable:
+            if r != target.role:
+                rows.append([(f"→ {ROLE_LABELS.get(r, r)}", f"team:setrole:{target.telegram_user_id}:{r}")])
+        rows.append([(f"🗑️ إزالة من الشركة", f"team:remove:{target.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "team:members")])
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_set_role(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str, role: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import set_member_role
+
+        ok = set_member_role(db, uid, int(target_id), role)
+        await query.answer("تم تغيير الدور." if ok else "تعذر تغيير الدور.")
+    finally:
+        db.close()
+    await _team_members(query, context, [])
+
+
+async def _team_remove_member(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    target = int(target_id)
+    db = SessionLocal()
+    try:
+        from app.database.crud import remove_company_member
+
+        ok = remove_company_member(db, uid, target)
+    finally:
+        db.close()
+    if ok:
+        try:
+            await context.bot.send_message(chat_id=target, text="تمت إزالتك من الشركة.")
+        except Exception:
+            pass
+        await query.answer("تمت إزالة العضو.")
+    else:
+        await query.answer("تعذر إزالة العضو.")
+    await _team_members(query, context, [])
+
+
+async def _team_invites(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user
+        from app.database.models import InviteLink
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        invites = db.query(InviteLink).filter(InviteLink.company_id == cid, InviteLink.revoked == False).order_by(InviteLink.created_at.desc()).limit(20).all()  # noqa: E712
+        if not invites:
+            await query.edit_message_text("لا توجد دعوات نشطة.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:menu")]]))
+            return
+        lines = ["🚫 دعوات نشطة:"]
+        rows = []
+        for inv in invites:
+            status = "🔗" if inv.kind == "link" else "🔢"
+            exp = inv.expires_at.strftime("%m-%d %H:%M") if inv.expires_at else "—"
+            lines.append(f"{status} #{inv.id} {inv.role} — {inv.uses}/{inv.max_uses} — ينتهي {exp} — `{inv.token[:12]}...`")
+            rows.append([(f"🚫 إلغاء #{inv.id}", f"team:revoke:{inv.id}")])
+        rows.append([(f"{BACK} رجوع", "team:menu")])
+        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows), parse_mode="Markdown")
+    finally:
+        db.close()
+
+
+async def _team_revoke(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, invite_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import revoke_invite
+
+        ok = revoke_invite(db, uid, int(invite_id))
+        await query.answer("تم إلغاء الدعوة." if ok else "تعذر الإلغاء.")
+    finally:
+        db.close()
+    await _team_invites(query, context)
+
+
+async def _handle_team(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    act = parts[0] if parts else "menu"
+    if act == "menu":
+        await _team_menu(query, context)
+    elif act == "pick" and len(parts) > 1:
+        await _team_pick_role(query, context, parts[1])
+    elif act == "role" and len(parts) > 2:
+        await _team_create_invite(query, context, parts[1], parts[2])
+    elif act == "members":
+        await _team_members(query, context)
+    elif act == "member" and len(parts) > 1:
+        await _team_member_detail(query, context, parts[1])
+    elif act == "setrole" and len(parts) > 2:
+        await _team_set_role(query, context, parts[1], parts[2])
+    elif act == "remove" and len(parts) > 1:
+        await _team_remove_member(query, context, parts[1])
+    elif act == "invites":
+        await _team_invites(query, context)
+    elif act == "revoke" and len(parts) > 1:
+        await _team_revoke(query, context, parts[1])
+    else:
+        await _team_menu(query, context)
+
+
+# ---------- الشركة /company ----------
+
+
+async def _company_info(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, company_member_ids, get_company, get_company_member
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في أي شركة.", reply_markup=_home_keyboard())
+            return
+        comp = get_company(db, cid)
+        m = get_company_member(db, uid)
+        members = company_member_ids(db, cid)
+        role_label = ROLE_LABELS.get(m.role, m.role) if m else "—"
+        text = (
+            f"🏢 {comp.name}\n📝 {comp.description or '—'}\n"
+            f"🏷️ {comp.business_type or '—'} | 💱 {comp.base_currency or '—'}\n"
+            f"👥 {len(members)} عضو | 🎖️ دورك: {role_label}\n🆔 #{comp.id}"
+        )
+        rows = []
+        if m and m.role == "owner":
+            rows.append([("✏️ تعديل الاسم", "company:edit_name"), ("📝 تعديل الوصف", "company:edit_desc")])
+            rows.append([("👥 الفريق", "team:menu")])
+            rows.append([("🔑 نقل الملكية", "company:transfer"), ("🗑️ حذف الشركة", "company:delete")])
+        else:
+            rows.append([("👥 الفريق", "team:menu")])
+        rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _company_edit_prompt(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, field: str) -> None:
+    from bot.conversation import _clear_all_pending
+
+    _clear_all_pending(context)
+    context.user_data["pending_company_edit"] = field
+    label = "الاسم" if field == "name" else "الوصف"
+    # احفظ الرسالة الحالية لمحاولة التعديل
+    text = f"أرسل {label} الجديد للشركة:\n(أرسل /cancel للإلغاء)"
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _company_transfer_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, get_company_member
+        from app.database.models import CompanyMember
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        m = get_company_member(db, uid)
+        if not m or m.role != "owner":
+            await query.edit_message_text("نقل الملكية متاح للمالك فقط.", reply_markup=_home_keyboard())
+            return
+        members = db.query(CompanyMember).filter(CompanyMember.company_id == cid, CompanyMember.status == "active").all()
+        rows = []
+        for mem in members:
+            if mem.telegram_user_id == uid:
+                continue
+            label = ROLE_LABELS.get(mem.role, mem.role)
+            rows.append([(f"{mem.telegram_user_id} ({label})", f"company:transfer_pick:{mem.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "company:info")])
+        await query.edit_message_text("اختر العضو لنقل الملكية إليه:", reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _company_transfer_pick(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    target = int(target_id)
+    # تأكيد مزدوج
+    rows = [
+        [(f"✅ تأكيد نقل الملكية إلى {target}", f"company:transfer_confirm:{target}")],
+        [(f"{BACK} رجوع", "company:transfer")],
+    ]
+    await query.edit_message_text(f"هل أنت متأكد من نقل ملكية الشركة إلى {target}؟", reply_markup=build_menu(rows))
+
+
+async def _company_transfer_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import transfer_company_ownership
+
+        ok = transfer_company_ownership(db, uid, int(target_id))
+        await query.answer("تم نقل الملكية." if ok else "تعذر نقل الملكية.")
+    finally:
+        db.close()
+    await _company_info(query, context)
+
+
+async def _company_delete_prompt(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = [
+        [("⚠️ تأكيد حذف الشركة", "company:delete_confirm")],
+        [(f"{BACK} رجوع", "company:info")],
+    ]
+    await query.edit_message_text("⚠️ حذف الشركة سيحذف كل العضويات والدعوات (السجلات المالية تبقى). هل أنت متأكد؟", reply_markup=build_menu(rows))
+
+
+async def _company_delete_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # تأكيد مزدوج ثانٍ
+    rows = [
+        [("🗑️ حذف نهائي", "company:delete_do")],
+        [(f"{BACK} إلغاء", "company:info")],
+    ]
+    await query.edit_message_text("تأكيد نهائي: سيتم حذف الشركة نهائيًا. متابعة؟", reply_markup=build_menu(rows))
+
+
+async def _company_delete_do(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, delete_company
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        ok = delete_company(db, uid, cid, confirm=True)
+        await query.answer("تم حذف الشركة." if ok else "تعذر حذف الشركة.")
+        await query.edit_message_text("تم حذف الشركة." if ok else "تعذر حذف الشركة.", reply_markup=_home_keyboard())
+    finally:
+        db.close()
+
+
+async def _handle_company(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    act = parts[0] if parts else "info"
+    if act == "info":
+        await _company_info(query, context)
+    elif act == "edit_name":
+        await _company_edit_prompt(query, context, "name")
+    elif act == "edit_desc":
+        await _company_edit_prompt(query, context, "desc")
+    elif act == "transfer":
+        await _company_transfer_menu(query, context)
+    elif act == "transfer_pick" and len(parts) > 1:
+        await _company_transfer_pick(query, context, parts[1])
+    elif act == "transfer_confirm" and len(parts) > 1:
+        await _company_transfer_confirm(query, context, parts[1])
+    elif act == "delete":
+        await _company_delete_prompt(query, context)
+    elif act == "delete_confirm":
+        await _company_delete_confirm(query, context)
+    elif act == "delete_do":
+        await _company_delete_do(query, context)
+    else:
+        await _company_info(query, context)
+
+
 # ---------- Router موحّد ----------
 
 HANDLERS = {
     "menu": _handle_menu,
+    "team": _handle_team,
+    "company": _handle_company,
     "rec": _handle_record,
     "tsk": _handle_task,
     "rpt": _handle_report,

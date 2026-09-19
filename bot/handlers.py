@@ -42,7 +42,73 @@ def resolve_period_arg(raw: str) -> str | None:
     return PERIOD_KEYS.get((raw or "all").lower())
 
 
+async def _handle_invite_start(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str) -> bool:
+    """يعالج deep-link t.me/bot?start=inv_TOKEN. يعيد True إن عالجها."""
+    from app.database.db import SessionLocal
+
+    telegram_user_id = update.effective_user.id
+    display_name = update.effective_user.first_name or None
+    token = (token or "").strip()
+    if not token:
+        return False
+    from app.database.crud.company import redeem_invite
+
+    db = SessionLocal()
+    try:
+        ok, result = redeem_invite(db, telegram_user_id, token, display_name=display_name)
+    finally:
+        db.close()
+    if ok:
+        company = result
+        await update.message.reply_text(f"✅ انضممت إلى شركة '{company.name}' بنجاح!")
+        try:
+            await update.effective_user.bot.send_message(
+                chat_id=company.owner_telegram_user_id,
+                text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
+            )
+        except Exception:
+            pass
+        from bot.menus import send_main_menu
+
+        try:
+            await send_main_menu(update.message, context, text=f"أهلاً بك في {company.name} 👋")
+        except Exception:
+            pass
+        return True
+    else:
+        await update.message.reply_text(f"❌ {result}")
+        return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if args and args[0].startswith("inv_"):
+        await _handle_invite_start(update, context, args[0][4:])
+        return
+
+    # فحص العضوية
+    from app.database.db import SessionLocal
+
+    telegram_user_id = update.effective_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user
+
+        has_company = company_id_for_user(db, telegram_user_id) is not None
+    finally:
+        db.close()
+
+    if not has_company:
+        from bot.onboarding import onboarding_keyboard
+
+        first = update.effective_user.first_name or ""
+        await update.message.reply_text(
+            f"أهلًا بك {first} 👋\nأنا مساعدك الذكي لإدارة أعمالك.\n\n"
+            "يبدو أنك غير منضم لأي شركة بعد. ماذا تريد أن تفعل؟",
+            reply_markup=onboarding_keyboard(),
+        )
+        return
+
     from bot.menus import send_main_menu
 
     first = update.effective_user.first_name or ""
@@ -229,6 +295,16 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /report — يولّد تقرير Excel للمعاملات المالية ويُرسله كملف."""
+    telegram_user_id = update.effective_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        if not has_permission(db_perm, telegram_user_id, "export"):
+            await update.message.reply_text("ليس لديك صلاحية تصدير التقارير.")
+            return
+    finally:
+        db_perm.close()
     from datetime import timedelta
 
     from app.timeutil import now_local, to_utc_naive
@@ -292,6 +368,16 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /export [today|week|month|pdf] — ملف Excel واحد بكل السجلات للفترة المحددة."""
+    telegram_user_id = update.effective_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        if not has_permission(db_perm, telegram_user_id, "export"):
+            await update.message.reply_text("ليس لديك صلاحية التصدير.")
+            return
+    finally:
+        db_perm.close()
     from datetime import timedelta
 
     from app.timeutil import first_day_of_week, now_local, to_utc_naive
@@ -544,13 +630,18 @@ async def notif_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """أمر /budget — ميزانيات شهرية للمصاريف حسب العملة أو الشخص.
+    """أمر /budget — ميزانيات شهرية للمصاريف حسب العملة أو الشخص."""
+    # فحص صلاحية الميزانية
+    telegram_user_id = update.effective_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
 
-    /budget إضافة عملة ILS 2000
-    /budget إضافة شخص محمد 1500
-    /budget قائمة
-    /budget حذف <رقم>
-    """
+        if not has_permission(db_perm, telegram_user_id, "budget.manage"):
+            await update.message.reply_text("ليس لديك صلاحية إدارة الميزانيات.")
+            return
+    finally:
+        db_perm.close()
     from app.database.crud import (
         budget_monthly_reset,
         budget_usage,
@@ -1050,6 +1141,95 @@ async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(format_kpi_dashboard(payload))
 
 
+async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /join <code> — الانضمام لشركة برمز دعوة."""
+    from app.database.db import SessionLocal
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("استخدم: /join <رمز الدعوة>\nمثال: /join 482913  أو  /join inv_a1b2c3")
+        return
+    token = (args[0] or "").strip()
+    # دعم رابط كامل
+    if "inv_" in token:
+        token = token.split("inv_")[-1].split()[0].split("&")[0].strip()
+    telegram_user_id = update.effective_user.id
+
+    from bot.ratelimit import is_join_blocked, register_join_denied
+
+    if is_join_blocked(telegram_user_id):
+        await update.message.reply_text("تم حظر المحاولات مؤقتًا (5 محاولات فاشلة). حاول بعد 15 دقيقة.")
+        return
+
+    from app.database.crud.company import redeem_invite
+
+    display_name = update.effective_user.first_name or None
+    db = SessionLocal()
+    try:
+        ok, result = redeem_invite(db, telegram_user_id, token, display_name=display_name)
+    finally:
+        db.close()
+    if ok:
+        company = result
+        await update.message.reply_text(f"✅ انضممت إلى شركة '{company.name}' بنجاح!")
+        try:
+            await update.effective_user.bot.send_message(
+                chat_id=company.owner_telegram_user_id,
+                text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
+            )
+        except Exception:
+            pass
+        from bot.menus import send_main_menu
+
+        try:
+            await send_main_menu(update.message, context, text=f"أهلاً بك في {company.name} 👋")
+        except Exception:
+            pass
+    else:
+        register_join_denied(telegram_user_id)
+        await update.message.reply_text(f"❌ {result}")
+
+
+async def company_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /company — عرض معلومات شركتك وإدارتها."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    from app.database.db import SessionLocal
+    from app.database.crud.company import company_id_for_user, get_company, get_company_member, company_member_ids
+    from app.permissions import ROLE_LABELS
+
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await update.message.reply_text("لست عضوًا في أي شركة بعد. أنشئ شركة عبر /start.")
+            return
+        comp = get_company(db, cid)
+        m = get_company_member(db, uid)
+        members = company_member_ids(db, cid)
+        role_label = ROLE_LABELS.get(m.role, m.role) if m else "—"
+        text = (
+            f"🏢 {comp.name}\n"
+            f"📝 {comp.description or '—'}\n"
+            f"🏷️ النوع: {comp.business_type or '—'} | 💱 {comp.base_currency or '—'}\n"
+            f"👥 الأعضاء: {len(members)} | 🎖️ دورك: {role_label}\n"
+            f"🆔 #{comp.id}"
+        )
+        # أزرار تعديل للمالك فقط
+        rows = []
+        if m and m.role == "owner":
+            rows.append([InlineKeyboardButton("✏️ تعديل الاسم", callback_data="company:edit_name"), InlineKeyboardButton("📝 تعديل الوصف", callback_data="company:edit_desc")])
+            rows.append([InlineKeyboardButton("👥 الفريق", callback_data="team:menu")])
+            rows.append([InlineKeyboardButton("🔑 نقل الملكية", callback_data="company:transfer"), InlineKeyboardButton("🗑️ حذف الشركة", callback_data="company:delete")])
+        else:
+            rows.append([InlineKeyboardButton("👥 الفريق", callback_data="team:menu")])
+        rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu:main")])
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    finally:
+        db.close()
+
+
 async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /work — إدارة الحساب المشترك (مساحة عمل لعدة معرّفات Telegram).
 
@@ -1214,6 +1394,8 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("admin_stats", admin_stats_command))
     app.add_handler(CommandHandler("feedback", feedback_command))
     app.add_handler(CommandHandler("feedback_ack", feedback_ack_command))
+    app.add_handler(CommandHandler("join", join_command))
+    app.add_handler(CommandHandler("company", company_command))
     app.add_handler(CommandHandler("work", work_command))
     app.add_handler(CommandHandler("debts", debts_command))
     app.add_handler(CommandHandler("finance", finance_command))
@@ -1233,9 +1415,11 @@ def register_handlers(app: Application) -> None:
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation
     from bot.menus import menu_callback_router
+    from bot.onboarding import onboarding_conversation
 
-    # ترتيب مهم: ConversationHandler للمحادثة العامة أولًا ثم التعديل
-    # ثم router القوائم (يسلم confirm:/edit:/editfield: للمحادثات ولا يلتقطها)
+    # ترتيب مهم: Onboarding أولًا (يلتقط co:new/co:join... قبل conversation العام)
+    # ثم ConversationHandler للمحادثة العامة ثم التعديل ثم router القوائم
+    app.add_handler(onboarding_conversation)
     app.add_handler(conversation_handler)
     app.add_handler(edit_conversation)
     app.add_handler(CallbackQueryHandler(menu_callback_router))

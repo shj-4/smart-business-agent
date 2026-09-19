@@ -149,6 +149,13 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     telegram_user_id = update.effective_user.id
     db = SessionLocal()
     try:
+        from app.database.crud import has_permission
+
+        if not has_permission(db, telegram_user_id, "record.edit_own") and not has_permission(
+            db, telegram_user_id, "record.edit_any"
+        ):
+            await update.message.reply_text("ليس لديك صلاحية تعديل السجلات.")
+            return ConversationHandler.END
         records = list_recent_records(db, telegram_user_id, limit=10)
     finally:
         db.close()
@@ -203,12 +210,10 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 return ConversationHandler.END
             db = SessionLocal()
             try:
-                from app.database.crud import can_manage_records
+                from app.database.crud import can_edit_record
 
-                if not can_manage_records(db, telegram_user_id):
-                    await update.message.reply_text(
-                        "أعضاء المساحة المشتركة لا يعدّلون السجلات — المرتكز (المالك) فقط."
-                    )
+                if not can_edit_record(db, telegram_user_id, record.telegram_user_id):
+                    await update.message.reply_text("ليس لديك صلاحية تعديل هذا السجل.")
                     return ConversationHandler.END
                 fields = {field: new_value}
                 if field == "priority":
@@ -228,6 +233,16 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return ConversationHandler.END
 
     # وإلا اعرض حقول آخر سجل للاختيار
+    # فحص صلاحية عرض حقول التعديل
+    db = SessionLocal()
+    try:
+        from app.database.crud import can_edit_record
+
+        if not can_edit_record(db, telegram_user_id, record.telegram_user_id):
+            await update.message.reply_text("ليس لديك صلاحية تعديل هذا السجل.")
+            return ConversationHandler.END
+    finally:
+        db.close()
     context.user_data["edit_record"] = record
     context.user_data["edit_model"] = model_name
     context.user_data["edit_id"] = rec["id"]
@@ -333,12 +348,10 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("لم أجد هذا السجل.")
             return ConversationHandler.END
 
-        from app.database.crud import can_manage_records
+        from app.database.crud import can_edit_record
 
-        if not can_manage_records(db, telegram_user_id):
-            await update.message.reply_text(
-                "أعضاء المساحة المشتركة لا يعدّلون السجلات — المرتكز (المالك) فقط."
-            )
+        if not can_edit_record(db, telegram_user_id, record.telegram_user_id):
+            await update.message.reply_text("ليس لديك صلاحية تعديل هذا السجل.")
             return ConversationHandler.END
 
         fields = {field: new_value}

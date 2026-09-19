@@ -17,8 +17,8 @@ from decimal import Decimal, InvalidOperation
 # الأنواع التي يعرفها النظام قابلةً للحفظ فعليًا (تسجيل/إكمال مهمة)
 RECORD_TYPES = frozenset({"expense", "income", "task", "order", "note", "complete_task"})
 
-# النوايا الثلاث التي يوجّه بها نظام المحادثة
-INTENT_TYPES = frozenset({"record", "query", "chat"})
+# النوايا الأربع التي يوجّه بها نظام المحادثة
+INTENT_TYPES = frozenset({"record", "query", "chat", "company_info"})
 
 # عملات مقبولة: مصدر موحّد مع app/exchange.CURRENCY_NAMES (كان 13 فقط بينما
 # exchange/aliases أوسع، فيُرفض TRY/CAD في مسار AI ويُقبل في التحويل — غير متسق)

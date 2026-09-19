@@ -51,7 +51,13 @@ def accessible_user_ids(db: Session, telegram_user_id: int) -> set[int]:
     فردي: {نفسه} فقط — سلوك اليوم تمامًا.
     عضو مساحة: كل أعضاء المساحة. يعطي "حسابًا مشتركًا" بلا تحرّك بيانات.
     """
-    from app.database.crud import workspace_for_user, workspace_member_ids
+    from app.database.crud import company_id_for_user, company_member_ids, workspace_for_user, workspace_member_ids
+
+    cid = company_id_for_user(db, telegram_user_id)
+    if cid is not None:
+        members = company_member_ids(db, cid)
+        members.add(telegram_user_id)
+        return members
     wid = workspace_for_user(db, telegram_user_id)
     if wid is None:
         return {telegram_user_id}
@@ -292,7 +298,10 @@ def dissolve_workspace(db: Session, owner: int) -> bool:
 def can_manage_records(db: Session, telegram_user_id: int) -> bool:
     """صلاحيات حذف/تعديل السجلات: الأفراد دائمًا نعم؛ أعضاء مساحة مشتركة —
     المرتكز (المالك) فقط (أعضاء عاديون يسجّلون ويقرؤون لكن لا يمسحون/يعدّلون)."""
-    from app.database.crud import workspace_for_user
+    from app.database.crud import company_id_for_user, has_permission, workspace_for_user
+
+    if company_id_for_user(db, telegram_user_id) is not None:
+        return has_permission(db, telegram_user_id, "record.delete")
     wid = workspace_for_user(db, telegram_user_id)
     if wid is None:
         return True

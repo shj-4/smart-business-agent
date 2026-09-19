@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit
+from app.database.crud.company import company_filter
 from app.database.models import (
     Task,
 )
@@ -49,8 +50,12 @@ def create_task(
 
     due_date = parse_date_local(data.get("date")) if data.get("date") else None
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     task = Task(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         telegram_message_id=telegram_message_id,
         description=_clean_text(data.get("description") or data.get("raw") or raw_message)
         or "مهمة",
@@ -117,7 +122,7 @@ def list_pending_tasks(
     )
 
     filters = [
-        Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        company_filter(db, telegram_user_id, Task),
         Task.status == "pending",
         Task.deleted_at.is_(None),
     ]
@@ -148,7 +153,7 @@ def list_overdue_tasks(
     )
 
     filters = [
-        Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        company_filter(db, telegram_user_id, Task),
         Task.status == "overdue",
         Task.deleted_at.is_(None),
     ]
@@ -172,7 +177,7 @@ def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
     updated = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Task),
             Task.status == "pending",
             Task.deleted_at.is_(None),
             Task.due_date != None,  # noqa: E711
@@ -188,7 +193,7 @@ def list_done_tasks(db: Session, telegram_user_id: int, person: str | None = Non
     from app.database.crud import _person_filter, accessible_user_ids
 
     filters = [
-        Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        company_filter(db, telegram_user_id, Task),
         Task.status == "done",
         Task.deleted_at.is_(None),
     ]
@@ -213,7 +218,7 @@ def delete_task_by_id(db: Session, telegram_user_id: int, task_id: int) -> Task 
         db.query(Task)
         .filter(
             Task.id == task_id,
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Task),
             Task.deleted_at.is_(None),
         )
         .first()
@@ -242,7 +247,7 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
     tasks = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Task),
             Task.status.in_(["pending", "overdue"]),
             Task.deleted_at.is_(None),
         )
@@ -263,7 +268,7 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         db.query(Task)
         .filter(
             Task.id == task_id,
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Task),
             Task.deleted_at.is_(None),
         )
         .first()
@@ -280,7 +285,7 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         db.query(Task)
         .filter(
             Task.id == task_id,
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Task),
             Task.status.in_(["pending", "overdue"]),
             Task.deleted_at.is_(None),
         )
@@ -338,6 +343,7 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
 
     spawn = Task(
         telegram_user_id=telegram_user_id,
+        company_id=getattr(done_task, "company_id", None),
         description=done_task.description,
         due_date=to_utc_naive(next_due),
         person=done_task.person,

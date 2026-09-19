@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy.orm import Session
+from app.database.crud.company import company_filter, report_company_filter
 
 from app.database.crud import accessible_user_ids
 from app.database.models import Note, Task, Transaction
@@ -29,13 +30,11 @@ THIN_BORDER = Border(
 
 
 def _scope_ids(db: Session, telegram_user_id: int | None) -> list[int]:
-    """يعيد معرّفات المستخدمين المسموح تضمينهم في التصدير.
-
-    عند None (لوحة التحكم: تقرير شامل) تعود كل المعرّفات الموجودة في الجداول.
-    عند رقم: معرّف المستخدم + أعضاء مساحته عبر accessible_user_ids.
-    """
+    """يعيد معرّفات المستخدمين المسموح تضمينهم في التصدير."""
     if telegram_user_id is not None:
-        return accessible_user_ids(db, telegram_user_id)
+        from app.database.crud import report_scope_ids
+
+        return list(report_scope_ids(db, telegram_user_id))
     ids = {
         rid
         for (rid,) in db.query(Transaction.telegram_user_id).all()
@@ -72,10 +71,13 @@ def generate_transactions_excel(
     end_utc: datetime | None = None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على المعاملات المالية لفترة محددة."""
-    q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-        Transaction.deleted_at.is_(None),
-    )
+    if telegram_user_id is not None:
+        q = db.query(Transaction).filter(
+            report_company_filter(db, telegram_user_id, Transaction),
+            Transaction.deleted_at.is_(None),
+        )
+    else:
+        q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
     if start_utc:
         q = q.filter(Transaction.created_at >= start_utc)
     if end_utc:
@@ -161,15 +163,23 @@ def generate_tasks_excel(
     if telegram_user_id is not None:
         mark_overdue_tasks(db, telegram_user_id)
 
-    tasks = (
-        db.query(Task)
-        .filter(
-            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Task.deleted_at.is_(None),
+    if telegram_user_id is not None:
+        tasks = (
+            db.query(Task)
+            .filter(
+                report_company_filter(db, telegram_user_id, Task),
+                Task.deleted_at.is_(None),
+            )
+            .order_by(Task.due_date.asc().nulls_last())
+            .all()
         )
-        .order_by(Task.due_date.asc().nulls_last())
-        .all()
-    )
+    else:
+        tasks = (
+            db.query(Task)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.due_date.asc().nulls_last())
+            .all()
+        )
 
     wb = Workbook()
     ws = wb.active
@@ -218,15 +228,18 @@ def generate_notes_excel(
     telegram_user_id: int | None,
 ) -> io.BytesIO:
     """يولّد ملف Excel يحتوي على الطلبيات والملاحظات."""
-    notes = (
-        db.query(Note)
-        .filter(
-            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Note.deleted_at.is_(None),
+    if telegram_user_id is not None:
+        notes = (
+            db.query(Note)
+            .filter(
+                report_company_filter(db, telegram_user_id, Note),
+                Note.deleted_at.is_(None),
+            )
+            .order_by(Note.created_at.desc())
+            .all()
         )
-        .order_by(Note.created_at.desc())
-        .all()
-    )
+    else:
+        notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
 
     wb = Workbook()
     ws = wb.active
@@ -280,10 +293,13 @@ def generate_export_excel(
     from app.database.crud import mark_overdue_tasks
 
     # المعاملات ضمن الفترة
-    tq = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-        Transaction.deleted_at.is_(None),
-    )
+    if telegram_user_id is not None:
+        tq = db.query(Transaction).filter(
+            report_company_filter(db, telegram_user_id, Transaction),
+            Transaction.deleted_at.is_(None),
+        )
+    else:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
     if start_utc:
         tq = tq.filter(Transaction.created_at >= start_utc)
     if end_utc:
@@ -292,25 +308,28 @@ def generate_export_excel(
 
     if telegram_user_id is not None:
         mark_overdue_tasks(db, telegram_user_id)
-    tasks = (
-        db.query(Task)
-        .filter(
-            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Task.deleted_at.is_(None),
+    if telegram_user_id is not None:
+        tasks = (
+            db.query(Task)
+            .filter(
+                report_company_filter(db, telegram_user_id, Task),
+                Task.deleted_at.is_(None),
+            )
+            .order_by(Task.due_date.asc().nulls_last())
+            .all()
         )
-        .order_by(Task.due_date.asc().nulls_last())
-        .all()
-    )
-
-    notes = (
-        db.query(Note)
-        .filter(
-            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Note.deleted_at.is_(None),
+        notes = (
+            db.query(Note)
+            .filter(
+                report_company_filter(db, telegram_user_id, Note),
+                Note.deleted_at.is_(None),
+            )
+            .order_by(Note.created_at.desc())
+            .all()
         )
-        .order_by(Note.created_at.desc())
-        .all()
-    )
+    else:
+        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.asc().nulls_last()).all()
+        notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
 
     wb = Workbook()
     ws1 = wb.active
@@ -412,10 +431,13 @@ def generate_export_pdf(
 
     _FONT = _pdf_font()
 
-    tq = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-        Transaction.deleted_at.is_(None),
-    )
+    if telegram_user_id is not None:
+        tq = db.query(Transaction).filter(
+            report_company_filter(db, telegram_user_id, Transaction),
+            Transaction.deleted_at.is_(None),
+        )
+    else:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
     if start_utc:
         tq = tq.filter(Transaction.created_at >= start_utc)
     if end_utc:
@@ -424,24 +446,28 @@ def generate_export_pdf(
 
     if telegram_user_id is not None:
         mark_overdue_tasks(db, telegram_user_id)
-    tasks = (
-        db.query(Task)
-        .filter(
-            Task.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Task.deleted_at.is_(None),
+    if telegram_user_id is not None:
+        tasks = (
+            db.query(Task)
+            .filter(
+                report_company_filter(db, telegram_user_id, Task),
+                Task.deleted_at.is_(None),
+            )
+            .order_by(Task.due_date.asc().nulls_last())
+            .all()
         )
-        .order_by(Task.due_date.asc().nulls_last())
-        .all()
-    )
-    notes = (
-        db.query(Note)
-        .filter(
-            Note.telegram_user_id.in_(_scope_ids(db, telegram_user_id)),
-            Note.deleted_at.is_(None),
+        notes = (
+            db.query(Note)
+            .filter(
+                report_company_filter(db, telegram_user_id, Note),
+                Note.deleted_at.is_(None),
+            )
+            .order_by(Note.created_at.desc())
+            .all()
         )
-        .order_by(Note.created_at.desc())
-        .all()
-    )
+    else:
+        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.asc().nulls_last()).all()
+        notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("TitleRTL", parent=styles["Title"], fontSize=15, fontName=_FONT)

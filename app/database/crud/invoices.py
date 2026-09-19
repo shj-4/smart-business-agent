@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from app.database.crud.company import company_filter
 
 from app.config import settings
 from app.database.models import (
@@ -48,8 +49,12 @@ def create_invoice(
         # المهام (to_utc_naive يعامل naive كتوقيت محلي و aware بالتحويل الصريح).
         due_date = to_utc_naive(due_date)
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     invoice = Invoice(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         person=_clean_person(data.get("person")),
         amount=amount.quantize(Decimal("0.01")),
         currency=currency or None,
@@ -76,7 +81,7 @@ def list_invoices(
 
 
     q = db.query(Invoice).filter(
-        Invoice.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id))
+        company_filter(db, telegram_user_id, Invoice)
     )
     if status and status in ("pending", "paid", "overdue"):
         q = q.filter(Invoice.status == status)
@@ -104,7 +109,7 @@ def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bo
     invoice = (
         db.query(Invoice)
         .filter(
-            Invoice.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Invoice),
             Invoice.id == invoice_id,
         )
         .first()
@@ -148,7 +153,7 @@ def list_orders(
     from app.database.crud import accessible_user_ids
 
     q = db.query(Note).filter(
-        Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+        company_filter(db, telegram_user_id, Note),
         Note.deleted_at.is_(None),
         Note.note_type == "order",
     )
@@ -165,7 +170,7 @@ def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: s
     note = (
         db.query(Note)
         .filter(
-            Note.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Note),
             Note.id == note_id,
             Note.note_type == "order",
             Note.deleted_at.is_(None),

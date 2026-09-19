@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit
+from app.database.crud.company import company_filter
 from app.config import settings
 from app.database.models import (
     Budget,
@@ -56,8 +57,12 @@ def create_budget(
     if not currency and not person and not category:
         return None
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     budget = Budget(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         scope=scope,
         currency=currency,
         person=person,
@@ -81,7 +86,7 @@ def list_budgets(db: Session, telegram_user_id: int) -> list[Budget]:
 
     return (
         db.query(Budget)
-        .filter(Budget.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)))
+        .filter(company_filter(db, telegram_user_id, Budget))
         .order_by(Budget.created_at.asc())
         .all()
     )
@@ -92,7 +97,7 @@ def get_budget(db: Session, telegram_user_id: int, budget_id: int) -> Budget | N
     return (
         db.query(Budget)
         .filter(
-            Budget.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Budget),
             Budget.id == budget_id,
         )
         .first()
@@ -125,7 +130,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     start = to_utc_naive(local_start)
 
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, budget.telegram_user_id)),
+        company_filter(db, budget.telegram_user_id, Transaction),
         Transaction.deleted_at.is_(None),
         Transaction.type == "expense",
         Transaction.created_at >= start,
@@ -199,7 +204,7 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
     rows = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(ids),
+            company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person.isnot(None),
         )

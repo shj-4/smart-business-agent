@@ -30,7 +30,7 @@ from app.cache import start_sweeper
 from app.charts import _convert_month_currency_groups, generate_global_monthly_chart
 from app.config import TELEGRAM_BOT_TOKEN, settings
 from app.database.db import engine, get_db
-from app.database.models import Budget, Note, Task, Transaction, WorkspaceMember
+from app.database.models import Budget, Company, CompanyMember, InviteLink, Note, Task, Transaction, WorkspaceMember
 from app.exchange import convert_totals_to_base
 from app.sentry import install_sentry
 from app.timeutil import now_local, to_local_naive
@@ -1275,6 +1275,107 @@ async def dashboard_budgets(
         "budgets.html",
         {"active": "budgets", "budgets": budgets},
     )
+
+
+@app.get("/dashboard/company", response_class=HTMLResponse)
+async def dashboard_company(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+):
+    """صفحة الشركة: الأعضاء وأدوارهم والدعوات النشطة."""
+    csrf_token = _csrf_token_or_new(request)
+    companies = db.query(Company).order_by(Company.created_at.desc()).all()
+    rows = []
+    for comp in companies:
+        members = db.query(CompanyMember).filter(CompanyMember.company_id == comp.id).order_by(CompanyMember.joined_at.asc()).all()
+        invites = db.query(InviteLink).filter(InviteLink.company_id == comp.id, InviteLink.revoked == False).order_by(InviteLink.created_at.desc()).limit(20).all()  # noqa: E712
+        rows.append({"company": comp, "members": members, "invites": invites})
+    resp = templates.TemplateResponse(request, "company.html", {"active": "company", "rows": rows, "csrf_token": csrf_token})
+    _set_csrf_cookie(resp, csrf_token, request)
+    return resp
+
+
+@app.post("/dashboard/company/update", response_class=RedirectResponse)
+async def dashboard_company_update(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+    _csrf: None = Depends(require_dashboard_csrf),
+):
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    parsed = urllib.parse.parse_qs(raw)
+    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    name = (parsed.get("name") or [""])[0].strip()
+    description = (parsed.get("description") or [""])[0].strip()
+    # للوحة التحكم: نعتبر المالك هو الفاعل (أول عضو owner)
+    comp = db.query(Company).filter(Company.id == cid).first()
+    if comp and name:
+        from app.database.crud.company import update_company
+
+        # استخدم owner كممثل
+        update_company(db, comp.owner_telegram_user_id, cid, name=name, description=description)
+    return RedirectResponse(url="/dashboard/company", status_code=303)
+
+
+@app.post("/dashboard/company/invite/revoke", response_class=RedirectResponse)
+async def dashboard_company_revoke(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+    _csrf: None = Depends(require_dashboard_csrf),
+):
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    parsed = urllib.parse.parse_qs(raw)
+    invite_id = int((parsed.get("invite_id") or ["0"])[0] or 0)
+    invite = db.query(InviteLink).filter(InviteLink.id == invite_id).first()
+    if invite:
+        comp = db.query(Company).filter(Company.id == invite.company_id).first()
+        if comp:
+            from app.database.crud.company import revoke_invite
+
+            revoke_invite(db, comp.owner_telegram_user_id, invite_id)
+    return RedirectResponse(url="/dashboard/company", status_code=303)
+
+
+@app.post("/dashboard/company/transfer", response_class=RedirectResponse)
+async def dashboard_company_transfer(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+    _csrf: None = Depends(require_dashboard_csrf),
+):
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    parsed = urllib.parse.parse_qs(raw)
+    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    target = int((parsed.get("target_id") or ["0"])[0] or 0)
+    comp = db.query(Company).filter(Company.id == cid).first()
+    if comp and target:
+        from app.database.crud.company import transfer_company_ownership
+
+        transfer_company_ownership(db, comp.owner_telegram_user_id, target)
+    return RedirectResponse(url="/dashboard/company", status_code=303)
+
+
+@app.post("/dashboard/company/delete", response_class=RedirectResponse)
+async def dashboard_company_delete(
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_dashboard_auth),
+    _csrf: None = Depends(require_dashboard_csrf),
+):
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    parsed = urllib.parse.parse_qs(raw)
+    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    confirm = (parsed.get("confirm") or [""])[0]
+    if confirm != "DELETE":
+        return RedirectResponse(url="/dashboard/company", status_code=303)
+    comp = db.query(Company).filter(Company.id == cid).first()
+    if comp:
+        from app.database.crud.company import delete_company
+
+        delete_company(db, comp.owner_telegram_user_id, cid, confirm=True)
+    return RedirectResponse(url="/dashboard/company", status_code=303)
 
 
 @app.get("/api/budgets")

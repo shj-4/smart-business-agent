@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}الشركة — لوحة التحكم{% endblock %}
+{% block content %}
+<h1>إدارة الشركات</h1>
+
+{% if not rows %}
+<div class="alert warn">لا توجد شركات بعد. أنشئ شركة عبر البوت /start.</div>
+{% endif %}
+
+{% for entry in rows %}
+<div class="panel">
+    <div class="panel-head">
+        <h2>🏢 {{ entry.company.name }} <span class="count">#{{ entry.company.id }} — {{ entry.company.business_type or '—' }} | {{ entry.company.base_currency or '—' }}</span></h2>
+        <span class="count">المالك: {{ entry.company.owner_telegram_user_id }} | {{ entry.members | length }} عضو</span>
+    </div>
+    <p style="color:var(--muted);font-size:14px;margin-bottom:12px">{{ entry.company.description or '—' }}</p>
+
+    <form method="post" action="/dashboard/company/update" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="company_id" value="{{ entry.company.id }}">
+        <input type="text" name="name" value="{{ entry.company.name }}" placeholder="الاسم" required style="flex:1;min-width:160px">
+        <input type="text" name="description" value="{{ entry.company.description or '' }}" placeholder="الوصف" style="flex:2;min-width:200px">
+        <button type="submit" style="background:var(--primary);color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">حفظ</button>
+    </form>
+
+    <h3 style="margin:12px 0 8px">👥 الأعضاء</h3>
+    <table>
+        <thead><tr><th>Telegram ID</th><th>الاسم</th><th>الدور</th><th>انضم</th><th>نقل ملكية</th></tr></thead>
+        <tbody>
+        {% for m in entry.members %}
+            <tr>
+                <td>{{ m.telegram_user_id }}</td>
+                <td>{{ m.display_name or '' }}</td>
+                <td><span class="badge neutral">{{ m.role }}</span></td>
+                <td class="nowrap">{{ m.joined_at.strftime('%Y-%m-%d') if m.joined_at else '' }}</td>
+                <td>
+                    {% if m.telegram_user_id != entry.company.owner_telegram_user_id %}
+                    <form method="post" action="/dashboard/company/transfer" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="company_id" value="{{ entry.company.id }}">
+                        <input type="hidden" name="target_id" value="{{ m.telegram_user_id }}">
+                        <button type="submit" style="background:var(--amber-weak);color:var(--amber);border:1px solid #fcd34d;border-radius:6px;padding:4px 8px;cursor:pointer">نقل إليه</button>
+                    </form>
+                    {% else %}
+                    <span class="badge done">المالك</span>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <h3 style="margin:16px 0 8px">🚫 الدعوات النشطة</h3>
+    {% if entry.invites %}
+    <table>
+        <thead><tr><th>#</th><th>النوع</th><th>الدور</th><th>الاستخدام</th><th>ينتهي</th><th>إلغاء</th></tr></thead>
+        <tbody>
+        {% for inv in entry.invites %}
+            <tr>
+                <td>{{ inv.id }}</td>
+                <td>{{ inv.kind }}</td>
+                <td>{{ inv.role }}</td>
+                <td>{{ inv.uses }}/{{ inv.max_uses }}</td>
+                <td>{{ inv.expires_at.strftime('%Y-%m-%d %H:%M') if inv.expires_at else '—' }}</td>
+                <td>
+                    <form method="post" action="/dashboard/company/invite/revoke">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="invite_id" value="{{ inv.id }}">
+                        <button type="submit" style="background:var(--red-weak);color:var(--red);border:1px solid #fecaca;border-radius:6px;padding:4px 8px;cursor:pointer">إلغاء</button>
+                    </form>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">لا توجد دعوات نشطة.</div>
+    {% endif %}
+
+    <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+        <form method="post" action="/dashboard/company/delete" onsubmit="return confirm('تأكيد حذف الشركة {{ entry.company.name }}؟ اكتب DELETE للتأكيد')" style="display:flex;gap:8px;align-items:center">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="company_id" value="{{ entry.company.id }}">
+            <input type="text" name="confirm" placeholder='اكتب DELETE للتأكيد' required style="flex:1">
+            <button type="submit" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">🗑️ حذف الشركة</button>
+        </form>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px">الحذف يحذف العضويات والدعوات فقط — السجلات المالية تبقى ب company_id للمراجعة.</p>
+    </div>
+</div>
+{% endfor %}
+{% endblock %}

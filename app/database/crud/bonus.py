@@ -23,6 +23,7 @@ from decimal import Decimal
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from app.database.crud.company import company_filter
 
 from app.database.models import (
     BonusEvent,
@@ -96,7 +97,7 @@ def list_bonus_transactions(
     q = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             _bonus_category_filter(),
         )
@@ -191,8 +192,12 @@ def create_bonus_event(
     if budget is not None and budget < 0:
         budget = None
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     event = BonusEvent(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         name=name[:255],
         budget=budget.quantize(Decimal("0.01")) if budget is not None else None,
         currency=normalize_currency(currency) or currency,
@@ -214,7 +219,7 @@ def list_bonus_events(
     from app.database.crud import accessible_user_ids
 
     uids = accessible_user_ids(db, telegram_user_id)
-    q = db.query(BonusEvent).filter(BonusEvent.telegram_user_id.in_(uids))
+    q = db.query(BonusEvent).filter(company_filter(db, telegram_user_id, BonusEvent))
     if status:
         q = q.filter(BonusEvent.status == status)
     return q.order_by(BonusEvent.id.desc()).all()
@@ -231,7 +236,7 @@ def set_bonus_event_status(
     uids = accessible_user_ids(db, telegram_user_id)
     event = (
         db.query(BonusEvent)
-        .filter(BonusEvent.id == event_id, BonusEvent.telegram_user_id.in_(uids))
+        .filter(BonusEvent.id == event_id, company_filter(db, telegram_user_id, BonusEvent))
         .first()
     )
     if event is None:
@@ -274,7 +279,7 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
     granted_rows = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(uids),
+            company_filter(db, event.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
             _bonus_category_filter(),
@@ -291,7 +296,7 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
     sales_rows = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(uids),
+            company_filter(db, event.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
             Transaction.created_at >= lo,
@@ -365,8 +370,12 @@ def create_employee_bonus_plan(
     if frequency not in ("monthly", "quarterly", "one_off"):
         frequency = "monthly"
 
+    from app.database.crud.company import company_id_for_user as _cid_for
+
+    _cid = _cid_for(db, telegram_user_id)
     plan = EmployeeBonusPlan(
         telegram_user_id=telegram_user_id,
+        company_id=_cid,
         person=person[:255],
         amount=amount.quantize(Decimal("0.01")),
         currency=normalize_currency(currency) or currency,
@@ -389,7 +398,7 @@ def list_employee_bonus_plans(
     from app.database.crud import accessible_user_ids
 
     uids = accessible_user_ids(db, telegram_user_id)
-    q = db.query(EmployeeBonusPlan).filter(EmployeeBonusPlan.telegram_user_id.in_(uids))
+    q = db.query(EmployeeBonusPlan).filter(company_filter(db, telegram_user_id, EmployeeBonusPlan))
     if not include_disabled:
         q = q.filter(EmployeeBonusPlan.enabled.is_(True))
     return q.order_by(EmployeeBonusPlan.next_due_at.asc()).all()
@@ -404,7 +413,7 @@ def disable_employee_bonus_plan(
     uids = accessible_user_ids(db, telegram_user_id)
     plan = (
         db.query(EmployeeBonusPlan)
-        .filter(EmployeeBonusPlan.id == plan_id, EmployeeBonusPlan.telegram_user_id.in_(uids))
+        .filter(EmployeeBonusPlan.id == plan_id, company_filter(db, telegram_user_id, EmployeeBonusPlan))
         .first()
     )
     if plan is None:
@@ -482,7 +491,7 @@ def _employee_bonus_monthly_spent(
     rows = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, plan.telegram_user_id)),
+            company_filter(db, plan.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
             Transaction.person == plan.person,
@@ -609,7 +618,7 @@ def loyalty_config_get(db: Session, telegram_user_id: int) -> LoyaltyConfig | No
     uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyConfig)
-        .filter(LoyaltyConfig.telegram_user_id.in_(uids))
+        .filter(company_filter(db, telegram_user_id, LoyaltyConfig))
         .order_by(LoyaltyConfig.id.asc())
         .first()
     )
@@ -626,8 +635,12 @@ def loyalty_config_enable(
     anchor = _workspace_anchor(db, telegram_user_id)
     cfg = loyalty_config_get(db, telegram_user_id)
     if cfg is None:
+        from app.database.crud.company import company_id_for_user as _cid_for
+
+        _cid = _cid_for(db, telegram_user_id)
         cfg = LoyaltyConfig(
             telegram_user_id=anchor,
+            company_id=_cid,
             points_rate=Decimal(str(points_rate if points_rate is not None else 1)),
             points_value=Decimal(str(points_value if points_value is not None else 0.01)),
             min_redeem_points=int(min_redeem_points if min_redeem_points is not None else 0),
@@ -700,7 +713,7 @@ def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> Loya
     return (
         db.query(LoyaltyAccount)
         .filter(
-            LoyaltyAccount.telegram_user_id.in_(uids),
+            company_filter(db, telegram_user_id, LoyaltyAccount),
             LoyaltyAccount.person == person,
         )
         .order_by(LoyaltyAccount.id.asc())
@@ -710,9 +723,12 @@ def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> Loya
 
 def _loyalty_account_create(db: Session, telegram_user_id: int, person: str) -> LoyaltyAccount:
     from app.database.crud import _clean_person
+    from app.database.crud.company import company_id_for_user as _cid_for
 
+    _cid = _cid_for(db, telegram_user_id)
     account = LoyaltyAccount(
         telegram_user_id=_workspace_anchor(db, telegram_user_id),
+        company_id=_cid,
         person=_clean_person(person),
         points_balance=0,
         total_earned=0,
@@ -814,7 +830,7 @@ def list_loyalty_accounts(
     uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
-        .filter(LoyaltyAccount.telegram_user_id.in_(uids))
+        .filter(company_filter(db, telegram_user_id, LoyaltyAccount))
         .order_by(LoyaltyAccount.points_balance.desc())
         .limit(limit)
         .all()

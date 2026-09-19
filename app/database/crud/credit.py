@@ -4,6 +4,7 @@
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
+from app.database.crud.company import company_filter
 
 from app.database.models import (
     CreditLimit,
@@ -31,13 +32,16 @@ def set_credit_limit(
     row = (
         db.query(CreditLimit)
         .filter(
-            CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, CreditLimit),
             CreditLimit.person == person,
         )
         .first()
     )
     if row is None:
-        row = CreditLimit(telegram_user_id=telegram_user_id, person=person, limit_amount=limit)
+        from app.database.crud.company import company_id_for_user as _cid_for
+
+        _cid = _cid_for(db, telegram_user_id)
+        row = CreditLimit(telegram_user_id=telegram_user_id, company_id=_cid, person=person, limit_amount=limit)
         db.add(row)
     else:
         row.limit_amount = limit
@@ -77,7 +81,7 @@ def list_credit_limits(db: Session, telegram_user_id: int) -> list[CreditLimit]:
 
     return (
         db.query(CreditLimit)
-        .filter(CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)))
+        .filter(company_filter(db, telegram_user_id, CreditLimit))
         .order_by(CreditLimit.created_at.asc())
         .all()
     )
@@ -88,7 +92,7 @@ def get_credit_limit(db: Session, telegram_user_id: int, person: str) -> CreditL
     return (
         db.query(CreditLimit)
         .filter(
-            CreditLimit.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            company_filter(db, telegram_user_id, CreditLimit),
             CreditLimit.person == person,
         )
         .first()
@@ -117,7 +121,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     rows = (
         db.query(Transaction)
         .filter(
-            Transaction.telegram_user_id.in_(accessible_user_ids(db, limit_row.telegram_user_id)),
+            company_filter(db, limit_row.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person == limit_row.person,
         )
