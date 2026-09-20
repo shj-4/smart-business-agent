@@ -33,10 +33,12 @@ SOURCE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'data', 'business.db')}"
 
 # كل النماذج ذات الجداول — لا قائمة يدوية؛ إن أُضيف نموذج في models.py
 # بالطريقة نفسها دخل إلى الترحيل تلقائيًا.
-MODELS = sorted(
-    (m for m in Base.__subclasses__() if hasattr(m, "__tablename__")),
-    key=lambda m: m.__tablename__,
-)
+# الترتيب بالاعتماد (sorted_tables) لاحترام المفاتيح الأجنبية: companies قبل budgets/bonus_events
+MODELS = [cls for table in Base.metadata.sorted_tables for cls in Base.__subclasses__() if hasattr(cls, "__tablename__") and cls.__table__ is table]
+# fallback: إن لم تُكتشف كل النماذج (نادر)، أكمل الباقي أبجديًا
+_seen = {m.__tablename__ for m in MODELS}
+for m in sorted((m for m in Base.__subclasses__() if hasattr(m, "__tablename__") and m.__tablename__ not in _seen), key=lambda m: m.__tablename__):
+    MODELS.append(m)
 
 
 def _session(url: str):
@@ -68,15 +70,37 @@ def _migrate(src, dst, model_list: list) -> dict[str, int]:
     دون أن يُكتب أي صف إلى الهدف إطلاقًا. القيم المقروءة من المصدر مفكوكة
     التشفير، وتمريرها عبر insert يعيد تشفيرها بنوع العمود في الهدف، مع حفظ
     المفاتيح الأساسية ذاتها (بما فيها WorkspaceMember بلا عمود id).
+
+    عزل: الصفوف التي تحوي حقلًا مشفّرًا لا يمكن فكّه (is_encrypted + UNREADABLE_VALUE)
+    تُرفض — لا نكتب العبارة النائبة مشفّرة فوق الأصل فيضيع للأبد.
     """
+    from app.security import UNREADABLE_VALUE
+
     counts: dict[str, int] = {}
+    skipped: dict[str, int] = {}
     for model in model_list:
         rows = _ordered_rows(model, src)
+        kept = 0
         for row in rows:
+            # فحص الحقول المشفّرة: إن كانت القيمة هي النائبة، فالمفتاح الحالي لا يفكّ الأصل
+            skip = False
+            for col in model.__table__.columns:
+                # تحقق إذا كان العمود من نوع مشفّر عبر Python type
+                # (نستخدم القيمة المُفككة: إن كانت UNREADABLE_VALUE فهي مشفّرة فاشلة)
+                val = getattr(row, col.key, None)
+                if val == UNREADABLE_VALUE:
+                    skip = True
+                    break
+            if skip:
+                skipped[model.__name__] = skipped.get(model.__name__, 0) + 1
+                continue
             values = {col.key: getattr(row, col.key) for col in model.__table__.columns}
             dst.execute(insert(model.__table__).values(**values))
+            kept += 1
         dst.commit()
-        counts[model.__name__] = len(rows)
+        counts[model.__name__] = kept
+        if skipped.get(model.__name__):
+            print(f"  {model.__name__}: تخطي {skipped[model.__name__]} صفًا غير قابل للفك (مفتاح غير مطابق)")
     return counts
 
 

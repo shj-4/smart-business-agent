@@ -4,7 +4,9 @@
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
-from app.database.crud.company import company_filter
+
+from app.audit import log_audit
+from app.database.crud.company import company_filter, has_permission
 
 from app.database.models import (
     CreditLimit,
@@ -17,8 +19,11 @@ def set_credit_limit(
     db: Session, telegram_user_id: int, person: str, limit_amount,
 ) -> CreditLimit | None:
     """يحدد/يحدّث سقفًا ائتمانيًا لشخص. يعيد None على قيم غير صالحة."""
-    from app.database.crud import _clean_person, _invalidate_caches, accessible_user_ids
+    from app.database.crud import _clean_person, _invalidate_caches
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_set_credit_limit", f"credit:{person}", detail="budget.manage required")
+        return None
     person = _clean_person(person)
     if not person:
         return None
@@ -77,22 +82,22 @@ def credit_monthly_reset(db: Session, limit_row: CreditLimit) -> bool:
 
 
 def list_credit_limits(db: Session, telegram_user_id: int) -> list[CreditLimit]:
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import report_company_filter
 
     return (
         db.query(CreditLimit)
-        .filter(company_filter(db, telegram_user_id, CreditLimit))
+        .filter(report_company_filter(db, telegram_user_id, CreditLimit))
         .order_by(CreditLimit.created_at.asc())
         .all()
     )
 
 def get_credit_limit(db: Session, telegram_user_id: int, person: str) -> CreditLimit | None:
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import report_company_filter
 
     return (
         db.query(CreditLimit)
         .filter(
-            company_filter(db, telegram_user_id, CreditLimit),
+            report_company_filter(db, telegram_user_id, CreditLimit),
             CreditLimit.person == person,
         )
         .first()
@@ -101,7 +106,9 @@ def get_credit_limit(db: Session, telegram_user_id: int, person: str) -> CreditL
 def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     """استخدام السقف الائتماني لشخص في كلا الاتجاهين.
 
-    outstanding = المصروفات - الإيرادات: موجبة = ما عليك له، سالبة = ما هو مدين لك.
+    outstanding = الإيرادات - المصروفات: موجبة = ما هو مدين لك (لك عليه)، سالبة = ما عليك له.
+    موحّد مع person_debts و person_balance (income - expense) لتفادي التناقض:
+    موجب = يدين لك، سالب = تدين له.
     amount = القيمة المطلقة التي يُقاس عليها السقف؛ percent/over مبنيان عليها —
     فيُنبي النظام عند تجاوز السقف سواء كان الدين عليك له (مورّد) أو عليه لك (عميل).
 
@@ -118,10 +125,12 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     from app.database.crud import accessible_user_ids
     from app.money import _unified_totals_for_rows
 
+    from app.database.crud.company import report_company_filter
+
     rows = (
         db.query(Transaction)
         .filter(
-            company_filter(db, limit_row.telegram_user_id, Transaction),
+            report_company_filter(db, limit_row.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person == limit_row.person,
         )
@@ -139,7 +148,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
         c: {
             "income": cell["income"].quantize(Decimal("0.01")),
             "expense": cell["expense"].quantize(Decimal("0.01")),
-            "balance": (cell["expense"] - cell["income"]).quantize(Decimal("0.01")),
+            "balance": (cell["income"] - cell["expense"]).quantize(Decimal("0.01")),
         }
         for c, cell in per_cur.items()
     }
@@ -151,7 +160,9 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     elif len(by_currency) == 1:
         outstanding = next(iter(by_currency.values()))["balance"]
     else:
-        base = (settings.base_currency or "").upper().strip()
+        from app.database.crud.company import get_user_base_currency as _get_base
+
+        base = _get_base(db, limit_row.telegram_user_id)
         exp_uni = _unified_totals_for_rows(
             [r for r in rows if r.type == "expense" and r.amount is not None], base
         ).get("total")
@@ -159,7 +170,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
             [r for r in rows if r.type == "income" and r.amount is not None], base
         ).get("total")
         if exp_uni is not None and inc_uni is not None:
-            outstanding = exp_uni - inc_uni
+            outstanding = inc_uni - exp_uni
         else:
             outstanding = None
             unified_ok = False
@@ -179,7 +190,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     outstanding = outstanding.quantize(Decimal("0.01"))
     amount = abs(outstanding)
     percent = float(amount / limit * 100) if limit and amount > 0 else 0.0
-    side = "payable" if outstanding > 0 else ("receivable" if outstanding < 0 else "balanced")
+    side = "receivable" if outstanding > 0 else ("payable" if outstanding < 0 else "balanced")
     return {
         "outstanding": outstanding,
         "amount": amount,

@@ -455,6 +455,20 @@ def _do_save(
     if not can_save_record(result):
         return None
 
+    # طبقة صلاحيات موحّدة: record.create للإنشاء، و edit للعمليات
+    from app.database.crud.company import has_permission
+    from app.audit import log_audit
+
+    if data_type in ("expense", "income", "task", "order", "note"):
+        if not has_permission(db, telegram_user_id, "record.create"):
+            log_audit(telegram_user_id, "denied_record_create", data_type, detail="record.create required")
+            return "ليس لديك صلاحية إنشاء السجلات (دورك لا يسمح بالتسجيل)."
+    if data_type == "complete_task":
+        # إنجاز مهمة يتطلب صلاحية تعديل (edit_own/edit_any) عبر can_edit_record
+        from app.database.crud.company import can_edit_record
+        # نفحص لاحقًا بعد العثور على المهمة؛ إن لم توجد نترك رسالة عدم وجود
+        pass
+
     if data_type in ("expense", "income"):
         obj = create_transaction(db, telegram_user_id, result, raw_message, telegram_message_id)
         if obj is None:
@@ -472,6 +486,10 @@ def _do_save(
         if description_hint:
             task = find_pending_task(db, telegram_user_id, description_hint)
             if task:
+                from app.database.crud.company import can_edit_record
+                if not can_edit_record(db, telegram_user_id, task.telegram_user_id):
+                    log_audit(telegram_user_id, "denied_complete_task", f"task:{task.id}", detail="record.edit required")
+                    return "ليس لديك صلاحية إنجاز هذه المهمة."
                 complete_task(db, telegram_user_id, task.id)
                 return f"تم إنجاز المهمة: {task.description}"
             return "لم أجد مهمة مطابقة ضمن مهامك المعلّقة."
@@ -766,8 +784,17 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         except TypeError:
             return analyze_message(text)
 
-    result = await asyncio.to_thread(_safe_analyze, user_text, company_dict)
-    logger.info("نتيجة التحليل: %s", result)
+    from app.ai_queue import aiq
+
+    result = await aiq.submit(lambda: _safe_analyze(user_text, company_dict))
+    # لا تسجّل محتوى الحقول الحساسة (amount/person/description) — سجّل الأسماء والمعرّفات فقط
+    logger.info(
+        "نتيجة التحليل: intent=%s type=%s user=%s missing=%s",
+        result.get("intent"),
+        result.get("type"),
+        telegram_user_id,
+        (result.get("missing_fields") or []) if isinstance(result.get("missing_fields"), list) else [],
+    )
 
     if seed and result.get("intent") == "record":
         result["type"] = seed
@@ -810,6 +837,9 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """يملأ الحقل الناقص من ردّ المستخدم (حالة COLLECT)."""
+    if is_rate_limited(update.effective_user.id):
+        await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
+        return None
     partial = context.user_data.get("pending_record")
     data_type = context.user_data.get("pending_type")
     raw = context.user_data.get("pending_raw")
@@ -1182,7 +1212,7 @@ async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["pending_type"] = data_type
     context.user_data["pending_missing"] = missing
     context.user_data["pending_raw"] = None
-    context.user_data["pending_message_id"] = msg_id
+    context.user_data["pending_message_id"] = None
 
     # رسالة حسب الحقل الناقص
     first_missing = missing[0] if missing else "amount"

@@ -81,12 +81,46 @@ def _encrypt_row(db: Session, model, obj) -> None:
     نستخدم UPDATE صريح — تعيين نفس القيمة عبر ORM لا يُعدّ تغييرًا ولا يُكتب.
     القراءة عبر ORM تفكّ التشفير (أو تُرجع القديم الواضح) → نعيد الكتابة مشفّرًا.
     القيم None تُترك كما هي (لا نكتب NULL مكان نص غير مقروء بالمفتاح الحالي).
+    الصفوف التي فشل فكّ تشفيرها (قيمة "غير قابلة للقراءة" أو is_encrypted ولا
+    يمكن فكّها) تُرفض — لا نعيد تشفير العبارة النائبة فوق النص الأصلي فيضيع.
     """
+    from app.security import UNREADABLE_VALUE, is_encrypted
+    from sqlalchemy import inspect as sa_inspect
+
+    # احصل على القيم الخام من DB (قبل فك التشفير) لتمييز المشفّر الفاشل
+    # نستخدم inspect لقراءة القيمة المخزنة مباشرة إن أمكن
+    raw_values: dict = {}
+    try:
+        # حاول قراءة الصف الخام عبر Core SELECT لنفس id
+        table = model.__table__
+        pk_col = list(table.primary_key.columns)[0] if list(table.primary_key.columns) else None
+        if pk_col is not None:
+            raw_row = db.execute(
+                table.select().where(pk_col == obj.id)
+            ).first()
+            if raw_row is not None:
+                raw_values = dict(raw_row._mapping)
+    except Exception:
+        raw_values = {}
+
     values: dict = {}
     for name in _encrypted_columns(model):
         value = getattr(obj, name)
-        if value is not None:
-            values[name] = value
+        if value is None:
+            continue
+        # إذا كانت القيمة المُفككة هي العبارة النائبة، فالمفتاح الحالي لا يفكّ الأصل
+        if value == UNREADABLE_VALUE:
+            continue
+        # إذا كانت القيمة الخام مشفّرة (v1$) لكن المفككة هي نفسها الخام أو نائبة، فشل
+        raw = raw_values.get(name)
+        if raw is not None and is_encrypted(raw) and value in (UNREADABLE_VALUE, raw):
+            continue
+        # تحقق إضافي: إذا كانت القيمة الخام مشفّرة وفشل فكّها (decrypt_text يعيد None)
+        if raw is not None and is_encrypted(raw):
+            from app.security import decrypt_text
+            if decrypt_text(raw) is None:
+                continue
+        values[name] = value
     if values:
         db.execute(update(model.__table__).where(model.__table__.c.id == obj.id).values(**values))
         db.flush()

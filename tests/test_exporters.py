@@ -58,10 +58,11 @@ class TestTransactionsExcel:
 
 class TestTasksExcel:
     def test_valid_workbook_with_statuses(self, db_session):
+        # تاريخ مستقبلي لضمان بقاء الحالة "قيد الانتظار" (لا متأخرة)
         create_task(
             db_session,
             USER_A,
-            {"description": "مهمة أ", "date": "2026-09-20 12:00"},
+            {"description": "مهمة أ", "date": "2099-01-01 12:00"},
             raw_message="مهمة أ",
         )
         buf = generate_tasks_excel(db_session, USER_A)
@@ -108,7 +109,7 @@ class TestExportPdf:
         create_task(
             db_session,
             USER_A,
-            {"description": "مهمة أ", "date": "2026-09-20 12:00"},
+            {"description": "مهمة أ", "date": "2099-01-01 12:00"},
             raw_message="مهمة أ",
         )
         create_note(

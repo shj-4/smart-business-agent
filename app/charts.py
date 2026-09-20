@@ -11,17 +11,36 @@
 
 import io
 import logging
+import threading
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
+
+_CHART_LOCK = threading.Lock()
+
+
+def _reshape_ar(text: str) -> str:
+    """يعيد نصًا عربيًا مُشكَّلًا للعرض الصحيح في matplotlib (يحتاج reshaper)."""
+    if not text or not any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+        return text
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+
+        return get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        return text
 
 
 def _convert_month_currency_groups(
     by_currency: dict, base_currency: str, stored: dict | None = None
 ) -> dict:
-    """يحوّل مجاميع شهر (by_currency) إلى العملة الأساسية.
+    """يحوّل مجاميع شهر إلى العملة الأساسية (عقد موحّد).
 
-    by_currency: {currency: {"expense": Decimal, "income": Decimal}}
+    by_currency: {currency: {"expense": Decimal, "income": Decimal}} — يجب أن
+      يكون الحي فقط (live) عند وجود `stored`، وإلا فهو الإجمالي الكامل.
+      العقد الموحّد: by_currency = حي فقط، stored = مثبّت فقط، ثم الجمع
+      (live×rate + stored). يمنع إسقاط الجزء الحي عند وجود stored لنفس العملة.
     stored (اختياري): {currency: {"expense": Decimal, "income": Decimal}} مبالغ
       موحّدة بعملة الأساس وقت التسجيل (يبقى الرسم دقيقًا تاريخيًا حتى لو تغيّر
       سعر الصرف لاحقًا) — يُفضَّل على سعر اليوم لكل عملة متاحة.
@@ -66,7 +85,9 @@ def generate_monthly_chart(
 
     - يتحول تلقائيًا إلى Agg backend (بلا نافذة) لأمان الخادم.
     - عند فشل توحيد كل العملات يعيد None (والداعي يعرض رسالة).
+    - Thread-safe عبر قفل عالمي (matplotlib غير آمن للخيوط).
     """
+    # استخدم Agg داخل الخيط (قبل استيراد pyplot) لضمان الأمان مع to_thread
     import matplotlib
 
     matplotlib.use("Agg")
@@ -93,24 +114,41 @@ def generate_monthly_chart(
     plt.rcParams["axes.unicode_minus"] = False
 
     # توحيد كل شهر إلى العملة الأساسية (يفضّل المبالغ المثبّتة عند التسجيل إن كانت
-    # بنفس العملة الأساسية المطلوبة)
+    # بنفس العملة الأساسية المطلوبة) — العقد الموحّد: live + stored
     converted = []
     all_zero = True
+    has_data = False
     for month in raw:
         stored = month.get("stored") if month.get("stored_base") == base else None
-        res = _convert_month_currency_groups(month["by_currency"], base, stored=stored)
+        live = month.get("live_by_currency") if month.get("stored_base") == base else None
+        by_for_conv = live if live is not None else month["by_currency"]
+        res = _convert_month_currency_groups(by_for_conv, base, stored=stored)
         converted.append((month["label"], res))
+        # لا تعتبر partial كـ zero — تجنب رسم صفر مضلل عند فشل التحويل
+        if res.get("partial"):
+            if (res.get("expense") is not None and res["expense"] != 0) or (
+                res.get("income") is not None and res["income"] != 0
+            ):
+                has_data = True
+                all_zero = False
+            continue
         if (res["expense"] or Decimal("0")) != 0 or (res["income"] or Decimal("0")) != 0:
+            has_data = True
             all_zero = False
+            # قيمة صفرية حقيقية (ليست partial)
+            has_data = True
 
     if all_zero:
         return None
 
     labels = [label for label, _ in converted]
-    expenses = [float(res["expense"] or 0) for _, res in converted]
-    incomes = [float(res["income"] or 0) for _, res in converted]
+    # لا ترسم partial كصفر — استخدم 0 للعرض لكن مع تمييز (سيُظهر الرسم فجوة/شفافية)
+    expenses = [float(res["expense"]) if res.get("expense") is not None else 0 for _, res in converted]
+    incomes = [float(res["income"]) if res.get("income") is not None else 0 for _, res in converted]
 
-    return _render_monthly_png(labels, incomes, expenses, months, base)
+    # استخدم chart_months الفعلي (عدد الأشهر المرسومة) في العنوان
+    actual_months = len(labels) if labels else months
+    return _render_monthly_png(labels, incomes, expenses, actual_months, base)
 
 
 def _render_monthly_png(
@@ -120,7 +158,11 @@ def _render_monthly_png(
     months: int,
     base: str,
 ):
-    """يرسم أعمدة الإيرادات/المصاريف ويصدر PNG (أو None عند فشل الحفظ)."""
+    """يرسم أعمدة الإيرادات/المصاريف ويصدر PNG (أو None عند فشل الحفظ).
+
+    Thread-safe: يحمي matplotlib عبر _CHART_LOCK (غير آمن للخيوط).
+    """
+    # استخدم Agg داخل الخيط قبل pyplot (آمان الخيوط)
     import matplotlib
 
     matplotlib.use("Agg")
@@ -128,56 +170,65 @@ def _render_monthly_png(
     from matplotlib import font_manager
     from matplotlib import pyplot as plt
 
-    try:
-        available = {f.name for f in font_manager.fontManager.ttflist}
-        for candidate in ("Segoe UI", "Tahoma", "Arial", "DejaVu Sans"):
-            if candidate in available:
-                plt.rcParams["font.family"] = [candidate]
-                break
-    except Exception:
-        logger.debug("تعذر ضبط خط الرسم، نستخدم الافتراضي.")
-    plt.rcParams["axes.unicode_minus"] = False
+    # قفل عالمي لحماية matplotlib من التزامن
+    with _CHART_LOCK:
+        try:
+            available = {f.name for f in font_manager.fontManager.ttflist}
+            for candidate in ("Segoe UI", "Tahoma", "Arial", "DejaVu Sans"):
+                if candidate in available:
+                    plt.rcParams["font.family"] = [candidate]
+                    break
+        except Exception:
+            logger.debug("تعذر ضبط خط الرسم، نستخدم الافتراضي.")
+        plt.rcParams["axes.unicode_minus"] = False
 
-    x_pos = range(len(labels))
-    width = 0.38
+        x_pos = range(len(labels))
+        width = 0.38
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.bar(
-        [p - width / 2 for p in x_pos],
-        incomes,
-        width,
-        label="إيرادات",
-        color="#16a34a",
-        edgecolor="white",
-    )
-    ax.bar(
-        [p + width / 2 for p in x_pos],
-        expenses,
-        width,
-        label="مصروفات",
-        color="#dc2626",
-        edgecolor="white",
-    )
+        fig, ax = plt.subplots(figsize=(9, 5))
+        # إعادة تشكيل العربية للأسطورة والعناوين
+        income_label = _reshape_ar("إيرادات")
+        expense_label = _reshape_ar("مصروفات")
+        title_text = _reshape_ar(f"الإيرادات مقابل المصاريف — آخر {months} أشهر ({base})")
+        ylabel_text = _reshape_ar(f"المبلغ ({base})")
+        # تسميات المحور X قد تحتوي شهر عربي — شكّلها أيضًا
+        reshaped_labels = [_reshape_ar(str(l)) for l in labels]
+        ax.bar(
+            [p - width / 2 for p in x_pos],
+            incomes,
+            width,
+            label=income_label,
+            color="#16a34a",
+            edgecolor="white",
+        )
+        ax.bar(
+            [p + width / 2 for p in x_pos],
+            expenses,
+            width,
+            label=expense_label,
+            color="#dc2626",
+            edgecolor="white",
+        )
 
-    ax.set_title(f"الإيرادات مقابل المصاريف — آخر {months} أشهر ({base})")
-    ax.set_xticks(list(x_pos))
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_ylabel(f"المبلغ ({base})")
-    ax.legend(loc="upper left")
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
+        ax.set_title(title_text)
+        ax.set_xticks(list(x_pos))
+        ax.set_xticklabels(reshaped_labels, rotation=45, ha="right")
+        ax.set_ylabel(ylabel_text)
+        ax.legend(loc="upper left")
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
 
-    buf = io.BytesIO()
-    try:
-        fig.savefig(buf, format="png", dpi=110)
-    except Exception:
-        logger.exception("خطأ في حفظ الرسم البياني")
-        return None
-    finally:
-        plt.close(fig)
+        buf = io.BytesIO()
+        try:
+            fig.savefig(buf, format="png", dpi=110)
+        except Exception:
+            logger.exception("خطأ في حفظ الرسم البياني")
+            return None
+        finally:
+            plt.close(fig)
 
-    buf.seek(0)
-    return buf
+        buf.seek(0)
+        return buf
 
 
 def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None):
@@ -225,6 +276,7 @@ def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None):
             {
                 "ym": (yy, mm),
                 "by_currency": {},
+                "live_by_currency": {},
                 "stored": {},
                 "stored_base": base,
             }
@@ -241,11 +293,17 @@ def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None):
             c, {"expense": Decimal("0"), "income": Decimal("0")}
         )
         entry[kind] = entry.get(kind, Decimal("0")) + (amount or Decimal("0"))
-        if stored is not None and stored_base == base and c:
+        is_stored = stored is not None and stored_base == base and c and c != base
+        if is_stored:
             stored_entry = bucket["stored"].setdefault(
                 c, {"expense": Decimal("0"), "income": Decimal("0")}
             )
             stored_entry[kind] = stored_entry.get(kind, Decimal("0")) + stored
+        else:
+            live_entry = bucket["live_by_currency"].setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            live_entry[kind] = live_entry.get(kind, Decimal("0")) + (amount or Decimal("0"))
     return buckets, base
 
 
@@ -258,17 +316,30 @@ def generate_global_monthly_chart(db, months: int | None = None, base_currency: 
 
     converted = []
     all_zero = True
+    has_data = False
     for b in buckets:
         stored = b["stored"] if b["stored_base"] == base else None
-        res = _convert_month_currency_groups(b["by_currency"], base, stored=stored or None)
+        live = b.get("live_by_currency") if b.get("stored_base") == base else None
+        by_for_conv = live if live is not None else b["by_currency"]
+        res = _convert_month_currency_groups(by_for_conv, base, stored=stored or None)
         converted.append((b["ym"], res))
+        if res.get("partial"):
+            if (res.get("expense") is not None and res["expense"] != 0) or (
+                res.get("income") is not None and res["income"] != 0
+            ):
+                has_data = True
+                all_zero = False
+            continue
         if (res["expense"] or 0) != 0 or (res["income"] or 0) != 0:
+            has_data = True
             all_zero = False
 
     if all_zero:
         return None
 
     labels = [f"{y}-{m:02d}" for (y, m), _ in converted]
-    expenses = [float(res["expense"] or 0) for _, res in converted]
-    incomes = [float(res["income"] or 0) for _, res in converted]
-    return _render_monthly_png(labels, incomes, expenses, months, base)
+    expenses = [float(res["expense"]) if res.get("expense") is not None else 0 for _, res in converted]
+    incomes = [float(res["income"]) if res.get("income") is not None else 0 for _, res in converted]
+    # استخدم العدد الفعلي للأشهر المرسومة في العنوان
+    actual_months = len(labels) if labels else months
+    return _render_monthly_png(labels, incomes, expenses, actual_months, base)

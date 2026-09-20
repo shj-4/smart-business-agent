@@ -56,9 +56,9 @@ class AIServiceQueue:
         return self._queue.qsize()
 
     async def submit(self, work) -> Any:
-        """ينفّذ عملًا متزامنًا (fn) — عبر الطابور إن كان مفعّلًا وإلا مباشرةً."""
+        """ينفّذ عملًا متزامنًا (fn) — عبر الطابور إن كان مفعّلًا وإلا عبر thread."""
         if not self.enabled or self._queue is None:
-            return work()
+            return await asyncio.to_thread(work)
         fut = asyncio.get_running_loop().create_future()
         await self._queue.put((work, fut))  # ينتظر تلقائيًا عندما يمتلئ الطابور
         return await fut

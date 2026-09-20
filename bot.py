@@ -34,7 +34,7 @@ async def _post_init(application) -> None:
 def main():
     ensure_env_or_exit()
     startup_diagnostics()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).post_init(_post_init).build()
     register_handlers(app)
 
     start_cleanup()

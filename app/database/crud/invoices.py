@@ -6,7 +6,9 @@ from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from app.database.crud.company import company_filter
+
+from app.audit import log_audit
+from app.database.crud.company import company_filter, has_permission
 
 from app.config import settings
 from app.database.models import (
@@ -33,10 +35,19 @@ def create_invoice(
     )
 
 
-    amount = _to_valid_amount(data.get("amount"))
+    # استخدم عملة الشركة أولاً لتحديد 3 منازل لـ JOD/KWD/BHD/OMR
+    from app.database.crud.company import get_user_base_currency as _get_base
+
+    user_base = _get_base(db, telegram_user_id)
+    raw_input = (data.get("currency") or "").strip() if data.get("currency") else ""
+    raw_cur = normalize_currency(data.get("currency"))
+    if raw_input and raw_cur is None:
+        currency = None
+    else:
+        currency = raw_cur or user_base or (settings.base_currency or "").upper()
+    amount = _to_valid_amount(data.get("amount"), currency=currency)
     if amount is None:
         return None
-    currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper()
     due_date = data.get("due_date")
     if isinstance(due_date, str) and due_date.strip():
         try:
@@ -52,11 +63,13 @@ def create_invoice(
     from app.database.crud.company import company_id_for_user as _cid_for
 
     _cid = _cid_for(db, telegram_user_id)
+    from app.database.crud.common import _quantize_for_currency
+
     invoice = Invoice(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
         person=_clean_person(data.get("person")),
-        amount=amount.quantize(Decimal("0.01")),
+        amount=_quantize_for_currency(amount, currency),
         currency=currency or None,
         description=_clean_text(data.get("description")) or _clean_text(raw_message),
         due_date=due_date,
@@ -104,8 +117,11 @@ def list_invoices(
 
 def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bool:
     """سداد فاتورة آجلة — تعيد True عند النجاح."""
-    from app.database.crud import _invalidate_caches, accessible_user_ids
+    from app.database.crud import _invalidate_caches
 
+    if not has_permission(db, telegram_user_id, "record.create"):
+        log_audit(telegram_user_id, "denied_mark_invoice_paid", f"invoice:{invoice_id}", detail="record.create required")
+        return False
     invoice = (
         db.query(Invoice)
         .filter(
@@ -163,8 +179,11 @@ def list_orders(
 
 def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: str) -> bool:
     """يغيّر حالة طلبية (open/done) — يعيد False إن لم توجد طلبية أو حالة غير صالحة."""
-    from app.database.crud import _invalidate_caches, accessible_user_ids
+    from app.database.crud import _invalidate_caches
 
+    if not has_permission(db, telegram_user_id, "record.create"):
+        log_audit(telegram_user_id, "denied_set_order_status", f"order:{note_id}", detail="record.create required")
+        return False
     if status not in ORDER_STATUSES:
         return False
     note = (

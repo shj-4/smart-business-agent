@@ -78,7 +78,7 @@
     {% endif %}
 
     <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
-        <form method="post" action="/dashboard/company/delete" onsubmit="return confirm('تأكيد حذف الشركة {{ entry.company.name }}؟ اكتب DELETE للتأكيد')" style="display:flex;gap:8px;align-items:center">
+        <form method="post" action="/dashboard/company/delete" class="js-delete-company" data-company-name="{{ entry.company.name }}" style="display:flex;gap:8px;align-items:center">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="company_id" value="{{ entry.company.id }}">
             <input type="text" name="confirm" placeholder='اكتب DELETE للتأكيد' required style="flex:1">
@@ -88,4 +88,14 @@
     </div>
 </div>
 {% endfor %}
+<script>
+document.querySelectorAll('.js-delete-company').forEach(function(form){
+  form.addEventListener('submit', function(e){
+    var name = this.dataset.companyName || '';
+    if (!confirm('تأكيد حذف الشركة ' + name + '؟ اكتب DELETE للتأكيد')) {
+      e.preventDefault();
+    }
+  });
+});
+</script>
 {% endblock %}

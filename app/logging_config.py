@@ -84,7 +84,10 @@ class ScrubbingFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         if record.args:
-            record.args = tuple(_scrub(str(a)) if isinstance(a, str) else a for a in record.args)
+            if isinstance(record.args, dict):
+                record.args = {k: _scrub(str(v)) if isinstance(v, str) else v for k, v in record.args.items()}
+            else:
+                record.args = tuple(_scrub(str(a)) if isinstance(a, str) else a for a in record.args)
         rendered = super().format(record)
         return _scrub(rendered)
 

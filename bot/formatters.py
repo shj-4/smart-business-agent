@@ -177,11 +177,11 @@ def format_query_result(query_result: dict) -> str:
                 relation = (
                     f"له عندك {balance} {currency} (لصالحك +{balance})" if balance > 0 else "متوازن"
                 )
-                # للإيضاح: موجب = هو مدين لك
+                # للإيضاح: موجب = هو مدين لك (income = آجل/ذمة، expense = تسديد)
                 if balance > 0:
-                    relation = f"مدين لك بـ {balance} {currency} (استلمت {income} / دفعت {expense})"
+                    relation = f"مدين لك بـ {balance} {currency} (آجل {income} / تسديد {expense})"
             else:
-                relation = f"عليك له {abs(balance)} {currency} (استلمت {income} / دفعت {expense})"
+                relation = f"عليك له {abs(balance)} {currency} (آجل {income} / تسديد {expense})"
             lines.append(f"• {relation}")
         if not result:
             lines.append("• لا توجد معاملات مع هذا الشخص.")
@@ -201,7 +201,7 @@ def format_query_result(query_result: dict) -> str:
     return "\n".join(lines)
 
 
-def _unified_amount(totals: dict, stored: dict | None = None) -> Decimal | None:
+def _unified_amount(totals: dict, stored: dict | None = None, base: str | None = None) -> Decimal | None:
     """المجموع موحّدًا بالعملة الأساسية (Decimal) أو None عند الفشل.
 
     stored (اختياري): مبالغ بعملة الأساس مثبّتة وقت التسجيل — تُفضّل للدقة التاريخية.
@@ -212,7 +212,8 @@ def _unified_amount(totals: dict, stored: dict | None = None) -> Decimal | None:
     from app.database.crud import normalize_currency
     from app.exchange import convert_totals_to_base
 
-    base = settings.base_currency
+    if base is None:
+        base = settings.base_currency
     normalized = {}
     for currency, total in totals.items():
         c = normalize_currency(currency) or currency
@@ -412,9 +413,9 @@ def format_debts(payload: list[dict]) -> str:
         for currency, info in (d.get("by_currency") or {}).items():
             lines.append(
                 f"   • {currency}: الرصيد {_fmt_amount(info['balance'])}"
-                f" ({_fmt_amount(info['expense'])} دفعتُ له / {_fmt_amount(info['income'])} استلمتُ منه)"
+                f" ({_fmt_amount(info['income'])} آجل له / {_fmt_amount(info['expense'])} تسديد له)"
             )
-    lines.append("\nملاحظة: المبالغ الموجبة تعني أن الشخص مدين لك، والسالبة تعني أنك تدين له.")
+    lines.append("\nملاحظة: المبالغ الموجبة تعني أن الشخص مدين لك (آجل)، والسالبة تعني أنك تدين له. income=قيمة آجلة، expense=تسديد نقدي.")
     return "\n".join(lines)
 
 
@@ -501,7 +502,7 @@ def format_credit_limits(payload: list[dict]) -> str:
             if u["side"] == "receivable":
                 value_txt = f"لك عليه {_fmt_amount(u['amount'])}"
             elif u["side"] == "payable":
-                value_txt = f"عليك له {_fmt_amount(u['outstanding'])}"
+                value_txt = f"عليك له {_fmt_amount(u['amount'])}"
             else:
                 value_txt = "صفر"
         percent_txt = f"{u['percent']}%" if u["percent"] is not None else "غير متاح"

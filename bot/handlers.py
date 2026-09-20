@@ -17,6 +17,7 @@ from app.database.crud import complete_task, find_pending_task, undo_last_record
 from app.database.db import SessionLocal
 from app.exchange import CURRENCY_NAMES, convert
 from app.formatting import fmt_amount
+from bot.formatters import safe_reply
 from bot.icons import EXPENSE, INCOME, NEW, SUCCESS, TASK
 
 logger = logging.getLogger(__name__)
@@ -90,13 +91,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.database.db import SessionLocal
 
     telegram_user_id = update.effective_user.id
-    db = SessionLocal()
-    try:
-        from app.database.crud.company import company_id_for_user
+    # إن كان المستخدم اختار "استخدام فردي" سابقًا (solo_mode في user_data)
+    # لا تعرض onboarding مجددًا — solo الآن ينشئ شركة فردية فـ has_company سيكون True
+    if context.user_data.get("solo_mode"):
+        has_company = True
+    else:
+        db = SessionLocal()
+        try:
+            from app.database.crud.company import company_id_for_user
 
-        has_company = company_id_for_user(db, telegram_user_id) is not None
-    finally:
-        db.close()
+            has_company = company_id_for_user(db, telegram_user_id) is not None
+        finally:
+            db.close()
 
     if not has_company:
         from bot.onboarding import onboarding_keyboard
@@ -785,60 +791,154 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /debts — رصيد كل شخص (من يدين لك ومن تدين له)."""
+    import asyncio
+
     from app.database.crud import person_debts
     from bot.formatters import format_debts
 
     telegraph_id = update.effective_user.id
-    db = SessionLocal()
-    try:
-        payload = person_debts(db, telegraph_id)
-    finally:
-        db.close()
-    await update.message.reply_text(format_debts(payload))
+
+    def _load():
+        db = SessionLocal()
+        try:
+            return person_debts(db, telegraph_id)
+        finally:
+            db.close()
+
+    payload = await asyncio.to_thread(_load)
+    await safe_reply(update.message, format_debts(payload))
 
 
 async def finance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /finance — بطاقة موحّدة: ديون + فواتير + حدود ائتمانية."""
+    import asyncio
+
     from app.database.crud import credit_usage, list_credit_limits, list_invoices, person_debts
     from bot.formatters import format_finance_card
 
     telegraph_id = update.effective_user.id
-    db = SessionLocal()
-    try:
-        debts = person_debts(db, telegraph_id)
-        invoices = list_invoices(db, telegraph_id, status=None, limit=50)
-        limits = list_credit_limits(db, telegraph_id)
-        credit_payload = [
-            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
-        ]
-    finally:
-        db.close()
-    await update.message.reply_text(format_finance_card(debts, invoices, credit_payload))
+
+    def _load():
+        db = SessionLocal()
+        try:
+            debts = person_debts(db, telegraph_id)
+            invoices = list_invoices(db, telegraph_id, status=None, limit=50)
+            limits = list_credit_limits(db, telegraph_id)
+            credit_payload = [
+                {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
+            ]
+            return debts, invoices, credit_payload
+        finally:
+            db.close()
+
+    debts, invoices, credit_payload = await asyncio.to_thread(_load)
+    await safe_reply(update.message, format_finance_card(debts, invoices, credit_payload))
 
 
 async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """أمر /invoices — قائمة الفواتير الآجلة (معلّقة/متأخرة)."""
-    from app.database.crud import list_invoices
+    """أمر /invoices — قائمة الفواتير الآجلة (معلّقة/متأخرة) + إنشاء."""
+    from app.database.crud import create_invoice, list_invoices
     from bot.formatters import format_invoices
 
     telegraph_id = update.effective_user.id
     args = context.args or []
+    # إنشاء فاتورة: /invoices add 500 ILS محمد due:2026-10-01 وصف
+    if args and args[0].strip().lower() in ("add", "إضافة", "اضافة", "new", "إنشاء", "create"):
+        if len(args) < 3:
+            await update.message.reply_text(
+                "استخدم: /invoices add <المبلغ> [العملة] [الشخص] [due:YYYY-MM-DD] [وصف]\n"
+                "مثال: /invoices add 500 ILS محمد due:2026-10-01 فاتورة مواد"
+            )
+            return
+        from bot.bonus import split_name_and_amount
+
+        # تحليل: أول رقم هو المبلغ، الباقي عملة/شخص/تاريخ
+        raw = " ".join(args[1:])
+        # استخراج المبلغ والعملة
+        import re
+
+        m = re.search(r"(\d+(?:[.,]\d+)?)", raw)
+        if not m:
+            await update.message.reply_text("لم أجد مبلغًا صالحًا.")
+            return
+        amount = m.group(1).replace(",", ".")
+        # عملة
+        from app.database.crud import normalize_currency
+
+        currency = None
+        person = None
+        due_date = None
+        desc = None
+        tokens = raw.replace(amount, "", 1).split()
+        for tok in tokens:
+            if tok.lower().startswith("due:"):
+                due_date = tok.split(":", 1)[1]
+                continue
+            cur = normalize_currency(tok)
+            if cur and not currency:
+                currency = cur
+                continue
+            if not person:
+                person = tok
+            else:
+                desc = (desc + " " + tok) if desc else tok
+        db = SessionLocal()
+        try:
+            inv = create_invoice(
+                db,
+                telegraph_id,
+                {"amount": amount, "currency": currency, "person": person, "description": desc, "due_date": due_date},
+                raw_message=raw,
+            )
+        finally:
+            db.close()
+        if inv:
+            await update.message.reply_text(f"{SUCCESS} أُنشئت فاتورة #{inv.id} لـ {inv.person or 'بدون شخص'}: {inv.amount} {inv.currency or ''}")
+        else:
+            await update.message.reply_text("تعذر إنشاء الفاتورة — تحقق من المبلغ والصلاحية.")
+        return
+
     status_arg = (args[0].strip().lower() if args else "") or None
-    status_map = {"paid": "paid", "المسددة": "paid", "مدفوع": "paid"}
-    status = status_map.get(status_arg, "pending" if status_arg in (None, "pending", "المعلقة", "معلق") else None)
+    # معالجة overdue بشكل صحيح
+    if status_arg in ("overdue", "متأخرة", "متاخرة", "overdue"):
+        status = "overdue"
+    else:
+        status_map = {"paid": "paid", "المسددة": "paid", "مدفوع": "paid"}
+        status = status_map.get(status_arg, "pending" if status_arg in (None, "pending", "المعلقة", "معلق") else None)
 
     db = SessionLocal()
     try:
-        invoices = list_invoices(db, telegraph_id, status=status, limit=50)
+        if status == "pending" and not status_arg:
+            # افتراضي: اعرض معلّقة + متأخرة معًا (المتأخرة هي pending فات موعدها)
+            pending = list_invoices(db, telegraph_id, status="pending", limit=50)
+            overdue = list_invoices(db, telegraph_id, status="overdue", limit=50)
+            # دمج مع ترتيب زمني (الأحدث أولًا) — list_invoices مرتبة desc
+            invoices = sorted(pending + overdue, key=lambda x: x.created_at or 0, reverse=True)[:50]
+            title = "🧾 الفواتير الآجلة (معلّقة + ⚠️ متأخرة):"
+            # إن كانت القائمة فارغة، استخدم pending فقط
+            if not invoices:
+                invoices = pending
+                title = "🧾 الفواتير الآجلة:"
+        elif status == "pending":
+            # طلب صريح لـ pending فقط — لكن اعرض overdue ضمن pending إن وجدت
+            pending = list_invoices(db, telegraph_id, status="pending", limit=50)
+            overdue = list_invoices(db, telegraph_id, status="overdue", limit=50)
+            invoices = (pending + overdue)[:50]
+            title = "🧾 الفواتير الآجلة (معلّقة + ⚠️ متأخرة):"
+            if not overdue:
+                title = "🧾 الفواتير الآجلة:"
+                invoices = pending
+        else:
+            invoices = list_invoices(db, telegraph_id, status=status, limit=50)
+            title = {
+                "paid": f"{SUCCESS} الفواتير المسددة:",
+                "overdue": "⚠️ الفواتير المتأخرة:",
+                "pending": "🧾 الفواتير الآجلة:",
+            }.get(status or "pending", "🧾 الفواتير الآجلة:")
     finally:
         db.close()
 
-    title = {
-        "paid": f"{SUCCESS} الفواتير المسددة:",
-        "overdue": "⚠️ الفواتير المتأخرة:",
-        "pending": "🧾 الفواتير الآجلة:",
-    }.get(status or "pending")
-    await update.message.reply_text(format_invoices(invoices, title=title))
+    await safe_reply(update.message, format_invoices(invoices, title=title))
 
 
 async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -877,36 +977,46 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     telegraph_id = update.effective_user.id
     args = context.args or []
-    db = SessionLocal()
-    try:
-        if args and args[0].strip().lower() in ("add", "اضافة", "إضافة"):
-            if len(args) < 3:
-                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
-                return
-            from bot.bonus import split_name_and_amount
-
-            person, limit_dec, _ = split_name_and_amount(args[1:])
-            if not person or limit_dec is None:
-                await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
-                return
-            limit = str(limit_dec)
-            row = set_credit_limit(db, telegraph_id, person, limit)
-            if not row:
-                await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا.")
-                return
-            await update.message.reply_text(
-                f"{SUCCESS} حُدّد سقف ائتماني لـ {row.person}: {fmt_amount(row.limit_amount)}\n"
-                "سأرسل تنبيهًا عند الاقتراب من السقف أو تجاوزه."
-            )
+    # الكتابة تبقى متزامنة (سريعة)؛ القراءة تُنقل لـ thread
+    if args and args[0].strip().lower() in ("add", "اضافة", "إضافة"):
+        if len(args) < 3:
+            await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
             return
+        from bot.bonus import split_name_and_amount
 
-        limits = list_credit_limits(db, telegraph_id)
-        payload = [
-            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
-        ]
-    finally:
-        db.close()
-    await update.message.reply_text(format_credit_limits(payload))
+        person, limit_dec, _ = split_name_and_amount(args[1:])
+        if not person or limit_dec is None:
+            await update.message.reply_text("استخدم: /credit إضافة <الشخص> <المبلغ>\nمثال: /credit إضافة أبو محمد 5000")
+            return
+        limit = str(limit_dec)
+        db = SessionLocal()
+        try:
+            row = set_credit_limit(db, telegraph_id, person, limit)
+        finally:
+            db.close()
+        if not row:
+            await update.message.reply_text("لم يُضبط الحد. المبلغ يجب أن يكون رقمًا موجبًا أو صلاحية مفقودة.")
+            return
+        await update.message.reply_text(
+            f"{SUCCESS} حُدّد سقف ائتماني لـ {row.person}: {fmt_amount(row.limit_amount)}\n"
+            "سأرسل تنبيهًا عند الاقتراب من السقف أو تجاوزه."
+        )
+        return
+
+    import asyncio
+
+    def _load():
+        db2 = SessionLocal()
+        try:
+            lims = list_credit_limits(db2, telegraph_id)
+            return [
+                {"person": lim.person, "usage": credit_usage(db2, lim)} for lim in lims
+            ]
+        finally:
+            db2.close()
+
+    payload = await asyncio.to_thread(_load)
+    await safe_reply(update.message, format_credit_limits(payload))
 
 
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -924,15 +1034,21 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /stats — إحصائيات استخدام البوت حسب مساحة عملك."""
+    import asyncio
+
     from app.database.crud import user_stats
     from bot.formatters import format_user_stats
 
     telegraph_id = update.effective_user.id
-    db = SessionLocal()
-    try:
-        stats = user_stats(db, telegraph_id)
-    finally:
-        db.close()
+
+    def _load():
+        db = SessionLocal()
+        try:
+            return user_stats(db, telegraph_id)
+        finally:
+            db.close()
+
+    stats = await asyncio.to_thread(_load)
     await update.message.reply_text(format_user_stats(stats))
 
 
@@ -953,7 +1069,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         payload = forecast_totals(db, telegraph_id, months=months)
     finally:
         db.close()
-    await update.message.reply_text(format_forecast(payload))
+    await safe_reply(update.message, format_forecast(payload))
 
 
 async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1111,34 +1227,49 @@ async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def kpi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /kpi — لوحة مؤشرات أداء مختصرة (مال هذا الشهر/السابق + مهام/فواتير/ميزانيات)."""
+    import asyncio
+
     from app.database.crud import kpi_dashboard
     from bot.formatters import format_kpi_dashboard
 
-    db = SessionLocal()
-    try:
-        payload = kpi_dashboard(db, update.effective_user.id)
-    finally:
-        db.close()
+    def _load():
+        db = SessionLocal()
+        try:
+            return kpi_dashboard(db, update.effective_user.id)
+        finally:
+            db.close()
+
+    payload = await asyncio.to_thread(_load)
     await update.message.reply_text(format_kpi_dashboard(payload))
 
 
 async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /brief — نشرة إدارة يومية بالذكاء الاصطناعي (تسقط للنص المحلي عند فشل Gemini)."""
+    from bot.ratelimit import is_rate_limited
+    from bot.formatters import safe_reply
+
+    if is_rate_limited(update.effective_user.id):
+        await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
+        return
+    import asyncio
+
     from app.ai_service import generate_daily_brief
     from app.database.crud import kpi_dashboard
     from bot.formatters import format_brief_data, format_kpi_dashboard
 
-    db = SessionLocal()
-    try:
-        payload = kpi_dashboard(db, update.effective_user.id)
-    finally:
-        db.close()
+    def _load():
+        db = SessionLocal()
+        try:
+            return kpi_dashboard(db, update.effective_user.id)
+        finally:
+            db.close()
 
-    brief = generate_daily_brief(format_brief_data(payload))
+    payload = await asyncio.to_thread(_load)
+    brief = await asyncio.to_thread(generate_daily_brief, format_brief_data(payload))
     if brief:
-        await update.message.reply_text(brief)
+        await safe_reply(update.message, brief)
     else:
-        await update.message.reply_text(format_kpi_dashboard(payload))
+        await safe_reply(update.message, format_kpi_dashboard(payload))
 
 
 async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1417,11 +1548,12 @@ def register_handlers(app: Application) -> None:
     from bot.menus import menu_callback_router
     from bot.onboarding import onboarding_conversation
 
-    # ترتيب مهم: Onboarding أولًا (يلتقط co:new/co:join... قبل conversation العام)
-    # ثم ConversationHandler للمحادثة العامة ثم التعديل ثم router القوائم
+    # ترتيب مهم: Onboarding أولًا، ثم التعديل (edit) قبل المحادثة العامة —
+    # وإلا فإن input التعديل (أي نص) يُلتقط بواسطة conversation_handler
+    # ويُحلل كرسالة جديدة وقد تُسجّل كعملية.
     app.add_handler(onboarding_conversation)
-    app.add_handler(conversation_handler)
     app.add_handler(edit_conversation)
+    app.add_handler(conversation_handler)
     app.add_handler(CallbackQueryHandler(menu_callback_router))
     app.add_error_handler(system_error_handler)
 

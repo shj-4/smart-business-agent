@@ -47,10 +47,20 @@ def create_transaction(
     if _is_duplicate_message(db, Transaction, telegram_user_id, telegram_message_id):
         return None
 
-    amount = _to_valid_amount(data.get("amount"))
-    # عملة مفقودة تمامًا = عملة الأساس (مثلما تفعل invoices) — دون ذلك تُتسمم
-    # الإجماليات الموحّدة كاملة بصندوق "" غير قابل للتحويل.
-    currency = normalize_currency(data.get("currency")) or (settings.base_currency or "").upper() or None
+    # العملة الأساسية للشركة (إن وجدت) وإلا العامة
+    from app.database.crud.company import get_user_base_currency as _get_base
+
+    user_base = _get_base(db, telegram_user_id)
+    # العملة المُدخلة أولاً، ثم عملة الشركة كافتراضي — لكن لا تسقط "ريال" المبهمة بصمت
+    raw_input = (data.get("currency") or "").strip() if data.get("currency") else ""
+    raw_cur = normalize_currency(data.get("currency"))
+    if raw_input and raw_cur is None:
+        # مدخل غامض مثل "ريال" بلا تحديد — اتركه None ليُسأل المستخدم
+        currency = None
+    else:
+        currency = raw_cur or user_base or (settings.base_currency or "").upper() or None
+    # مرر العملة لـ _to_valid_amount لتحديد 3 منازل لـ JOD/KWD/BHD/OMR
+    amount = _to_valid_amount(data.get("amount"), currency=currency)
     base_amount, base_at = _best_effort_base_amount(amount, currency)
 
     vat_rate = _to_decimal(data.get("vat_rate"))
@@ -347,23 +357,29 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
     if metric == "total_expenses":
         expense_rows = q.filter(Transaction.type == "expense").all()
         total = _sum_amounts_by_currency(expense_rows)
+        from app.database.crud.company import get_user_base_currency as _get_base
+
+        base_cur = _get_base(db, telegram_user_id)
         return {
             "metric": metric,
             "period": period,
             "person": person,
             "result": total,
-            "unified_total": _unified_totals_for_rows(expense_rows, settings.base_currency),
+            "unified_total": _unified_totals_for_rows(expense_rows, base_cur),
         }
 
     elif metric == "total_income":
         income_rows = q.filter(Transaction.type == "income").all()
         total = _sum_amounts_by_currency(income_rows)
+        from app.database.crud.company import get_user_base_currency as _get_base
+
+        base_cur = _get_base(db, telegram_user_id)
         return {
             "metric": metric,
             "period": period,
             "person": person,
             "result": total,
-            "unified_total": _unified_totals_for_rows(income_rows, settings.base_currency),
+            "unified_total": _unified_totals_for_rows(income_rows, base_cur),
         }
 
     elif metric == "count_transactions":
@@ -371,7 +387,8 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         return {"metric": metric, "period": period, "person": person, "result": count}
 
     elif metric == "person_balance":
-        # رصيد مستحق مع شخص معيّن = إجمالي ما استلمتُه منه (income) - إجمالي ما دفعتُه له (expense)
+        # رصيد مستحق مع شخص معيّن = إجمالي income (قيمة آجلة/ذمة: ما صار لك في ذمّته) - إجمالي expense (تسديد/دفع نقدي)
+        # موجب = يدين لك، سالب = تدين له — موحّد مع person_debts و credit_usage
         if not person:
             return {
                 "metric": metric,
@@ -432,8 +449,10 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             }
 
         def _totals_by_currency(lo, hi, tx_type):
+            from app.database.crud.company import report_company_filter
+
             qq = db.query(Transaction).filter(
-                company_filter(db, telegram_user_id, Transaction),
+                report_company_filter(db, telegram_user_id, Transaction),
                 Transaction.deleted_at.is_(None),
                 Transaction.type == tx_type,
                 Transaction.created_at >= lo,
@@ -510,7 +529,7 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
         label = (row.description or "")[:60]
 
     log_audit(
-        telegram_user_id, "soft_delete", f"{model.__name__}:{row.id}", detail=(label or "")[:80]
+        telegram_user_id, "soft_delete", f"{model.__name__}:{row.id}"
     )
     _invalidate_caches(db, telegram_user_id)
     return {"kind": kind, "label": label}
@@ -556,14 +575,17 @@ def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
     label = (row.description or "")[:60]
 
     log_audit(
-        telegram_user_id, "restore_record", f"{model.__name__}:{row.id}", detail=(label or "")[:80]
+        telegram_user_id, "restore_record", f"{model.__name__}:{row.id}"
     )
     _invalidate_caches(db, telegram_user_id)
     return {"kind": kind, "label": label}
 
 def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> list[dict]:
-    """يعرض آخر سجلات المستخدم (معاملات + مهام + ملاحظات) مرتبة بالأحدث."""
-    from app.database.crud import accessible_user_ids
+    """يعرض آخر سجلات المستخدم (معاملات + مهام + ملاحظات) مرتبة بالأحدث.
+
+    يحترم report.view_all: staff يرى سجلاته فقط.
+    """
+    from app.database.crud.company import report_company_filter
 
 
     candidates = []
@@ -571,7 +593,7 @@ def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> 
         rows = (
             db.query(model)
             .filter(
-                company_filter(db, telegram_user_id, model),
+                report_company_filter(db, telegram_user_id, model),
                 model.deleted_at.is_(None),
             )
             .order_by(model.created_at.desc())
@@ -667,7 +689,6 @@ def delete_record_by_id(
         telegram_user_id,
         "record_delete",
         f"{model_name}:{record_id}",
-        detail=str(label)[:80],
     )
     _invalidate_caches(db, telegram_user_id)
     return str(label)
@@ -721,13 +742,12 @@ def search_records(
     وsaturated=True إن امتلأت النافذة أو أوقفنا البحث عند بلوغ الحد (قد توجد
     سجلات أقدم/مطابقة أخرى لم تُفحص) — ليُبلَّغ المستخدم أن البحث جزئي.
     """
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import report_company_filter
 
     needle = (term or "").strip().lower()
     if not needle:
         return ([], {"per_model": 0, "saturated": False}) if return_meta else []
 
-    accessible = accessible_user_ids(db, telegram_user_id)
     per_model = max(limit * 2, 100)
     saturated = False
     kinds = {
@@ -780,7 +800,7 @@ def search_records(
         rows = (
             db.query(model)
             .filter(
-                company_filter(db, telegram_user_id, model),
+                report_company_filter(db, telegram_user_id, model),
                 model.deleted_at.is_(None),
             )
             .order_by(model.created_at.desc())
@@ -822,22 +842,52 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
         key: getattr(row, key, None)
         for key in ("amount", "currency", "person", "category", "description")
     }
+    # نحتاج العملة لتحديد دقة 3 منازل لـ JOD/KWD/BHD/OMR
+    cur_for_amount = fields.get("currency") or getattr(row, "currency", None)
+    # إن كانت العملة الجديدة ستتغير، استخدمها لتحديد الدقة
+    if "currency" in fields and fields["currency"]:
+        try:
+            cur_for_amount = normalize_currency(fields["currency"]) or cur_for_amount
+        except Exception:
+            pass
     for key in ("amount", "currency", "person", "category", "description"):
         if key in fields and fields[key] is not None:
             if key == "amount":
-                row.amount = _to_valid_amount(fields[key])
+                new_amount = _to_valid_amount(fields[key], currency=cur_for_amount)
+                if new_amount is None:
+                    raise ValueError(f"المبلغ غير صالح: {fields[key]!r}")
+                row.amount = new_amount
             elif key == "currency":
-                row.currency = (
-                    normalize_currency(fields[key])
-                    or (settings.base_currency or "").upper()
-                    or fields[key]
-                )
+                raw_cur = fields[key]
+                # فارغ → افتراضي عملة الأساس (للمستخدم/الشركة)
+                if isinstance(raw_cur, str) and not raw_cur.strip():
+                    from app.database.crud.company import get_user_base_currency as _get_base
+
+                    fallback_base = _get_base(db, row.telegram_user_id)
+                    row.currency = fallback_base
+                    continue
+                norm = normalize_currency(raw_cur)
+                if not norm:
+                    raise ValueError(f"العملة غير صالحة: {fields[key]!r}")
+                from app.database.crud.company import get_user_base_currency as _get_base
+
+                fallback_base = _get_base(db, row.telegram_user_id)
+                row.currency = norm or fallback_base or fields[key]
             elif key == "category":
-                row.category = _clean_text(fields[key])
+                cleaned = _clean_text(fields[key])
+                if cleaned is None:
+                    raise ValueError("التصنيف غير صالح")
+                row.category = cleaned
             elif key == "person":
-                row.person = _clean_person(fields[key])
+                cleaned = _clean_person(fields[key])
+                if cleaned is None:
+                    raise ValueError("الشخص غير صالح")
+                row.person = cleaned
             elif key == "description":
-                row.description = _clean_text(fields[key])
+                cleaned = _clean_text(fields[key])
+                if cleaned is None:
+                    raise ValueError("الوصف غير صالح")
+                row.description = cleaned
     if "amount" in fields or "currency" in fields:
         # إعادة تثبيت سعر الصرف عند التسجيل: التعديل السابق كان يُبقي المبلغ
         # القديم بعملة الأساس (خاطئ بعد تغيير المبلغ أو العملة).
@@ -847,12 +897,8 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)
-    changes = {
-        k: {"old": str(old[k])[:80], "new": str(getattr(row, k))[:80]}
-        for k in old
-        if getattr(row, k, None) != old[k]
-    }
-    log_audit(row.telegram_user_id, "update", f"transaction:{row.id}", detail=f"changes={changes}")
+    changed_fields = [k for k in old if getattr(row, k, None) != old[k]]
+    log_audit(row.telegram_user_id, "update", f"transaction:{row.id}", detail=f"fields_changed={changed_fields}")
     _invalidate_caches(db, row.telegram_user_id)
     return row
 
@@ -873,28 +919,23 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)
-    changes = {
-        k: {"old": str(old[k])[:80], "new": str(getattr(row, k))[:80]}
-        for k in old
-        if str(getattr(row, k, None)) != str(old[k])
-    }
-    log_audit(row.telegram_user_id, "update", f"note:{row.id}", detail=f"changes={changes}")
+    changed_fields = [k for k in old if str(getattr(row, k, None)) != str(old[k])]
+    log_audit(row.telegram_user_id, "update", f"note:{row.id}", detail=f"fields_changed={changed_fields}")
     _invalidate_caches(db, row.telegram_user_id)
     return row
 
-def merge_person(db: Session, source: str, target: str) -> int:
+def merge_person(db: Session, source: str, target: str, company_id: int | None = None) -> int:
     """يدمج اسمين لنفس الطرف عبر كل السجلات ذات الصلة.
 
-    يستبدل source بـ target في Transaction/Task/Note/Invoice/CreditLimit وبقية
-    ميزانيات النوع person (لوحة التحكم عرض شامل لكل المستخدمين). بعد الكتابة
-    يُبطَل كاش رؤية كل مستخدم متأثر (ولأعضاء مساحاته عبر accessible_user_ids)
-    حتى لا تبقى الأسماء القديمة في ذاكرة run_query حتى انتهاء TTL — كان مسار
-    الدمج القديم يحدّث عبر SQL مباشرة من خارج طبقة crud فيتخطى إبطال الكاش.
+    عزل المستأجرين: الدمج الآن معزول حسب الشركة — أطراف بنفس الاسم
+    في شركتين مختلفتين لا يُدمجان معًا. إن حُدد company_id يُنفذ الدمج
+    لتلك الشركة فقط، وإلا يُنفذ لكل شركة على حدة (كل شركة تُعالج مستقلة)
+    لمنع الدمج العابر للمستأجرين الذي كان يحدث سابقًا عبر تحديث عام
+    `WHERE person == source` بلا فلتر شركة.
 
-    CreditLimit وميزانية person تحملان قيدًا فريدًا (مستخدم + اسم): إن كان
-    للمستخدم سجلّان (المصدر والهدف) يبقى سجل الهدف ويُسقَط سجل المصدر حتى لا
-    يُخلف دمجٌ اسمًا قديمًا مرتبطًا بحد ائتماني غير مطابق للسجلات الجديدة.
-    يعيد عدد الصفوف المتأثرة (تحديثات + حذف تصادمات الائتمان/الميزانيات).
+    بعد الكتابة يُبطَل كاش رؤية كل مستخدم متأثر (ولأعضاء مساحاته عبر
+    accessible_user_ids) حتى لا تبقى الأسماء القديمة في ذاكرة run_query.
+    يعيد عدد الصفوف المتأثرة.
     """
     from app.database.crud import _clean_person, _invalidate_caches
 
@@ -903,78 +944,125 @@ def merge_person(db: Session, source: str, target: str) -> int:
     if not source or not target or source == target:
         return 0
 
-    affected: set[int] = set()
-    for model in (
-        Transaction,
-        Note,
-        Task,
-        Invoice,
-        CreditLimit,
-        Budget,
-        LoyaltyAccount,
-        EmployeeBonusPlan,
-    ):
-        for (uid,) in db.query(model.telegram_user_id).filter(model.person == source).distinct():
-            affected.add(uid)
+    # حدد نطاق الشركات المراد معالجتها
+    if company_id is not None:
+        company_ids = [company_id]
+    else:
+        company_ids = []
+        for model in (Transaction, Note, Task, Invoice, CreditLimit, Budget, LoyaltyAccount, EmployeeBonusPlan):
+            if hasattr(model, "company_id"):
+                for (cid,) in db.query(model.company_id).filter(model.person == source, model.company_id.isnot(None)).distinct():
+                    if cid not in company_ids:
+                        company_ids.append(cid)
+                if db.query(model).filter(model.person == source, model.company_id.is_(None)).first() is not None:
+                    if None not in company_ids:
+                        company_ids.append(None)
+        if not company_ids:
+            company_ids = [None]
 
-    changed = 0
+    total_changed = 0
+    all_affected: set[int] = set()
 
-    def _resolve_unique_per_user(model, source_uids: set[int], extra=None) -> None:
-        """يعيد تسمية source UID-بـ-UID متجنّبًا تصادم القيد الفريد (مستخدم+اسم):
-        من له اسمان معًا يبقى اسم الهدف ويسقط صف المصدر.
+    for cid in company_ids:
+        affected: set[int] = set()
+        for model in (
+            Transaction,
+            Note,
+            Task,
+            Invoice,
+            CreditLimit,
+            Budget,
+            LoyaltyAccount,
+            EmployeeBonusPlan,
+        ):
+            if not hasattr(model, "company_id"):
+                continue
+            q = db.query(model.telegram_user_id).filter(model.person == source)
+            if cid is None:
+                q = q.filter(model.company_id.is_(None))
+            else:
+                q = q.filter(model.company_id == cid)
+            for (uid,) in q.distinct():
+                affected.add(uid)
+                all_affected.add(uid)
 
-        يُطبَّق فقط على النماذج التي تملك UniqueConstraint على
-        (telegram_user_id, person) — مثل CreditLimit/Budget/LoyaltyAccount.
-        EmployeeBonusPlan بلا قيد فريد (يمكن للمستخدم امتلاك أكثر من خطة لنفس
-        الشخص) فلا يجوز حذفه عند التصادم.
-        """
-        nonlocal changed
-        if not source_uids:
-            return
-        q = db.query(model).filter(model.person == source)
-        if extra is not None:
-            q = q.filter(extra)
-        target_filters = [model.person == target]
-        if extra is not None:
-            target_filters.append(extra)
-        collided = source_uids & {
-            uid
-            for (uid,) in db.query(model.telegram_user_id)
-            .filter(*target_filters)
-            .all()
-        }
-        if collided:
-            changed += q.filter(model.telegram_user_id.in_(collided)).delete(
-                synchronize_session=False
-            )
-        rest = source_uids - collided
-        if rest:
-            changed += q.filter(model.telegram_user_id.in_(rest)).update(
-                {model.person: target}, synchronize_session=False
-            )
+        changed = 0
 
-    # النماذج بلا قيد فريد: تحديث مباشر بلا حذف — يحافظ على كل الصفوف
-    for model in (Transaction, Note, Task, Invoice, EmployeeBonusPlan):
-        changed += (
-            db.query(model)
-            .filter(model.person == source)
-            .update({model.person: target}, synchronize_session=False)
-        )
-    _resolve_unique_per_user(
-        CreditLimit,
-        {uid for (uid,) in db.query(CreditLimit.telegram_user_id).filter(CreditLimit.person == source).all()},
-    )
-    _resolve_unique_per_user(
-        Budget,
-        {uid for (uid,) in db.query(Budget.telegram_user_id).filter(Budget.person == source, Budget.scope == "person").all()},
-        extra=Budget.scope == "person",
-    )
-    _resolve_unique_per_user(
-        LoyaltyAccount,
-        {uid for (uid,) in db.query(LoyaltyAccount.telegram_user_id).filter(LoyaltyAccount.person == source).all()},
-    )
+        def _resolve_unique_per_user(model, source_uids: set[int], extra=None) -> None:
+            nonlocal changed
+            if not source_uids:
+                return
+            q = db.query(model).filter(model.person == source)
+            if cid is None:
+                q = q.filter(model.company_id.is_(None))
+            else:
+                q = q.filter(model.company_id == cid)
+            if extra is not None:
+                q = q.filter(extra)
+            target_filters = [model.person == target]
+            if extra is not None:
+                target_filters.append(extra)
+            tq = db.query(model.telegram_user_id).filter(*target_filters)
+            if cid is None:
+                tq = tq.filter(model.company_id.is_(None))
+            else:
+                tq = tq.filter(model.company_id == cid)
+            collided = source_uids & {uid for (uid,) in tq.all()}
+            if collided:
+                dq = db.query(model).filter(model.person == source)
+                if cid is None:
+                    dq = dq.filter(model.company_id.is_(None))
+                else:
+                    dq = dq.filter(model.company_id == cid)
+                if extra is not None:
+                    dq = dq.filter(extra)
+                changed += dq.filter(model.telegram_user_id.in_(collided)).delete(synchronize_session=False)
+            rest = source_uids - collided
+            if rest:
+                uq = db.query(model).filter(model.person == source)
+                if cid is None:
+                    uq = uq.filter(model.company_id.is_(None))
+                else:
+                    uq = uq.filter(model.company_id == cid)
+                if extra is not None:
+                    uq = uq.filter(extra)
+                changed += uq.filter(model.telegram_user_id.in_(rest)).update({model.person: target}, synchronize_session=False)
+
+        for model in (Transaction, Note, Task, Invoice, EmployeeBonusPlan):
+            q = db.query(model).filter(model.person == source)
+            if cid is None:
+                q = q.filter(model.company_id.is_(None))
+            else:
+                q = q.filter(model.company_id == cid)
+            changed += q.update({model.person: target}, synchronize_session=False)
+
+        # CreditLimit
+        q_ids = db.query(CreditLimit.telegram_user_id).filter(CreditLimit.person == source)
+        if cid is None:
+            q_ids = q_ids.filter(CreditLimit.company_id.is_(None))
+        else:
+            q_ids = q_ids.filter(CreditLimit.company_id == cid)
+        _resolve_unique_per_user(CreditLimit, {uid for (uid,) in q_ids.all()})
+
+        # Budget
+        q_ids = db.query(Budget.telegram_user_id).filter(Budget.person == source, Budget.scope == "person")
+        if cid is None:
+            q_ids = q_ids.filter(Budget.company_id.is_(None))
+        else:
+            q_ids = q_ids.filter(Budget.company_id == cid)
+        _resolve_unique_per_user(Budget, {uid for (uid,) in q_ids.all()}, extra=Budget.scope == "person")
+
+        # LoyaltyAccount
+        q_ids = db.query(LoyaltyAccount.telegram_user_id).filter(LoyaltyAccount.person == source)
+        if cid is None:
+            q_ids = q_ids.filter(LoyaltyAccount.company_id.is_(None))
+        else:
+            q_ids = q_ids.filter(LoyaltyAccount.company_id == cid)
+        _resolve_unique_per_user(LoyaltyAccount, {uid for (uid,) in q_ids.all()})
+
+        total_changed += changed
 
     db.commit()
-    for uid in sorted(affected):
+    for uid in sorted(all_affected):
         _invalidate_caches(db, uid)
-    return int(changed)
+    return int(total_changed)

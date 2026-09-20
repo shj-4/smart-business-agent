@@ -81,8 +81,8 @@ RECORD_MENU = [
 ]
 
 RECORD_HINTS = {
-    "expense": f"{EXPENSE} مصروف — أرسل التفاصيل.\nمثال: 300 شيكل لمحمد مقابل مواد",
-    "income": f"{INCOME} إيراد — أرسل التفاصيل.\nمثال: استلمت 500 دولار من أحمد",
+    "expense": f"{EXPENSE} مصروف — أرسل التفاصيل.\nمثال: سددت 300 شيكل لمحمد (دفعة/تسديد دين)",
+    "income": f"{INCOME} إيراد — أرسل التفاصيل.\nمثال: بعت بضاعة بـ 500 دولار لأحمد (آجل — يصبح مدينًا لك)",
     "order": "🛒 طلبية — أرسل التفاصيل.\nمثال: طلبية 5 صناديق من مورّد الرياض",
     "note": "📝 ملاحظة — أرسل التفاصيل.\nمثال: ملاحظة: سيأتي العمال يوم السبت",
     "task": f"{TASK} مهمة جديدة — أرسل التفاصيل.\nمثال: مهمة الاتصال بسامر غدًا الساعة 10",
@@ -131,9 +131,10 @@ SETTINGS_MENU = [
 
 SETTINGS_DOCS = {
     "on": "لتفعيل التقرير الدوري أرسل أحد الأوامر:\n"
-    "• /report_on 1d — تلخيص يومي\n"
-    "• /report_on 1w — تقرير أسبوعي\n"
-    "• /report_on 1m — تقرير شهري",
+    "• /report_on daily — تلخيص يومي\n"
+    "• /report_on weekly — تقرير أسبوعي\n"
+    "• /report_on monthly — تقرير شهري\n"
+    "مثال: /report_on monthly — تقرير في أول كل شهر",
     "off": "لإيقاف التقارير الدورية أرسل: /report_off",
 }
 
@@ -229,6 +230,11 @@ def _tools_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardM
         [("sb:start", t("btn_search", lang))],
         [("bg:list", t("btn_budget", lang))],
         [("bn:overview", t("btn_bonus", lang))],
+        # أزرار كانت مفقودة سابقًا (TOOLS_MENU يضمها لكن _tools_keyboard لا)
+        [("tool:debts", "💳 الديون والأرصدة")],
+        [("tool:invoices", "🧾 الفواتير الآجلة")],
+        [("tool:orders", "🛒 طلبياتي")],
+        [("tool:credit", f"{WARNING} الحدود الائتمانية")],
         [("tool:kpi", t("btn_kpi", lang))],
         [("tool:finance", t("btn_finance", lang))],
         [("tool:chart", t("btn_chart", lang))],
@@ -276,14 +282,31 @@ async def send_main_menu(
 ) -> None:
     """يرسل القائمة الرئيسية كرسالة جديدة (لأوامر /start و /menu)."""
     _clear_all_pending(context)
-    lang = (
-        user_lang(getattr(message, "from_user", None).id)
-        if getattr(message, "from_user", None)
-        else "ar"
-    )
+    # إصلاح لغة القائمة: جرّب message.from_user أولاً، ثم effective_user من context
+    # إن كانت الرسالة من query (callback) فـ from_user قد يكون None، نستخدم
+    # البديل من context أو من message نفسه
+    uid = None
+    from_user = getattr(message, "from_user", None)
+    if from_user and getattr(from_user, "id", None):
+        uid = from_user.id
+    else:
+        # محاولة من context (قد يحمل user_data مع _user_id)
+        try:
+            if hasattr(context, "_user_id") and context._user_id:
+                uid = context._user_id
+            elif getattr(context, "user_data", None) and isinstance(context.user_data, dict):
+                # لا يوجد user_id هنا، جرّب من message.chat
+                chat = getattr(message, "chat", None)
+                if chat and getattr(chat, "id", None):
+                    uid = chat.id
+        except Exception:
+            pass
+    lang = user_lang(uid) if uid else "ar"
     body = text or t("main_title", lang)
     from_user = getattr(message, "from_user", None)
-    uid = from_user.id if from_user else None
+    # إن كان uid مستنتج من chat، استخدمه
+    if not uid and from_user:
+        uid = from_user.id
     await message.reply_text(body, reply_markup=_main_menu_keyboard(lang, uid=uid))
 
 
@@ -417,7 +440,17 @@ async def _task_save_ack(
 async def _handle_task_done(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
 ) -> None:
+    from app.database.crud.company import has_permission
+    from app.database.db import SessionLocal as _SL
+
     uid = query.from_user.id
+    db_perm = _SL()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية إنجاز المهام (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
     db = SessionLocal()
     try:
         task = complete_task(db, uid, int(task_id))
@@ -427,7 +460,7 @@ async def _handle_task_done(
         await _task_save_ack(query, context, f"{SUCCESS} تم إنجاز المهمة:\n", task)
     else:
         await query.edit_message_text(
-            "لم أجد هذه المهمة (ربما حُذفت).", reply_markup=_home_keyboard()
+            "لم أجد هذه المهمة (ربما حُذفت) أو ليس لديك صلاحية.", reply_markup=_home_keyboard()
         )
 
 
@@ -1209,8 +1242,16 @@ async def _handle_invoice_pay(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
 ) -> None:
     from app.database.crud import mark_invoice_paid
+    from app.database.crud.company import has_permission
 
     uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية تسديد الفواتير (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
     invoice_id = int(parts[-1]) if parts else 0
     db = SessionLocal()
     try:
@@ -1222,7 +1263,7 @@ async def _handle_invoice_pay(
     text = (
         f"{SUCCESS} سُدّدت الفاتورة {invoice_id}."
         if ok
-        else "لم أجد هذه الفاتورة أو سُدّدت مسبقًا."
+        else "لم أجد هذه الفاتورة أو سُدّدت مسبقًا أو ليس لديك صلاحية."
     )
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
@@ -1231,8 +1272,16 @@ async def _handle_order_done(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
 ) -> None:
     from app.database.crud import set_order_status
+    from app.database.crud.company import has_permission
 
     uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية إنجاز الطلبيات (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
     note_id = int(parts[-1]) if parts else 0
     db = SessionLocal()
     try:
@@ -1241,7 +1290,7 @@ async def _handle_order_done(
         ok = False
     finally:
         db.close()
-    text = f"{SUCCESS} أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية."
+    text = f"{SUCCESS} أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية أو ليس لديك صلاحية."
     await query.edit_message_text(text, reply_markup=_home_keyboard())
 
 
@@ -1715,7 +1764,7 @@ async def _team_set_role(query: CallbackQuery, context: ContextTypes.DEFAULT_TYP
         await query.answer("تم تغيير الدور." if ok else "تعذر تغيير الدور.")
     finally:
         db.close()
-    await _team_members(query, context, [])
+    await _team_members(query, context)
 
 
 async def _team_remove_member(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
@@ -1736,7 +1785,7 @@ async def _team_remove_member(query: CallbackQuery, context: ContextTypes.DEFAUL
         await query.answer("تمت إزالة العضو.")
     else:
         await query.answer("تعذر إزالة العضو.")
-    await _team_members(query, context, [])
+    await _team_members(query, context)
 
 
 async def _team_invites(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:

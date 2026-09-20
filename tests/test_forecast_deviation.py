@@ -265,8 +265,18 @@ class TestDeviationCheck:
         SessionMaker = db_env
         db = SessionMaker()
         y, m = now_local().year, now_local().month
-        _seed_tx(db, USER_A, "expense", 500, y, m - 1 if m > 1 else 12, m - 1 if m > 1 else 12)
-        _seed_tx(db, USER_A, "expense", 500, y, m - 2 if m > 2 else 12, m - 2 if m > 2 else 12)
+        # حساب صحيح للشهور السابقة مع تدوير السنة
+        def _prev(y_, m_, off):
+            yy, mm = y_, m_ - off
+            while mm < 1:
+                mm += 12
+                yy -= 1
+            return yy, mm
+
+        y1, m1 = _prev(y, m, 1)
+        y2, m2 = _prev(y, m, 2)
+        _seed_tx(db, USER_A, "expense", 500, y1, m1)
+        _seed_tx(db, USER_A, "expense", 500, y2, m2)
         _seed_tx(db, USER_A, "expense", 1000, y, m)
         db.close()
 

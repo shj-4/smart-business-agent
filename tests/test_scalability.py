@@ -106,7 +106,8 @@ def test_admin_stats_cached(monkeypatch):
     assert s1 == s2
     assert calls["n"] >= 1
     before = calls["n"]
-    # المكالمة الثانية يجب ألا تعيد القراءة (نفس رقم est. مرة واحدة على الأقل)
+    s3 = build_admin_stats(db)
+    assert s3 == s1
     assert calls["n"] == before  # لا زيادة بعد التخزين المؤقت
     db.close()
 

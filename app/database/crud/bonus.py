@@ -149,8 +149,13 @@ def record_bonus_grant(
     raw_message: str | None = None,
 ) -> Transaction | None:
     """يسجّل بونس/مكافأة كمعاملة بتصنيف "بونس" (expense منح/income استلام)."""
+    from app.audit import log_audit
     from app.database.crud import _clean_person, _clean_text, create_transaction
+    from app.database.crud.company import has_permission
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_bonus_grant", "bonus", detail="budget.manage required")
+        return None
     if direction not in ("expense", "income"):
         direction = "expense"
     return create_transaction(
@@ -183,8 +188,13 @@ def create_bonus_event(
     note: str | None = None,
 ) -> BonusEvent | None:
     """ينشئ فعالية ترويجية. يعيد الكائن أو None عند اسم/قبل غير صالح."""
+    from app.audit import log_audit
     from app.database.crud import _clean_text, _to_decimal, normalize_currency
+    from app.database.crud.company import has_permission
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_create_bonus_event", "bonus_event", detail="budget.manage required")
+        return None
     name = _clean_text(name)
     if not name:
         return None
@@ -229,8 +239,13 @@ def set_bonus_event_status(
     db: Session, telegram_user_id: int, event_id: int, status: str
 ) -> BonusEvent | None:
     """يتحكم بحالة الفعالية (planned/active/ended) — يملكها أعضاء المساحة."""
+    from app.audit import log_audit
     from app.database.crud import accessible_user_ids
+    from app.database.crud.company import has_permission
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_set_bonus_event_status", f"bonus_event:{event_id}", detail="budget.manage required")
+        return None
     if status not in EVENT_STATUS_LABELS:
         return None
     uids = accessible_user_ids(db, telegram_user_id)
@@ -356,8 +371,13 @@ def create_employee_bonus_plan(
     note: str | None = None,
 ) -> EmployeeBonusPlan | None:
     """يضيف خطة مكافأة موظف (شهري/ربع سنوي/مرة واحدة)."""
+    from app.audit import log_audit
     from app.database.crud import _clean_person, _clean_text, _to_decimal, normalize_currency
+    from app.database.crud.company import has_permission
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_create_bonus_plan", "bonus_plan", detail="budget.manage required")
+        return None
     person = _clean_person(person)
     if not person:
         return None
@@ -408,8 +428,13 @@ def disable_employee_bonus_plan(
     db: Session, telegram_user_id: int, plan_id: int
 ) -> EmployeeBonusPlan | None:
     """يعطّل خطة مكافأة موظف (لا حذف — لحفظ السجل التاريخي)."""
+    from app.audit import log_audit
     from app.database.crud import accessible_user_ids
+    from app.database.crud.company import has_permission
 
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_disable_bonus_plan", f"bonus_plan:{plan_id}", detail="budget.manage required")
+        return None
     uids = accessible_user_ids(db, telegram_user_id)
     plan = (
         db.query(EmployeeBonusPlan)
@@ -632,6 +657,12 @@ def loyalty_config_enable(
     min_redeem_points: int | None = None,
 ) -> LoyaltyConfig:
     """يفعّل نقاط الولاء (إنشاء/تحديث الإعدادات) على مرتكز المساحة."""
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_loyalty_enable", "loyalty", detail="budget.manage required")
+        return None
     anchor = _workspace_anchor(db, telegram_user_id)
     cfg = loyalty_config_get(db, telegram_user_id)
     if cfg is None:
@@ -667,6 +698,12 @@ def set_loyalty_config(
     min_redeem_points: int | None = None,
 ) -> LoyaltyConfig | None:
     """يحدّث إعدادات النقاط الحالية. يعيد None إذا لم تكن مفعّلة بعد."""
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_set_loyalty_config", "loyalty", detail="budget.manage required")
+        return None
     cfg = loyalty_config_get(db, telegram_user_id)
     if cfg is None:
         return None
@@ -684,6 +721,12 @@ def set_loyalty_config(
 
 def disable_loyalty(db: Session, telegram_user_id: int) -> bool:
     """يعطّل نقاط الولاء (يحذف الإعداد — تُوقف التراكم التلقائي)."""
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_disable_loyalty", "loyalty", detail="budget.manage required")
+        return False
     cfg = loyalty_config_get(db, telegram_user_id)
     if cfg is None:
         return False
@@ -741,9 +784,15 @@ def _loyalty_account_create(db: Session, telegram_user_id: int, person: str) -> 
 
 
 def loyalty_add_points(
-    db: Session, telegram_user_id: int, person: str, points: int
+    db: Session, telegram_user_id: int, person: str, points: int, *, _skip_permission: bool = False
 ) -> LoyaltyAccount:
     """يضيف نقاطًا إلى محفظة عميل (إنشاء المحفظة إن غابت)."""
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if not _skip_permission and not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_loyalty_add", f"loyalty:{person}", detail="budget.manage required")
+        return None
     points = max(0, int(points))
     account = loyalty_account_get(db, telegram_user_id, person)
     if account is None:
@@ -776,7 +825,8 @@ def accrue_loyalty_for_transaction(db: Session, tx: Transaction) -> None:
     points = int(math.floor(float(base_amount) * float(cfg.points_rate)))
     if points <= 0:
         return
-    loyalty_add_points(db, tx.telegram_user_id, person, points)
+    # تراكم تلقائي بعد البيع — لا يتطلب budget.manage (نظام داخلي)
+    loyalty_add_points(db, tx.telegram_user_id, person, points, _skip_permission=True)
 
 
 def loyalty_redeem_points(
@@ -787,6 +837,12 @@ def loyalty_redeem_points(
     القيمة خصم = النقاط × points_value (بعملة الأساس). لا تُنشأ معاملة تلقائيًا
     كي لا تتضاعف السجلات؛ المستخدم يسجّل الخصم الفعلي كمعاملة بونس إن شاء.
     """
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if not has_permission(db, telegram_user_id, "budget.manage"):
+        log_audit(telegram_user_id, "denied_loyalty_redeem", f"loyalty:{person}", detail="budget.manage required")
+        return {"ok": False, "error": "ليس لديك صلاحية استبدال النقاط (budget.manage)."}
     cfg = loyalty_config_get(db, telegram_user_id)
     account = loyalty_account_get(db, telegram_user_id, person)
     points = int(points)

@@ -284,23 +284,41 @@ class TestReportDue:
         pref = _FakePref("daily", last_sent_at=now_utc(), deliver_time="00:00")
         assert not reminders_mod._report_due(pref, now_local())
 
-    def test_weekly_requires_first_day_of_week(self):
+    def test_weekly_requires_first_day_of_week(self, monkeypatch):
         from app.timeutil import first_day_of_week
+        import app.timeutil as tu
+        from datetime import datetime
 
-        pref = _FakePref("weekly", last_sent_at=None, deliver_time="00:00")
+        # ثبّت اليوم على أول الأسبوع لضمان نجاح
         fd = first_day_of_week()
-        today_wd = now_local().weekday()
-        if today_wd != fd:
-            assert not reminders_mod._report_due(pref, now_local())
-        else:
-            assert reminders_mod._report_due(pref, now_local())
+        # اختر تاريخًا يوافق fd (مثل 2026-09-06 هو الأحد إذا كان fd=6)
+        fixed = datetime(2026, 9, 6, 10, 0)  # الأحد
+        # اضبطه ليكون أول الأسبوع حسب الإعداد
+        while fixed.weekday() != fd:
+            fixed += timedelta(days=1)
+        monkeypatch.setattr(tu, "now_local", lambda: fixed)
+        pref = _FakePref("weekly", last_sent_at=None, deliver_time="00:00")
+        assert reminders_mod._report_due(pref, fixed) is True
 
-    def test_monthly_requires_first_day(self):
+        # يوم ليس أول الأسبوع → لا يستحق
+        not_fd = fixed + timedelta(days=1)
+        if not_fd.weekday() == fd:
+            not_fd += timedelta(days=1)
+        monkeypatch.setattr(tu, "now_local", lambda: not_fd)
+        assert reminders_mod._report_due(pref, not_fd) is False
+
+    def test_monthly_requires_first_day(self, monkeypatch):
+        import app.timeutil as tu
+        from datetime import datetime, timedelta
+
+        first = datetime(2026, 9, 1, 10, 0)
+        monkeypatch.setattr(tu, "now_local", lambda: first)
         pref = _FakePref("monthly", last_sent_at=None, deliver_time="00:00")
-        if now_local().day == 1:
-            assert reminders_mod._report_due(pref, now_local())
-        else:
-            assert not reminders_mod._report_due(pref, now_local())
+        assert reminders_mod._report_due(pref, first) is True
+
+        not_first = datetime(2026, 9, 2, 10, 0)
+        monkeypatch.setattr(tu, "now_local", lambda: not_first)
+        assert reminders_mod._report_due(pref, not_first) is False
 
     def test_off_never_due(self):
         pref = _FakePref("off", last_sent_at=None, deliver_time="00:00")

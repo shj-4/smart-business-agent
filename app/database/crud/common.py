@@ -30,23 +30,32 @@ CURRENCY_ALIASES = {
     "usd": "USD",
     "dollar": "USD",
     "dollars": "USD",
+    "دينار اردني": "JOD",
     "دينار": "JOD",
     "الدينار": "JOD",
+    "الدينار الاردني": "JOD",
     "دنانير": "JOD",
     "jd": "JOD",
+    "دينار عراقي": "IQD",
+    "الدينار العراقي": "IQD",
+    "iqd": "IQD",
     "يورو": "EUR",
     "€": "EUR",
     "euro": "EUR",
     "eur": "EUR",
     # عملات كانت في KNOWN_CURRENCIES دون alias عربي — توحيد القوائم البيضاء
-    "جنيه": "GBP",
+    "جنيه مصري": "EGP",
+    "الجنيه المصري": "EGP",
+    "جنيه": "EGP",
+    "egp": "EGP",
+    "جنيه استرليني": "GBP",
     "استرليني": "GBP",
     "gbp": "GBP",
     "pound": "GBP",
-    "جنيه مصري": "EGP",
-    "egp": "EGP",
     "ريال سعودي": "SAR",
+    "الريال السعودي": "SAR",
     "sar": "SAR",
+    "ريال": None,  # مجردة — تُترك ليُسأل المستخدم (لا تسقط للأساس بصمت)
     "درهم": "AED",
     "درهم اماراتي": "AED",
     "aed": "AED",
@@ -77,9 +86,27 @@ def normalize_currency(raw: str | None) -> str | None:
         return CURRENCY_ALIASES[key]
     # تطابق جزئي (مثل "شيكل جديد", "دولار امريكي") — بمقارنة غير حساسة لحالة الأحرف
     # نُرتّب حسب طول الاسم تنازليًا حتى لا يطغى "دولار" على "دولار كندي"
+    # إصلاح: الأسماء القصيرة (SAR, ILS, TRY طول ≤3) كانت تطابق داخل أسماء أشخاص
+    # (Sarah→SAR, Nisreen→ILS جزئيًا، Tryphon→TRY) — نطلب مطابقة كلمة كاملة
+    # أو حدود كلمات لضمان عدم الخلط.
+    import re
+
     raw_lower = raw.strip().lower()
+    # أولاً: جرّب الأسماء الطويلة (≥4) كمطابقة جزئية عادية
     for alias, code in sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if len(alias) <= 3:
+            continue
         if alias in raw_lower:
+            return code
+    # ثانيًا: الأسماء القصيرة (≤3) فقط بمطابقة كلمة كاملة بحدود كلمات
+    for alias, code in sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if len(alias) > 3:
+            continue
+        # استخدم حدود كلمات: \balias\b
+        if re.search(r"\b" + re.escape(alias) + r"\b", raw_lower):
+            return code
+        # أيضًا جرّب المطابقة التامة بدون مسافات (مثل "$" أو "₪")
+        if alias == raw_lower:
             return code
     return raw.strip() or None
 
@@ -93,14 +120,49 @@ def _clean_text(value) -> str | None:
     return s[:MAX_DESCRIPTION_LEN]
 
 def _clean_person(value) -> str | None:
-    """ينظّف حقل الشخص: نص فاضي → None (حتى لا يكسر فلترة person في الاستعلامات)."""
+    """ينظّف حقل الشخص: نص فاضي → None (حتى لا يكسر فلترة person في الاستعلامات).
+
+    يطبّق طيّ الأسماء (أحمد→احمد عبر إزالة همزة الألف) لتوحيد "أحمد" و"احمد"
+    كنفس الشخص — يُستخدم في المطابقات اللاحقة.
+    """
     if value is None:
         return None
     s = str(value).strip()
+    if not s:
+        return None
+    # طيّ للعرض المخزن: نحتفظ بالنص الأصلي لكن نُطبّق folding للمقارنة
+    # في أماكن التجميع (person_debts, company_filter) — هنا نحتفظ كما هو
+    # لكن نُقلّص المسافات الزائدة
     return s or None
 
-def _to_decimal(value) -> Decimal | None:
-    """يحوّل المبلغ إلى Decimal بدقة نقطتين عشريتين (برای تجنّب أخطاء تقريب float).
+
+def normalize_person_for_match(value: str | None) -> str | None:
+    """يطوي اسم الشخص للمطابقة: أحمد == احمد (إزالة تشكيل/همزات)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        from app.normalize import fold_text
+
+        return fold_text(s)
+    except Exception:
+        return s.lower()
+
+
+_THREE_DECIMAL_CURRENCIES = frozenset({"JOD", "KWD", "BHD", "OMR"})
+
+
+def _quantize_for_currency(value: Decimal, currency: str | None) -> Decimal:
+    """يكمّم المبلغ حسب عملته: 3 منازل لـ JOD/KWD/BHD/OMR وإلا منزلتان."""
+    if currency and currency.upper() in _THREE_DECIMAL_CURRENCIES:
+        return value.quantize(Decimal("0.001"))
+    return value.quantize(Decimal("0.01"))
+
+
+def _to_decimal(value, currency: str | None = None) -> Decimal | None:
+    """يحوّل المبلغ إلى Decimal بدقة مناسبة للعملة (3 لـ JOD/KWD/BHD/OMR وإلا 2).
 
     الحقل amount معرّف بـ Numeric(12,2) في قاعدة البيانات؛ استخدام float مباشرة
     قد يُدخل قيمًا مثل 0.30000000000000004. نحوّل هنا عبر Decimal مع تقريب مصرفي.
@@ -108,12 +170,13 @@ def _to_decimal(value) -> Decimal | None:
     if value is None or value == "":
         return None
     try:
-        return Decimal(str(value)).quantize(Decimal("0.01"))
+        d = Decimal(str(value))
+        return _quantize_for_currency(d, currency)
     except (InvalidOperation, ValueError, TypeError):
         return None
 
 
-def _to_valid_amount(value) -> Decimal | None:
+def _to_valid_amount(value, currency: str | None = None) -> Decimal | None:
     """حارس مركزي للمبالغ المالية: يحوّل عبر _to_decimal ثم يرفض أي قيمة
     غير موجبة أو خارج المدى المالي المسموح [AMOUNT_MIN, AMOUNT_MAX].
 
@@ -121,7 +184,7 @@ def _to_valid_amount(value) -> Decimal | None:
     record_bonus_grant...) بدل الاعتماد فقط على طبقة AI schema — فيمنع تسريب
     مبالغ سالبة/صفرية/فاحشة حتى من أوامر يدوية أو استجابة AI مموّهة.
     """
-    d = _to_decimal(value)
+    d = _to_decimal(value, currency=currency)
     if d is None:
         return None
     try:

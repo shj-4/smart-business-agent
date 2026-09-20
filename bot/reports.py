@@ -41,12 +41,13 @@ def _totals_between(
 ) -> dict:
     """إجمالي عمليات نوع معيّن بين حدود زمنية (بصيغة UTC) مصنّفًا بالعملة.
 
-    المبالغ تُجمع في Python لأنها مخزّنة مشفّرة.
+    المبالغ تُجمع في Python لأنها مخزّنة مشفّرة. يحترم report.view_all.
     """
     from app.database.crud import _sum_amounts_by_currency
+    from app.database.crud.company import report_scope_ids
 
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+        Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
         Transaction.created_at >= lo,
@@ -56,16 +57,19 @@ def _totals_between(
 
 
 def _overdue_info(db: Session, user_id: int) -> tuple[int, list[dict]]:
-    """يعيد (عدد متأخر, قائمة أهم المهام المتأخرة)."""
+    """يعيد (عدد متأخر, قائمة أهم المهام المتأخرة). يحترم report.view_all للمهام."""
+    from app.database.crud.company import report_scope_ids
+
     mark_overdue_tasks(db, user_id)
     rows = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+            Task.telegram_user_id.in_(report_scope_ids(db, user_id)),
             Task.status == "overdue",
             Task.deleted_at.is_(None),
         )
-        .order_by(Task.due_date.asc().nulls_last())
+        # متوافق مع MySQL: NULLS LAST عبر IS NULL (لا يدعم nulls_last)
+        .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
         .all()
     )
     top = []
@@ -87,12 +91,13 @@ def _period_bounds(frequency: str) -> tuple[datetime | None, datetime | None]:
     return ranges["previous"]
 
 
-def _unified_line(totals: dict, stored: dict | None = None) -> str | None:
+def _unified_line(totals: dict, stored: dict | None = None, base: str | None = None) -> str | None:
     from app.config import settings
     from bot.formatters import _unified_amount
 
-    base = settings.base_currency
-    total = _unified_amount(totals, stored=stored)
+    if base is None:
+        base = settings.base_currency
+    total = _unified_amount(totals, stored=stored, base=base)
     if total is None:
         return None
     if len(totals) > 1:
@@ -110,11 +115,12 @@ def _stored_totals_between(
     لحظة العملية الفعلية). العملات بلا سعر مخزَّن تُستبعد فتُحسب حيّة.
     """
 
-    from app.config import settings
+    from app.database.crud.company import get_user_base_currency, report_scope_ids
 
-    base = (settings.base_currency or "").upper().strip()
+    base = get_user_base_currency(db, user_id)
+
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+        Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
         Transaction.created_at >= lo,
@@ -126,10 +132,46 @@ def _stored_totals_between(
             r.base_currency_at_creation == base
             and r.amount_in_base_currency is not None
             and r.currency
+            and r.currency.upper() != base
         ):
             c = r.currency
             stored[c] = stored.get(c, Decimal("0")) + Decimal(str(r.amount_in_base_currency))
     return stored
+
+
+def _live_totals_between(
+    db: Session, user_id: int, lo: datetime | None, hi: datetime | None, tx_type: str
+) -> dict:
+    """إجمالي حي فقط (الصفوف بلا مبلغ مثبّت) — للعقد الموحّد مع convert_totals_to_base.
+
+    يعيد {currency: amount} حيث amount هو المبلغ الأصلي للصفوف التي ليس لها
+    amount_in_base_currency مثبّت (أو عملتها هي الأساس). الصفوف المثبّتة
+    تُستبعد هنا وتُحسب عبر _stored_totals_between.
+    """
+
+    from app.database.crud.company import get_user_base_currency, report_scope_ids
+
+    base = get_user_base_currency(db, user_id)
+    q = db.query(Transaction).filter(
+        Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
+        Transaction.deleted_at.is_(None),
+        Transaction.type == tx_type,
+        Transaction.created_at >= lo,
+        Transaction.created_at < hi,
+    )
+    live: dict = {}
+    for r in q.all():
+        # الصفوف المثبّتة (غير الأساس) تُستبعد من الحي
+        if (
+            r.base_currency_at_creation == base
+            and r.amount_in_base_currency is not None
+            and r.currency
+            and r.currency.upper() != base
+        ):
+            continue
+        c = r.currency or "غير محددة"
+        live[c] = live.get(c, Decimal("0")) + (r.amount or Decimal("0"))
+    return live
 
 
 def _vat_totals_between(
@@ -140,8 +182,10 @@ def _vat_totals_between(
     أول استخدام تقريري فعلي لأعمدة VAT المخزّنة منذ استخراجها (#24): محصَّلة
     (income) أو مدفوعة (expense) — بلا خلط عملات (تبقى كل عملة في سطرها).
     """
+    from app.database.crud.company import report_scope_ids
+
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(accessible_user_ids(db, user_id)),
+        Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
         Transaction.created_at >= lo,
@@ -179,13 +223,17 @@ def build_periodic_summary(
 
     expenses = _totals_between(db, telegram_user_id, lo, hi, "expense")
     incomes = _totals_between(db, telegram_user_id, lo, hi, "income")
+    live_expenses = _live_totals_between(db, telegram_user_id, lo, hi, "expense")
+    live_incomes = _live_totals_between(db, telegram_user_id, lo, hi, "income")
     stored_expenses = _stored_totals_between(db, telegram_user_id, lo, hi, "expense")
     stored_incomes = _stored_totals_between(db, telegram_user_id, lo, hi, "income")
+    from app.database.crud.company import report_scope_ids
+
     overdue_count, overdue_top = _overdue_info(db, telegram_user_id)
     pending_count = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id)),
+            Task.telegram_user_id.in_(report_scope_ids(db, telegram_user_id)),
             Task.status == "pending",
             Task.deleted_at.is_(None),
         )
@@ -194,16 +242,19 @@ def build_periodic_summary(
 
     lines = [f"📊 تقريرك {FREQUENCY_NAMES[frequency]} — {today_str}\n"]
 
+    from app.database.crud.company import get_user_base_currency as _get_base_rpt
+
+    user_base = _get_base_rpt(db, telegram_user_id)
     lines.append(f"{EXPENSE} المصاريف ({display_label}): {_totals_line(expenses) or 'لا توجد'}")
     if expenses:
-        unified = _unified_line(expenses, stored=stored_expenses)
+        unified = _unified_line(live_expenses, stored=stored_expenses, base=user_base)
         if unified:
             lines.append(unified)
 
     lines.append("")
     lines.append(f"{INCOME} الإيرادات ({display_label}): {_totals_line(incomes) or 'لا توجد'}")
     if incomes:
-        unified = _unified_line(incomes, stored=stored_incomes)
+        unified = _unified_line(live_incomes, stored=stored_incomes, base=user_base)
         if unified:
             lines.append(unified)
 

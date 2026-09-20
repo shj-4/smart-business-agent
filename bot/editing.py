@@ -212,18 +212,23 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             try:
                 from app.database.crud import can_edit_record
 
-                if not can_edit_record(db, telegram_user_id, record.telegram_user_id):
+                # أعد جلب الكائن في نفس الجلسة لتجنب DetachedInstanceError
+                fresh_record, _ = get_record_by_id(db, telegram_user_id, model_name, record_id)
+                if fresh_record is None:
+                    await update.message.reply_text("تعذر العثور على آخر سجل (قد يكون محذوفًا).")
+                    return ConversationHandler.END
+                if not can_edit_record(db, telegram_user_id, fresh_record.telegram_user_id):
                     await update.message.reply_text("ليس لديك صلاحية تعديل هذا السجل.")
                     return ConversationHandler.END
                 fields = {field: new_value}
                 if field == "priority":
                     fields["priority"] = normalize_priority(new_value)
                 if model_name == "Transaction":
-                    update_transaction(db, record, fields)
+                    update_transaction(db, fresh_record, fields)
                 elif model_name == "Task":
-                    update_task(db, record, fields)
+                    update_task(db, fresh_record, fields)
                 elif model_name == "Note":
-                    update_note(db, record, fields)
+                    update_note(db, fresh_record, fields)
             finally:
                 db.close()
             label = FIELD_LABELS_AR.get(field, field)

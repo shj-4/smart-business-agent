@@ -27,12 +27,50 @@ def install_sentry() -> bool:
     try:
         import sentry_sdk
 
+        def _before_breadcrumb(crumb, hint):
+            # لا تسجّل Breadcrumbs من مستوى INFO (تحوي نصوص المستخدم الحساسة مثل
+            # fresh_entry "نتيجة التحليل" و update_*). ولا من logger audit.
+            try:
+                level = (crumb.get("level") or "").lower()
+                category = (crumb.get("category") or "").lower()
+                if level == "info":
+                    return None
+                if category == "audit":
+                    return None
+                # صفّ أي رسالة قد تحتوي حقولًا حساسة
+                msg = str(crumb.get("message") or "")
+                lower = msg.lower()
+                sensitive_markers = ["amount", "person", "description", "نتيجة التحليل", "changes=", "fields_changed"]
+                if any(m in lower for m in sensitive_markers):
+                    crumb["message"] = "[REDACTED sensitive breadcrumb]"
+                    if "data" in crumb:
+                        crumb["data"] = {}
+            except Exception:
+                return None
+            return crumb
+
+        def _before_send(event, hint):
+            # صفّ أي PII قد تسربت إلى الرسالة أو breadcrumbs
+            try:
+                # لا ترسل بيانات PII في الرسالة نفسها إن احتوت حقولًا حساسة
+                msg = str(event.get("message") or "")
+                if any(k in msg.lower() for k in ["person", "description"]):
+                    event["message"] = "[REDACTED]"
+                for bc in event.get("breadcrumbs", {}).get("values", []):
+                    if "message" in bc and any(k in str(bc["message"]).lower() for k in ["person", "description"]):
+                        bc["message"] = "[REDACTED]"
+            except Exception:
+                pass
+            return event
+
         sentry_sdk.init(
             dsn=dsn,
             traces_sample_rate=0.0,
-            environment="production",
+            environment=(getattr(settings, "app_env", None) or "development"),
             # لا نرسل بيانات مالية؛ Sentry تصفّي المتغيرات الحساسة مبدئيًا
             send_default_pii=False,
+            before_breadcrumb=_before_breadcrumb,
+            before_send=_before_send,
         )
         logger.info("Sentry مفعّل (DSN موجود).")
         return True

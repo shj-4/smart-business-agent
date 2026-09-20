@@ -249,6 +249,18 @@ class Budget(Base):
 
     __tablename__ = "budgets"
     __table_args__ = (
+        # كانت القيود فريدة لكل مستخدم (telegram_user_id) فتسمح بتكرار نفس
+        # الميزانية لكل عضو في نفس الشركة — الصحيح أن القيد لكل شركة
+        # (company_id) لمنع التكرار داخل الشركة الواحدة.
+        UniqueConstraint(
+            "company_id", "scope", "currency", name="uq_budget_company_scope_currency"
+        ),
+        UniqueConstraint("company_id", "scope", "person", name="uq_budget_company_scope_person"),
+        UniqueConstraint(
+            "company_id", "scope", "category", name="uq_budget_company_scope_category"
+        ),
+        # إبقاء قيود قديمة للأفراد بلا شركة (company_id NULL) — Postgres/MySQL
+        # يسمح بتكرار NULL، لذا القيد القديم يبقى للأفراد عبر fallback في الكود
         UniqueConstraint(
             "telegram_user_id", "scope", "currency", name="uq_budget_user_scope_currency"
         ),

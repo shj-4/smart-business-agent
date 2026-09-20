@@ -59,6 +59,8 @@ class TestAmountGuard:
         assert tx3.amount is None
 
     def test_update_transaction_rejects_negative(self, db_session):
+        import pytest
+
         from app.database.crud import create_transaction, update_transaction
 
         tx = create_transaction(
@@ -69,8 +71,10 @@ class TestAmountGuard:
             telegram_message_id=9004,
         )
         assert tx.amount == Decimal("100.00")
-        updated = update_transaction(db_session, tx, {"amount": -50})
-        assert updated.amount is None
+        with pytest.raises(ValueError):
+            update_transaction(db_session, tx, {"amount": -50})
+        db_session.refresh(tx)
+        assert tx.amount == Decimal("100.00")  # بقي كما هو ولم يُمسح
 
         # المبلغ الصفري مرفوض أيضًا
         tx2 = create_transaction(
@@ -80,8 +84,10 @@ class TestAmountGuard:
             raw_message="orig2",
             telegram_message_id=9005,
         )
-        updated2 = update_transaction(db_session, tx2, {"amount": 0})
-        assert updated2.amount is None
+        with pytest.raises(ValueError):
+            update_transaction(db_session, tx2, {"amount": 0})
+        db_session.refresh(tx2)
+        assert tx2.amount == Decimal("200.00")
 
     def test_create_transaction_via_bonus_grant_negative(self, db_session):
         from app.database.crud import record_bonus_grant

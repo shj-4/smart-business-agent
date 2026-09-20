@@ -82,7 +82,7 @@ def has_injection_pattern(text: str | None) -> bool:
     return any(pattern in needle for pattern in _FOLDED_INJECTION_PATTERNS)
 
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": 30000})
 
 # نموذج Gemini المستخدم للتحليل ونسخ الصوت — قابل للضبط من .env عبر Settings.gemini_model
 # كان مثبّتًا حرفيًا في الكود؛ الآن GEMINI_MODEL يُستمد من settings للسماح بتبديله دون إعادة نشر.

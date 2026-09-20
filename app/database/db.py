@@ -34,10 +34,39 @@ _is_sqlite = DATABASE_URL.startswith("sqlite")
 _engine_kwargs: dict = {}
 if _is_sqlite:
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    # ضمان وجود مجلد data لقاعدة SQLite (خصوصًا في production)
+    try:
+        _db_path = DATABASE_URL.replace("sqlite:///", "", 1)
+        if _db_path and _db_path != ":memory:":
+            os.makedirs(os.path.dirname(_db_path) or ".", exist_ok=True)
+    except Exception:
+        pass
 else:
     _engine_kwargs["pool_pre_ping"] = True
 
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
+
+# ---------- SQLite pragmas للمتانة (WAL + busy_timeout + foreign_keys) ----------
+# WAL يحسّن التزامن بين قارئ/كاتب، busy_timeout يمنع OperationalError الفوري
+# عند قفل قاعدة بيانات لثوانٍ، و foreign_keys يفعّل فحص المفاتيح الخارجية
+# (افتراضيًا معطّل في SQLite). تُطبَّق فقط على SQLite عبر event listen.
+try:
+    from sqlalchemy import event as _sa_event
+
+    if _is_sqlite:
+
+        @_sa_event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            try:
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA busy_timeout = 5000;")
+                cursor.execute("PRAGMA foreign_keys=ON;")
+                cursor.close()
+            except Exception:
+                pass
+except Exception:
+    pass
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

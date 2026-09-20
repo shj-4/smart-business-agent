@@ -3,9 +3,14 @@
 سكربت سطر الأوامر scripts/backup_db.py على حدٍّ سواء).
 
 - نسخ آمن عبر SQLite backup API (لا يوقف قاعدة نشطة).
-- احتفاظ بأحدث KEEP_COUNT نسخ (rotation).
+- احتفاظ بأحدث 7 أيام (وليس 7 ملفات فقط) — يحذف النسخ الأقدم من 7 أيام.
+- يضمن نسخة واحدة فقط في اليوم (لا تكرار يومي).
 - تسجيل في logs/backup.log.
 - على قاعدة ليست SQLite (MySQL/PostgreSQL) تُسجَّل رسالة وتعيد False بلا ضرر.
+
+⚠️ ملاحظة: النسخ الاحتياطي الحالي على نفس القرص فقط — يحمي من تلف قاعدة
+البيانات/الحذف العرضي لكن لا يحمي من فشل القرص الكامل. يُنصح بنسخ خارجي
+دوري (قرص خارجي/سحابة) لحماية كاملة.
 """
 
 import logging
@@ -19,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BACKUP_DIR = os.path.join(ROOT, "data", "backups")
-KEEP_COUNT = 7  # عدد النسخ المحتفظ بها
+KEEP_COUNT = 7  # عدد الأيام المحتفظ بها (كان 7 ملفات — الآن 7 أيام)
+KEEP_DAYS = 7  # احتفاظ 7 أيام
 LOG_FILE = os.path.join(ROOT, "logs", "backup.log")
 
 DB_PATH = DATABASE_URL.replace("sqlite:///", "") if DATABASE_URL.startswith("sqlite") else ""
@@ -44,15 +50,50 @@ def _list_backups() -> list[str]:
     )
 
 
+def _today_prefix() -> str:
+    return datetime.now().strftime("%Y%m%d")
+
+
+def _has_backup_for_today() -> bool:
+    """هل توجد نسخة لنفس اليوم بالفعل؟ (يمنع التكرار اليومي)."""
+    prefix = f"business_{_today_prefix()}"
+    return any(f.startswith(prefix) for f in _list_backups())
+
+
 def _rotate_backups() -> None:
-    """يحذف النسخ الأقدم من KEEP_COUNT."""
-    for old in _list_backups()[:-KEEP_COUNT]:
-        path = os.path.join(BACKUP_DIR, old)
+    """يحذف النسخ الأقدم من KEEP_DAYS أيام (وليس KEEP_COUNT ملفات).
+
+    أيضاً يحافظ على حد KEEP_COUNT كاحتياطي ثانوي (الأقدم من العدد).
+    """
+    from datetime import timedelta
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=KEEP_DAYS)
+    cutoff_str = cutoff.strftime("%Y%m%d")
+    for fname in _list_backups():
+        # استخرج التاريخ من اسم الملف business_YYYYMMDD_HHMMSS.db
         try:
-            os.remove(path)
-            _log(f"حُذفت نسخة قديمة: {old}")
-        except OSError as exc:
-            logger.warning("فشل حذف نسخة قديمة %s: %s", old, exc)
+            date_part = fname.split("_")[1]
+            if date_part < cutoff_str:
+                path = os.path.join(BACKUP_DIR, fname)
+                try:
+                    os.remove(path)
+                    _log(f"حُذفت نسخة قديمة (>{KEEP_DAYS} أيام): {fname}")
+                except OSError as exc:
+                    logger.warning("فشل حذف نسخة قديمة %s: %s", fname, exc)
+                continue
+        except Exception:
+            pass
+    # احتياطي: إن بقي أكثر من KEEP_COUNT ملفات رغم قاعدة الأيام، احذف الأقدم
+    remaining = _list_backups()
+    if len(remaining) > KEEP_COUNT:
+        for old in remaining[:-KEEP_COUNT]:
+            path = os.path.join(BACKUP_DIR, old)
+            try:
+                os.remove(path)
+                _log(f"حُذفت نسخة قديمة (تجاوز العدد): {old}")
+            except OSError as exc:
+                logger.warning("فشل حذف نسخة قديمة %s: %s", old, exc)
 
 
 def _verify_backup(backup_path: str) -> bool:
@@ -73,6 +114,11 @@ def run_backup() -> bool:
         return False
 
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    # لا تنشئ نسخة ثانية في نفس اليوم — واحدة يوميًا تكفي
+    if _has_backup_for_today():
+        _log("تُوجد نسخة احتياطية لنفس اليوم — تخطي التكرار اليومي")
+        return True
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(BACKUP_DIR, f"business_{timestamp}.db")
 

@@ -32,7 +32,7 @@
             <tbody>
             {% for p in rows %}
                 <tr>
-                    <td><strong>{{ p.person }}</strong></td>
+                    <td><strong>{{ p.person }}</strong>{% if p.company_id %} <span class="badge neutral">#{{ p.company_id }}</span>{% endif %}</td>
                     <td class="num-col">{{ p.records }}</td>
                     <td class="num-col">{{ p.expense }}</td>
                     <td class="num-col">{{ p.income }}</td>
@@ -42,6 +42,7 @@
                         <form class="merge-form" method="post" action="/dashboard/customers/merge">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <input type="hidden" name="source" value="{{ p.person }}">
+                            {% if p.company_id %}<input type="hidden" name="company_id" value="{{ p.company_id }}">{% endif %}
                             <input type="text" name="target" placeholder="ادمج في..." required>
                             <button type="submit">دمج</button>
                         </form>

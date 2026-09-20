@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.audit import log_audit
 from app.database.crud.company import company_filter
-from app.config import settings
 from app.database.models import (
     Budget,
     Transaction,
@@ -47,10 +46,32 @@ def create_budget(
 
     if not monthly_limit:
         return None
+    # معالجة "12 months" مقابل monthly فقط: إن كان النص يحتوي سنة/12 شهر نعتبره سنوي
+    # ونحوّل إلى شهري (يقسم على 12) — يحافظ على عقد الميزانية الشهرية
+    raw_limit_str = str(monthly_limit)
+    is_yearly = False
+    if any(k in raw_limit_str.lower() for k in ("year", "سنة", "12 months", "12 شهر")):
+        is_yearly = True
+    # أيضًا إن كان scope يحتوي yearly (مستقبلًا)
+    if scope == "yearly":
+        scope = "currency"
+        is_yearly = True
     try:
-        limit = Decimal(str(monthly_limit)).quantize(Decimal("0.01"))
+        from app.database.crud.common import _quantize_for_currency
+
+        # تحديد العملة للتقريب قبل التكميم
+        tmp_cur = currency
+        raw_dec = Decimal(str(monthly_limit).split()[0] if " " in str(monthly_limit) else str(monthly_limit))
+        if is_yearly:
+            raw_dec = raw_dec / Decimal("12")
+        limit = _quantize_for_currency(raw_dec, tmp_cur)
     except InvalidOperation:
         return None
+    except Exception:
+        try:
+            limit = Decimal(str(monthly_limit)).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return None
     if limit <= 0:
         return None
 
@@ -60,6 +81,28 @@ def create_budget(
     from app.database.crud.company import company_id_for_user as _cid_for
 
     _cid = _cid_for(db, telegram_user_id)
+    # منع التكرار لكل شركة (وليس لكل مستخدم) — فحص قبل الإدخال
+    # للشركات: نفس company_id + scope + target يُرفض؛ للأفراد: نفس user + scope + target
+    if _cid is not None:
+        exists_q = db.query(Budget).filter(Budget.company_id == _cid, Budget.scope == scope)
+        if scope == "currency":
+            exists_q = exists_q.filter(Budget.currency == currency)
+        elif scope == "person":
+            exists_q = exists_q.filter(Budget.person == person)
+        else:
+            exists_q = exists_q.filter(Budget.category == category)
+        if exists_q.first() is not None:
+            return None
+    else:
+        exists_q = db.query(Budget).filter(Budget.telegram_user_id == telegram_user_id, Budget.scope == scope)
+        if scope == "currency":
+            exists_q = exists_q.filter(Budget.currency == currency)
+        elif scope == "person":
+            exists_q = exists_q.filter(Budget.person == person)
+        else:
+            exists_q = exists_q.filter(Budget.category == category)
+        if exists_q.first() is not None:
+            return None
     budget = Budget(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
@@ -82,7 +125,6 @@ def create_budget(
     return budget
 
 def list_budgets(db: Session, telegram_user_id: int) -> list[Budget]:
-    from app.database.crud import accessible_user_ids
 
     return (
         db.query(Budget)
@@ -92,7 +134,6 @@ def list_budgets(db: Session, telegram_user_id: int) -> list[Budget]:
     )
 
 def get_budget(db: Session, telegram_user_id: int, budget_id: int) -> Budget | None:
-    from app.database.crud import accessible_user_ids
 
     return (
         db.query(Budget)
@@ -110,7 +151,7 @@ def delete_budget(db: Session, telegram_user_id: int, budget_id: int) -> bool:
     if not budget:
         return False
 
-    detail = f"scope={budget.scope} target={budget.person or budget.currency} limit={budget.monthly_limit}"
+    detail = f"scope={budget.scope} id={budget_id}"
     db.delete(budget)
     db.commit()
     log_audit(telegram_user_id, "delete_budget", f"budget:{budget_id}", detail=detail)
@@ -118,15 +159,34 @@ def delete_budget(db: Session, telegram_user_id: int, budget_id: int) -> bool:
     return True
 
 def budget_usage(db: Session, budget: Budget) -> dict:
-    """استهلاك الميزانية هذا الشهر (محليًا).
+    """استهلاك الميزانية هذا الشهر (محليًا) — أو آخر 12 شهرًا إن كانت سنوية.
 
     يعيد: {spent: Decimal, limit: Decimal, percent: float, over: bool}
     """
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import get_user_base_currency
 
 
     local_now = now_local()
-    local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # دعم "12 months" vs monthly فقط: إن كان اسم الميزانية يحتوي سنة/12 شهر
+    # نحسب استهلاك آخر 12 شهرًا بدل شهر واحد
+    is_yearly = False
+    try:
+        bname = (budget.name or "").lower()
+        if any(k in bname for k in ("year", "سنة", "12 months", "12 شهر", "سنوي")):
+            is_yearly = True
+    except Exception:
+        pass
+    if is_yearly:
+        # آخر 12 شهرًا: من أول الشهر قبل 11 شهرًا
+        y, m = local_now.year, local_now.month
+        for _ in range(11):
+            if m == 1:
+                y, m = y - 1, 12
+            else:
+                m -= 1
+        local_start = local_now.replace(year=y, month=m, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     start = to_utc_naive(local_start)
 
     q = db.query(Transaction).filter(
@@ -151,15 +211,17 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         spent = sum((r.amount for r in spent_rows if r.amount is not None), Decimal("0"))
     else:
         # شخص/تصنيف بلا عملة: مبالغ العملات المتعددة تُحوَّل لعملة الأساس
+        # لشركة المستخدم إن وجدت (ليس settings.base_currency العام فقط)
         # (بالمبالغ المثبَّتة وقت التسجيل إن توفرت — الدقة التاريخية) بدل
         # جمع شيكل مع دولار في رقم واحد.
-        unified = _unified_totals_for_rows(spent_rows, settings.base_currency)
+        base_for_user = get_user_base_currency(db, budget.telegram_user_id)
+        unified = _unified_totals_for_rows(spent_rows, base_for_user)
         spent = unified["total"]
         if spent is None:
             # تعذّر تحويل كل المبالغ (لا شبكة/أسعار) — لا نخلط عملات في رقم واحد
             # (خطأ محاسبي مضلل)؛ نجمع عملة الأساس فقط كحدّ أدنى صادق حتى لا
             # تُعدّ الميزانية 0% رغم وجود مصاريف بعملة الأساس.
-            base = (settings.base_currency or "").upper().strip()
+            base = get_user_base_currency(db, budget.telegram_user_id)
             spent = sum(
                 (
                     r.amount
@@ -195,31 +257,41 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
     يعيد قائمة مرتبة بالأحدث: لكل شخص by_currency: {مع الصفوف: income/expense/balance}
     و balance_unified (بالعملة الأساس بدقة تاريخية عبر المبالغ المخزّنة) إن أمكن.
     balance = income - expense: موجب = يدين لك، سالب = تدين له.
+
+    يحترم report.view_all: من لا يملكه يرى سجلاته فقط، لا كل الشركة.
     """
-    from app.database.crud import accessible_user_ids
+    from app.database.crud.company import get_user_base_currency, report_company_filter
 
 
-    base = (settings.base_currency or "").upper().strip()
-    ids = accessible_user_ids(db, telegram_user_id)
+    base = get_user_base_currency(db, telegram_user_id)
     rows = (
         db.query(Transaction)
         .filter(
-            company_filter(db, telegram_user_id, Transaction),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person.isnot(None),
         )
         .all()
     )
 
+    # تجميع بالأسماء مع طيّ للهمزات (احمد == أحمد)
+    from app.database.crud.common import normalize_person_for_match
+
     persons: dict[str, list] = {}
+    display_names: dict[str, str] = {}
     for r in rows:
-        name = (r.person or "").strip()
-        if not name:
+        raw_name = (r.person or "").strip()
+        if not raw_name:
             continue
-        persons.setdefault(name, []).append(r)
+        folded = normalize_person_for_match(raw_name) or raw_name
+        # المفتاح هو المطوي، القيمة تحفظ الاسم الأصلي الأول للعرض
+        if folded not in display_names:
+            display_names[folded] = raw_name
+        persons.setdefault(folded, []).append(r)
 
     result = []
-    for name, pr in persons.items():
+    for folded, pr in persons.items():
+        name = display_names.get(folded, folded)
         per_cur: dict[str, dict] = {}
         for r in pr:
             c = r.currency or "غير محددة"

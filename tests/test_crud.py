@@ -1008,9 +1008,11 @@ class TestCreditLimits:
         )
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
-        assert usage["outstanding"] == Decimal("2000.00")
+        # موحّد مع person_debts: outstanding = income - expense = -2000 (عليك له)
+        assert usage["outstanding"] == Decimal("-2000.00")
         assert usage["percent"] == 40.0
         assert usage["over"] is False
+        assert usage["side"] == "payable"
 
     def test_usage_over_when_exceeds(self, db_session):
         set_credit_limit(db_session, USER_A, "محمد", "1500")
@@ -1029,7 +1031,7 @@ class TestCreditLimits:
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
         assert usage["side"] == "receivable"
-        assert usage["outstanding"] == Decimal("-900.00")
+        assert usage["outstanding"] == Decimal("900.00")
         assert usage["amount"] == Decimal("900.00")
         assert usage["percent"] == 90.0
         assert usage["over"] is False
@@ -1063,9 +1065,9 @@ class TestCreditLimits:
         usage = credit_usage(db_session, row)
         assert usage["unified_ok"] is True
         assert usage["by_currency"]["USD"]["expense"] == Decimal("100.00")
-        assert usage["by_currency"]["ILS"]["balance"] == Decimal("60.00")
-        # مصروف 375+100=475 محوّلًا → ناقص إيراد 40 = 435 بعملة الأساس
-        assert usage["outstanding"] == Decimal("435.00")
+        assert usage["by_currency"]["ILS"]["balance"] == Decimal("-60.00")
+        # مصروف 375+100=475 محوّلًا → آجل 40 - مصروف 475 = -435 بعملة الأساس (عليك له)
+        assert usage["outstanding"] == Decimal("-435.00")
         assert usage["side"] == "payable"
         assert usage["over"] is False
 
@@ -1318,7 +1320,7 @@ class TestPersonMatchPrecision:
         self._base_expenses(db_session)
         row = set_credit_limit(db_session, USER_A, self.PRECISE, "1000")
         usage = credit_usage(db_session, row)
-        assert usage["outstanding"] == Decimal("400.00")
+        assert usage["outstanding"] == Decimal("-400.00")
         assert usage["limit"] == Decimal("1000.00")
 
     def test_budget_person_exact_match(self, db_session, monkeypatch):
@@ -1380,7 +1382,7 @@ class TestPersonMatchPrecision:
             db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "عبدالعلي"}, "ع"
         )
         row = set_credit_limit(db_session, USER_A, "علي", "500")
-        assert credit_usage(db_session, row)["outstanding"] == Decimal("100.00")
+        assert credit_usage(db_session, row)["outstanding"] == Decimal("-100.00")
 
         from app.database.crud import budget_usage, create_budget
 

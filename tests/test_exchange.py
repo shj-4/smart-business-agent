@@ -144,14 +144,16 @@ class TestConvertTotalsToBaseStored:
 
     @patch("app.exchange.get_rate")
     def test_stored_amounts_replace_live_rate(self, mock_rate):
-        """العملة المتاحة في stored تُحسب من المبلغ المخزّن بلا سعر اليوم."""
+        """العملة المتاحة في stored تُحسب من المبلغ المخزّن بلا سعر اليوم،
+        والحي لنفس العملة يُضاف (لا يُسقط) — العقد الموحّد live + stored."""
         totals = {"USD": Decimal("100"), "JOD": Decimal("50")}
         stored = {"USD": Decimal("370.00")}  # سعر مثبّت لحظة التسجيل (370 شيكل/دولار)
-        mock_rate.side_effect = lambda frm, to: Decimal("5.0000")  # JOD→ILS حي
+        mock_rate.side_effect = lambda frm, to: Decimal("5.0000")  # USD/JOD→ILS حي
 
         conv = exchange.convert_totals_to_base(totals, "ILS", stored=stored)
-        assert conv["total"] == Decimal("620.00")
-        assert conv["rates"]["USD"] == Decimal("1.0000")
+        # USD حي 100×5=500 + USD مثبّت 370 + JOD 50×5=250 = 1120
+        assert conv["total"] == Decimal("1120.00")
+        assert conv["rates"]["USD"] == Decimal("5.0000")
         assert conv["partial"] is False
 
     def test_without_stored_falls_back_to_live(self):

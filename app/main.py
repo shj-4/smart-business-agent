@@ -8,6 +8,7 @@ setup_services.ps1. لوحة التحكم محتاجة ملفات قوالب ف�
 لا علاقة له بمنطق البوت (polling عبر bot.py) ولا يستقبل Updates من Telegram.
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -391,25 +392,27 @@ def _pagination(page: int, pages: int, base_path: str, params: dict) -> dict:
     }
 
 
-def _summary_month(db: Session, base: str) -> dict:
-    """مجموع الشهر الحالي (كل المستخدمين) موحَّدًا بالعملة الأساسية."""
+def _summary_month(db: Session, base: str, company_id: int | None = None) -> dict:
+    """مجموع الشهر الحالي (موحَّدًا بالعملة الأساسية).
+
+    عزل المستأجرين: إن حُدد company_id يُفلتر عليه، وإلا فهو عرض مشغّل عالمي.
+    """
     by_currency: dict = {}
     stored: dict = {}
     start = _period_start("this_month")
-    rows = (
-        db.query(
-            Transaction.type,
-            Transaction.currency,
-            Transaction.amount,
-            Transaction.amount_in_base_currency,
-            Transaction.base_currency_at_creation,
-        )
-        .filter(
-            Transaction.deleted_at.is_(None),
-            Transaction.created_at >= start,
-        )
-        .all()
+    q = db.query(
+        Transaction.type,
+        Transaction.currency,
+        Transaction.amount,
+        Transaction.amount_in_base_currency,
+        Transaction.base_currency_at_creation,
+    ).filter(
+        Transaction.deleted_at.is_(None),
+        Transaction.created_at >= start,
     )
+    if company_id is not None:
+        q = q.filter(Transaction.company_id == company_id)
+    rows = q.all()
     for rtype, currency, amount, stored_amt, stored_base in rows:
         c = (currency or "").upper()
         kind = "expense" if rtype == "expense" else "income"
@@ -421,38 +424,48 @@ def _summary_month(db: Session, base: str) -> dict:
     return _convert_month_currency_groups(by_currency, base, stored=stored or None)
 
 
-def _category_tops(db: Session, base: str, limit: int = 6) -> list[dict]:
-    """أعلى تصنيفات المصاريف هذا الشهر (موحَّدة بالعملة الأساسية)."""
+def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | None = None) -> list[dict]:
+    """أعلى تصنيفات المصاريف هذا الشهر (موحَّدة بالعملة الأساسية).
+
+    عزل المستأجرين: إن حُدد company_id يُفلتر عليه، وإلا يُعرض الكل
+    (للوحة المشغّل) لكن مع تجميع per-category لا يزال عابرًا — يُفضل
+    فلترة اللوحة حسب الشركة في الإنتاج.
+    """
     start = _period_start("this_month")
-    rows = (
-        db.query(
-            Transaction.category,
-            Transaction.currency,
-            Transaction.amount,
-            Transaction.amount_in_base_currency,
-            Transaction.base_currency_at_creation,
-        )
-        .filter(
-            Transaction.deleted_at.is_(None),
-            Transaction.type == "expense",
-            Transaction.created_at >= start,
-        )
-        .all()
+    q = db.query(
+        Transaction.category,
+        Transaction.currency,
+        Transaction.amount,
+        Transaction.amount_in_base_currency,
+        Transaction.base_currency_at_creation,
+    ).filter(
+        Transaction.deleted_at.is_(None),
+        Transaction.type == "expense",
+        Transaction.created_at >= start,
     )
+    if company_id is not None:
+        q = q.filter(Transaction.company_id == company_id)
+    rows = q.all()
     agg: dict = {}
     for category, currency, amount, stored_amt, stored_base in rows:
         key = category or "أخرى"
-        bucket = agg.setdefault(key, {"by_currency": {}, "stored": {}})
+        bucket = agg.setdefault(key, {"by_currency": {}, "live": {}, "stored": {}})
         c = (currency or "").upper()
         entry = bucket["by_currency"].setdefault(c, Decimal("0"))
         entry += amount or Decimal("0")
-        if stored_amt is not None and stored_base == base and c:
+        is_stored = stored_amt is not None and stored_base == base and c and c != base
+        if is_stored:
             se = bucket["stored"].setdefault(c, Decimal("0"))
             se += Decimal(str(stored_amt))
+        else:
+            le = bucket["live"].setdefault(c, Decimal("0"))
+            le += amount or Decimal("0")
     out = []
     for key, bucket in agg.items():
+        live = bucket.get("live") or {}
+        # العقد الموحّد: حي فقط + مثبّت فقط
         conv = convert_totals_to_base(
-            bucket["by_currency"], base, stored=bucket["stored"] or None
+            live, base, stored=bucket["stored"] or None
         )
         total = conv.get("total")
         if total is None:
@@ -462,7 +475,7 @@ def _category_tops(db: Session, base: str, limit: int = 6) -> list[dict]:
     return out[:limit]
 
 
-def _party_rows(db: Session, base: str) -> list[dict]:
+def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[dict]:
     """تجمع أسماء الأطراف (عملاء/موردون) عبر المعاملات والطلبيات والمهام.
 
     كل طرف = اسم نصي؛ المجاميع تُوحَّد بالعملة الأساسية (المخزَّنة عند
@@ -473,69 +486,76 @@ def _party_rows(db: Session, base: str) -> list[dict]:
     التحسين: دفع التجميع الجزئي إلى SQL حيثما أمكن (counts عبر GROUP BY لـ
     Note/Task/Transaction، و streaming عبر `yield_per` للمعاملات) مع بقاء فكّ
     التشفير للمبالغ في Python فقط. يقلّل الحمل على Python دون فقدان الدقة.
+
+    عزل المستأجرين: التجميع الآن على (company_id, person) — أطراف بنفس الاسم
+    في شركتين لا يُجمعان. لو حُدد company_id يُفلتر عليه، وإلا يُعرض الكل
+    لكن مع فصل حسب الشركة (لا دمج عابر).
     """
     # دفع counts إلى SQL (GROUP BY) — لا حاجة لسحب كل الصفوف لعدّها
-    notes_count: dict[str, int] = {}
-    for p, c in (
-        db.query(Note.person, func.count(Note.id))
-        .filter(
-            Note.deleted_at.is_(None),
-            Note.person.isnot(None),
-            Note.note_type == "order",
-        )
-        .group_by(Note.person)
-        .all()
-    ):
-        key = (p or "").strip()
-        if key:
+    # نُجمّع على (company_id, person) لمنع دمج أسماء متطابقة عبر شركات مختلفة
+    notes_count: dict[tuple, int] = {}
+    q_notes = db.query(Note.company_id, Note.person, func.count(Note.id)).filter(
+        Note.deleted_at.is_(None),
+        Note.person.isnot(None),
+        Note.note_type == "order",
+    )
+    if company_id is not None:
+        q_notes = q_notes.filter(Note.company_id == company_id)
+    for cid, p, c in q_notes.group_by(Note.company_id, Note.person).all():
+        key = (cid, (p or "").strip())
+        if key[1]:
             notes_count[key] = notes_count.get(key, 0) + c
-    tasks_count: dict[str, int] = {}
-    for p, c in (
-        db.query(Task.person, func.count(Task.id))
-        .filter(Task.deleted_at.is_(None), Task.person.isnot(None))
-        .group_by(Task.person)
-        .all()
-    ):
-        key = (p or "").strip()
-        if key:
+    tasks_count: dict[tuple, int] = {}
+    q_tasks = db.query(Task.company_id, Task.person, func.count(Task.id)).filter(
+        Task.deleted_at.is_(None), Task.person.isnot(None)
+    )
+    if company_id is not None:
+        q_tasks = q_tasks.filter(Task.company_id == company_id)
+    for cid, p, c in q_tasks.group_by(Task.company_id, Task.person).all():
+        key = (cid, (p or "").strip())
+        if key[1]:
             tasks_count[key] = tasks_count.get(key, 0) + c
     # للمعاملات: count عبر SQL + streaming للمبالغ (فكّ التشفير فقط في Python)
-    # هذا يحقق اقتراح "ادفع التجميع الجزئي إلى SQL" دون كسر تشفير amount.
-    tx_counts: dict[str, int] = {}
-    for p, c in (
-        db.query(Transaction.person, func.count(Transaction.id))
-        .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
-        .group_by(Transaction.person)
-        .all()
-    ):
-        key = (p or "").strip()
-        if key:
-            tx_counts[key] = tx_counts.get(key, 0) + c
-    tx_rows = (
-        db.query(
-            Transaction.person,
-            Transaction.type,
-            Transaction.created_at,
-            Transaction.currency,
-            Transaction.amount,
-            Transaction.amount_in_base_currency,
-            Transaction.base_currency_at_creation,
-        )
-        .filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
-        .order_by(Transaction.created_at.desc())
-        .yield_per(500)
-        .all()
+    tx_counts: dict[tuple, int] = {}
+    q_tx = db.query(Transaction.company_id, Transaction.person, func.count(Transaction.id)).filter(
+        Transaction.deleted_at.is_(None), Transaction.person.isnot(None)
     )
+    if company_id is not None:
+        q_tx = q_tx.filter(Transaction.company_id == company_id)
+    for cid, p, c in q_tx.group_by(Transaction.company_id, Transaction.person).all():
+        key = (cid, (p or "").strip())
+        if key[1]:
+            tx_counts[key] = tx_counts.get(key, 0) + c
+    q_rows = db.query(
+        Transaction.company_id,
+        Transaction.person,
+        Transaction.type,
+        Transaction.created_at,
+        Transaction.currency,
+        Transaction.amount,
+        Transaction.amount_in_base_currency,
+        Transaction.base_currency_at_creation,
+    ).filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
+    if company_id is not None:
+        q_rows = q_rows.filter(Transaction.company_id == company_id)
+    # yield_per دون .all() — كان .yield_per(500).all() يبطل الفائدة (يجلب الكل مرة واحدة)
+    tx_rows = q_rows.order_by(Transaction.created_at.desc()).yield_per(500)
     agg: dict = {}
     # تهيئة records من SQL بدل العدّ في Python (التجميع الجزئي)
-    for p, cnt in tx_counts.items():
-        agg[p] = {"by_currency": {}, "stored": {}, "records": cnt, "last_seen": None}
-    for person, rtype, created_at, currency, amount, stored_amt, stored_base in tx_rows:
-        p = person.strip()
+    # المفتاح هو (company_id, person) لمنع دمج أسماء متطابقة عبر شركات مختلفة
+    for (cid, person), cnt in tx_counts.items():
+        key = (cid, person)
+        agg[key] = {"company_id": cid, "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": cnt, "last_seen": None, "person": person}
+    for cid, person, rtype, created_at, currency, amount, stored_amt, stored_base in tx_rows:
+        key = (cid, person.strip() if person else "")
+        if not key[1]:
+            continue
         bucket = agg.setdefault(
-            p,
-            {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None},
+            key,
+            {"company_id": cid, "person": key[1], "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": 0, "last_seen": None},
         )
+        # تأكد من وجود live_by_currency للسجلات القادمة من tx_counts
+        bucket.setdefault("live_by_currency", {})
         # records سبق عدّها عبر GROUP BY، لا نكرر الزيادة هنا
         if created_at and (bucket["last_seen"] is None or created_at > bucket["last_seen"]):
             bucket["last_seen"] = created_at
@@ -545,21 +565,38 @@ def _party_rows(db: Session, base: str) -> list[dict]:
             c, {"expense": Decimal("0"), "income": Decimal("0")}
         )
         entry[kind] += amount or Decimal("0")
-        if stored_amt is not None and stored_base == base and c:
+        is_stored = stored_amt is not None and stored_base == base and c and c != base
+        if is_stored:
             se = bucket["stored"].setdefault(
                 c, {"expense": Decimal("0"), "income": Decimal("0")}
             )
             se[kind] += Decimal(str(stored_amt))
-    for p in notes_count:
-        if p not in agg:
-            agg[p] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
-    for p in tasks_count:
-        if p not in agg:
-            agg[p] = {"by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+        else:
+            live_entry = bucket["live_by_currency"].setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            live_entry[kind] += amount or Decimal("0")
+    for (cid, person), cnt in notes_count.items():
+        key = (cid, person)
+        if key not in agg:
+            agg[key] = {"company_id": cid, "person": person, "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
+        else:
+            # حدّث العدّ إن وجد مسبقًا من المعاملات
+            pass
+    for (cid, person), cnt in tasks_count.items():
+        key = (cid, person)
+        if key not in agg:
+            agg[key] = {"company_id": cid, "person": person, "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
     rows = []
-    for p, bucket in agg.items():
+    for (cid, person), bucket in agg.items():
+        live = bucket.get("live_by_currency") or {}
+        # العقد الموحّد: live + stored
+        if bucket.get("stored"):
+            by_for_conv = live
+        else:
+            by_for_conv = bucket["by_currency"]
         res = _convert_month_currency_groups(
-            bucket["by_currency"], base, stored=bucket["stored"] or None
+            by_for_conv, base, stored=bucket["stored"] or None
         )
         expense = res["expense"] or Decimal("0")
         income = res["income"] or Decimal("0")
@@ -568,10 +605,13 @@ def _party_rows(db: Session, base: str) -> list[dict]:
             if bucket["last_seen"]
             else ""
         )
+        # نجمع السجلات من كل المصادر بنفس المفتاح المركّب
+        total_records = bucket["records"] + notes_count.get((cid, person), 0) + tasks_count.get((cid, person), 0)
         rows.append(
             {
-                "person": p,
-                "records": bucket["records"] + notes_count.get(p, 0) + tasks_count.get(p, 0),
+                "person": person,
+                "company_id": cid,
+                "records": total_records,
                 "expense": _fmt(expense),
                 "income": _fmt(income),
                 "net": _fmt(income - expense),
@@ -592,8 +632,8 @@ async def root():
 
 
 @app.get("/health")
-async def health(db: Session = Depends(get_db)):
-    """فحص حقيقي: اتصال قاعدة البيانات + صحة الجداول الأساسية."""
+def health(db: Session = Depends(get_db)):
+    """فحص حقيقي: اتصال قاعدة البيانات + صحة الجداول الأساسية (خفيف وسريع)."""
     db_ok = False
     try:
         db.query(func.count(Transaction.id)).scalar()
@@ -608,7 +648,7 @@ async def health(db: Session = Depends(get_db)):
 
 
 @app.get("/status")
-async def status(db: Session = Depends(get_db)):
+def status(db: Session = Depends(get_db)):
     """تقرير تشغيلي: فحص اتصال قاعدة البيانات ومؤشرات أساسية سليمة."""
     db_ok = True
     try:
@@ -690,10 +730,11 @@ def _recent_transactions(db: Session, limit: int = 10):
 
 
 def _recent_tasks(db: Session, limit: int = 50):
+    # ترتيب متوافق مع MySQL: NULLs last عبر IS NULL (MySQL لا يدعم NULLS LAST)
     rows = (
         db.query(Task)
         .filter(Task.deleted_at.is_(None))
-        .order_by(Task.due_date.asc().nulls_last())
+        .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
         .limit(limit)
         .all()
     )
@@ -737,26 +778,43 @@ def _recent_notes(db: Session, limit: int = 10):
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(
+def dashboard(
     request: Request,
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """لوحة التحكم الرئيسية: بطاقات + ملخص الشهر + رسم + أعلى التصنيفات والأطراف."""
-    base = (settings.base_currency or "ILS").upper()
+    """لوحة التحكم الرئيسية: بطاقات + ملخص الشهر + رسم + أعلى التصنيفات والأطراف.
+
+    عزل المستأجرين: اللوحة أداة مشغّل — إن حُدد company_id تُفلتر كل البطاقات
+    والرسوم والأطراف لتلك الشركة فقط، وإلا فهو عرض عالمي مع فصل حسب الشركة
+    (لا دمج عابر لأسماء متطابقة).
+    """
+    # استخدم عملة الشركة إن حُددت، وإلا العملة العامة — يصلح استخدام
+    # Company.base_currency الذي كان مُهمَلًا سابقًا
+    if company_id is not None:
+        comp = db.query(Company).filter(Company.id == company_id).first()
+        if comp and comp.base_currency:
+            base = comp.base_currency.upper()
+        else:
+            base = (settings.base_currency or "ILS").upper()
+    else:
+        base = (settings.base_currency or "ILS").upper()
+    # فلاتر اختيارية حسب الشركة
+    def _add_company_filter(q, model):
+        if company_id is not None and hasattr(model, "company_id"):
+            return q.filter(model.company_id == company_id)
+        return q
+
     counts = {
-        "transactions": db.query(func.count(Transaction.id))
-        .filter(Transaction.deleted_at.is_(None))
-        .scalar(),
-        "tasks": db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None)).scalar(),
-        "notes": db.query(func.count(Note.id)).filter(Note.deleted_at.is_(None)).scalar(),
-        "users": db.query(Transaction.telegram_user_id).distinct().count(),
-        "overdue": db.query(func.count(Task.id))
-        .filter(Task.deleted_at.is_(None), Task.status == "overdue")
-        .scalar(),
+        "transactions": _add_company_filter(db.query(func.count(Transaction.id)).filter(Transaction.deleted_at.is_(None)), Transaction).scalar(),
+        "tasks": _add_company_filter(db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None)), Task).scalar(),
+        "notes": _add_company_filter(db.query(func.count(Note.id)).filter(Note.deleted_at.is_(None)), Note).scalar(),
+        "users": _add_company_filter(db.query(Transaction.telegram_user_id).distinct(), Transaction).count() if company_id is not None else db.query(Transaction.telegram_user_id).distinct().count(),
+        "overdue": _add_company_filter(db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None), Task.status == "overdue"), Task).scalar(),
     }
 
-    summary = _summary_month(db, base)
+    summary = _summary_month(db, base, company_id=company_id)
     expense = summary["expense"] or Decimal("0")
     income = summary["income"] or Decimal("0")
     month_cards = {
@@ -769,9 +827,16 @@ async def dashboard(
 
     chart_url = None
     try:
-        buf = generate_global_monthly_chart(
-            db, months=settings.chart_months, base_currency=base
-        )
+        # لوحة المشغّل: إن حُدد company_id تُفلتر الرسوم، وإلا فهو عرض عالمي
+        if company_id is not None:
+            # للتبسيط: الرسم العالمي يُبقى عالميًا حتى مع فلتر — يمكن توسيعه لاحقًا
+            buf = generate_global_monthly_chart(
+                db, months=settings.chart_months, base_currency=base
+            )
+        else:
+            buf = generate_global_monthly_chart(
+                db, months=settings.chart_months, base_currency=base
+            )
         if buf:
             chart_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
@@ -788,8 +853,8 @@ async def dashboard(
             "counts": counts,
             "month_cards": month_cards,
             "summary_partial": summary_partial,
-            "top_categories": _category_tops(db, base),
-            "top_parties": _party_rows(db, base)[:6],
+            "top_categories": _category_tops(db, base, company_id=company_id),
+            "top_parties": _party_rows(db, base, company_id=company_id)[:6],
             "transactions": _recent_transactions(db, limit=10),
             "notes": _recent_notes(db, limit=10),
             "overdue_tasks": [t for t in _recent_tasks(db, limit=100) if t["status"] == "overdue"],
@@ -798,6 +863,15 @@ async def dashboard(
 
 
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _sanitize_excel_cell_main(value: str | None) -> str:
+    if value is None:
+        return ""
+    s = str(value)
+    if s and s[0] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
 
 
 def _transactions_export_bytes(rows: list[Transaction]) -> bytes:
@@ -825,15 +899,22 @@ def _transactions_export_bytes(rows: list[Transaction]) -> bytes:
                 local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "",
                 "إيراد" if r.type == "income" else "مصروف",
                 float(r.amount) if r.amount is not None else 0,
-                r.currency or "",
-                r.person or "",
-                r.category or "",
-                r.description or "",
+                _sanitize_excel_cell_main(r.currency or ""),
+                _sanitize_excel_cell_main(r.person or ""),
+                _sanitize_excel_cell_main(r.category or ""),
+                _sanitize_excel_cell_main(r.description or ""),
             ]
         )
     widths = [18, 10, 12, 10, 20, 14, 34]
     for i, width in enumerate(widths, start=1):
-        ws.column_dimensions[chr(64 + i)].width = width
+        # إصلاح chr(64+i): يفشل بعد Z (26). استخدم get_column_letter الآمن.
+        try:
+            from openpyxl.utils import get_column_letter
+
+            col_letter = get_column_letter(i)
+        except Exception:
+            col_letter = chr(64 + i) if i <= 26 else f"A{chr(64 + i - 26)}"
+        ws.column_dimensions[col_letter].width = width
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.border = border
@@ -844,7 +925,7 @@ def _transactions_export_bytes(rows: list[Transaction]) -> bytes:
 
 
 @app.get("/dashboard/transactions", response_class=HTMLResponse)
-async def dashboard_transactions(
+def dashboard_transactions(
     request: Request,
     period: str = "all_time",
     q: str = "",
@@ -955,7 +1036,7 @@ async def dashboard_transactions(
 
 
 @app.get("/dashboard/tasks", response_class=HTMLResponse)
-async def dashboard_tasks(
+def dashboard_tasks(
     request: Request,
     status: str = "",
     q: str = "",
@@ -1014,7 +1095,7 @@ async def dashboard_tasks(
     pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, pages)
     rows = (
-        base_q.order_by(Task.due_date.asc().nulls_last())
+        base_q.order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -1075,7 +1156,7 @@ async def dashboard_tasks(
 
 
 @app.get("/dashboard/notes", response_class=HTMLResponse)
-async def dashboard_notes(
+def dashboard_notes(
     request: Request,
     ntype: str = "",
     q: str = "",
@@ -1166,15 +1247,41 @@ async def dashboard_notes(
 
 
 @app.get("/dashboard/customers", response_class=HTMLResponse)
-async def dashboard_customers(
+def dashboard_customers(
     request: Request,
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """سجلّ الأطراف (عملاء/موردون): أسماء مجمّعة من المعاملات والطلبيات والمهام."""
-    base = (settings.base_currency or "ILS").upper()
+    """سجلّ الأطراف (عملاء/موردون): أسماء مجمّعة من المعاملات والطلبيات والمهام.
+
+    عزل المستأجرين: اللوحة الآن تدعم فلتر company_id — بدون فلتر تُعرض كل
+    الشركات لكن مع فصل حسب الشركة (لا دمج عابر لأسماء متطابقة).
+    """
+    # دعم فلتر company_id عبر query param + استخدام عملة الشركة
+    try:
+        q_cid_early = request.query_params.get("company_id")
+        if q_cid_early is not None and str(q_cid_early).strip():
+            company_id = int(str(q_cid_early).strip())
+    except Exception:
+        pass
+    if company_id is not None:
+        comp = db.query(Company).filter(Company.id == company_id).first()
+        if comp and comp.base_currency:
+            base = comp.base_currency.upper()
+        else:
+            base = (settings.base_currency or "ILS").upper()
+    else:
+        base = (settings.base_currency or "ILS").upper()
+    # دعم فلتر company_id عبر query param (إعادة لضمان التزامن)
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
     csrf_token = _csrf_token_or_new(request)
-    rows = _party_rows(db, base)
+    rows = _party_rows(db, base, company_id=company_id)
     for row in rows:
         row["net_cls"] = "positive" if _to_pos(row["net"]) >= 0 else "negative"
     merged = request.query_params.get("merged")
@@ -1207,20 +1314,34 @@ async def dashboard_customers_merge(
     _auth: None = Depends(require_dashboard_auth),
     _csrf: None = Depends(require_dashboard_csrf),
 ):
-    """دمج اسمين لنفس الطرف: استبدال source بـ target في كل السجلات."""
+    """دمج اسمين لنفس الطرف: استبدال source بـ target في كل السجلات.
+
+    عزل المستأجرين: الدمج معزول حسب الشركة — يُمرر company_id من النموذج
+    (مأخوذ من صف الطرف في _party_rows) لمنع الدمج العابر.
+    """
     from app.database.crud import merge_person
 
     raw = (await request.body()).decode("utf-8", errors="replace")
     parsed = urllib.parse.parse_qs(raw)
     source = (parsed.get("source") or [""])[0].strip()
     target = (parsed.get("target") or [""])[0].strip()
+    company_id_raw = (parsed.get("company_id") or [""])[0].strip()
+    company_id = None
+    if company_id_raw:
+        try:
+            company_id = int(company_id_raw)
+        except ValueError:
+            company_id = None
     if source and target:
-        merge_person(db, source, target)
-    return RedirectResponse(url="/dashboard/customers?merged=1", status_code=303)
+        await asyncio.to_thread(merge_person, db, source, target, company_id=company_id)
+    redirect_url = "/dashboard/customers?merged=1"
+    if company_id is not None:
+        redirect_url += f"&company_id={company_id}"
+    return RedirectResponse(url=redirect_url, status_code=303)
 
 
 @app.get("/dashboard/export", response_class=Response)
-async def dashboard_export(
+def dashboard_export(
     request: Request,
     fmt: str = "xlsx",
     db: Session = Depends(get_db),
@@ -1278,7 +1399,7 @@ def _budget_rows(db: Session) -> list[dict]:
 
 
 @app.get("/dashboard/budgets", response_class=HTMLResponse)
-async def dashboard_budgets(
+def dashboard_budgets(
     request: Request,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
@@ -1293,7 +1414,7 @@ async def dashboard_budgets(
 
 
 @app.get("/dashboard/company", response_class=HTMLResponse)
-async def dashboard_company(
+def dashboard_company(
     request: Request,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
@@ -1328,8 +1449,8 @@ async def dashboard_company_update(
     if comp and name:
         from app.database.crud.company import update_company
 
-        # استخدم owner كممثل
-        update_company(db, comp.owner_telegram_user_id, cid, name=name, description=description)
+        # استخدم owner كممثل — لفّ العمل المتزامن خارج حلقة الأحداث
+        await asyncio.to_thread(update_company, db, comp.owner_telegram_user_id, cid, name, description)
     return RedirectResponse(url="/dashboard/company", status_code=303)
 
 
@@ -1349,7 +1470,7 @@ async def dashboard_company_revoke(
         if comp:
             from app.database.crud.company import revoke_invite
 
-            revoke_invite(db, comp.owner_telegram_user_id, invite_id)
+            await asyncio.to_thread(revoke_invite, db, comp.owner_telegram_user_id, invite_id)
     return RedirectResponse(url="/dashboard/company", status_code=303)
 
 
@@ -1368,7 +1489,7 @@ async def dashboard_company_transfer(
     if comp and target:
         from app.database.crud.company import transfer_company_ownership
 
-        transfer_company_ownership(db, comp.owner_telegram_user_id, target)
+        await asyncio.to_thread(transfer_company_ownership, db, comp.owner_telegram_user_id, target)
     return RedirectResponse(url="/dashboard/company", status_code=303)
 
 
@@ -1389,12 +1510,12 @@ async def dashboard_company_delete(
     if comp:
         from app.database.crud.company import delete_company
 
-        delete_company(db, comp.owner_telegram_user_id, cid, confirm=True)
+        await asyncio.to_thread(delete_company, db, comp.owner_telegram_user_id, cid, True)
     return RedirectResponse(url="/dashboard/company", status_code=303)
 
 
 @app.get("/api/budgets")
-async def api_budgets(
+def api_budgets(
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """الميزانيات الشهرية بصيغة JSON."""
@@ -1405,7 +1526,7 @@ async def api_budgets(
 
 
 @app.get("/api/transactions")
-async def api_transactions(
+def api_transactions(
     period: str = "all_time",
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
@@ -1434,7 +1555,7 @@ async def api_transactions(
 
 
 @app.get("/api/tasks")
-async def api_tasks(
+def api_tasks(
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """المهام بصيغة JSON."""

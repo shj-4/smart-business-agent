@@ -118,11 +118,11 @@ def list_pending_tasks(
         _person_filter,
         _priority_sort,
         _task_order_by,
-        accessible_user_ids,
     )
+    from app.database.crud.company import report_company_filter
 
     filters = [
-        company_filter(db, telegram_user_id, Task),
+        report_company_filter(db, telegram_user_id, Task),
         Task.status == "pending",
         Task.deleted_at.is_(None),
     ]
@@ -149,11 +149,11 @@ def list_overdue_tasks(
         _person_filter,
         _priority_sort,
         _task_order_by,
-        accessible_user_ids,
     )
+    from app.database.crud.company import report_company_filter
 
     filters = [
-        company_filter(db, telegram_user_id, Task),
+        report_company_filter(db, telegram_user_id, Task),
         Task.status == "overdue",
         Task.deleted_at.is_(None),
     ]
@@ -190,10 +190,11 @@ def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
 
 def list_done_tasks(db: Session, telegram_user_id: int, person: str | None = None, limit: int = 50):
     """المهام المنجزة (للتصفح عبر القوائم) — الأحدث أولًا."""
-    from app.database.crud import _person_filter, accessible_user_ids
+    from app.database.crud import _person_filter
+    from app.database.crud.company import report_company_filter
 
     filters = [
-        company_filter(db, telegram_user_id, Task),
+        report_company_filter(db, telegram_user_id, Task),
         Task.status == "done",
         Task.deleted_at.is_(None),
     ]
@@ -223,11 +224,12 @@ def delete_task_by_id(db: Session, telegram_user_id: int, task_id: int) -> Task 
         )
         .first()
     )
-    if task and task.status in ("pending", "overdue"):
+    # كان يسمح فقط pending/overdue — زر 🗑️ في قائمة المنجزة (done) لا يعمل
+    if task and task.status in ("pending", "overdue", "done"):
         task.deleted_at = now_utc()
         db.commit()
         db.refresh(task)
-        log_audit(telegram_user_id, "delete_task", f"task:{task_id}", (task.description or "")[:80])
+        log_audit(telegram_user_id, "delete_task", f"task:{task_id}")
         _invalidate_caches(db, telegram_user_id)
         return task
     return None
@@ -262,7 +264,8 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
     return None
 
 def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | None:
-    from app.database.crud import _invalidate_caches, accessible_user_ids
+    from app.database.crud import _invalidate_caches
+    from app.database.crud.company import can_edit_record
 
     task = (
         db.query(Task)
@@ -274,6 +277,9 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         .first()
     )
     if not task or task.status not in ("pending", "overdue"):
+        return None
+    if not can_edit_record(db, telegram_user_id, task.telegram_user_id):
+        log_audit(telegram_user_id, "denied_complete_task", f"task:{task_id}", detail="record.edit required")
         return None
 
     # تحديث شرطي ذرّي بدل "اقرأ ثم ثبّت": طلبان متزامنان قد يقرآن status ==
@@ -301,7 +307,6 @@ def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | No
         telegram_user_id,
         "complete_task",
         f"task:{task_id}",
-        detail=(task.description or "")[:80],
     )
     _invalidate_caches(db, telegram_user_id)
     _respawn_recurring_task(db, telegram_user_id, task)
@@ -317,29 +322,44 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
 
     rule = getattr(done_task, "recurrence_rule", None)
     due = getattr(done_task, "due_date", None)
-    if not rule or not due:
+    if not rule:
         return
-
-    try:
-        local_due = to_local_naive(due)
-        if rule == "daily":
-            next_due = local_due + timedelta(days=1)
-        elif rule == "weekly":
-            next_due = local_due + timedelta(days=7)
-        elif rule == "monthly":
-            year = local_due.year + (1 if local_due.month == 12 else 0)
-            month = 1 if local_due.month == 12 else local_due.month + 1
-            # موعد شهري في يوم 29/30/31 مقابل شهر أقصر: نقيّد اليوم لآخر يوم
-            # صالح في الشهر الهدف بدل ValueError (يلتف على إثبات الإنجاز).
-            last_day = calendar.monthrange(year, month)[1]
-            next_due = local_due.replace(
-                year=year, month=month, day=min(local_due.day, last_day)
-            )
-        else:
+    # إذا كانت المهمة متكررة بلا موعد (مثل "ذكرني كل أسبوع اتصل بالمورد" مع date:null)
+    # فلا تتوقف — احسب التالي من الآن بدل إهمال التجدد
+    if not due:
+        try:
+            local_now = to_local_naive(now_utc())
+            if rule == "daily":
+                next_due = local_now + timedelta(days=1)
+            elif rule == "weekly":
+                next_due = local_now + timedelta(days=7)
+            elif rule == "monthly":
+                year = local_now.year + (1 if local_now.month == 12 else 0)
+                month = 1 if local_now.month == 12 else local_now.month + 1
+                last_day = calendar.monthrange(year, month)[1]
+                next_due = local_now.replace(year=year, month=month, day=min(local_now.day, last_day))
+            else:
+                return
+        except ValueError:
             return
-    except ValueError:
-        # تعذّر حساب الموعد التالي — تُهمَل إعادة الجدولة بأمان (المهمة أُنجزت).
-        return
+    else:
+        try:
+            local_due = to_local_naive(due)
+            if rule == "daily":
+                next_due = local_due + timedelta(days=1)
+            elif rule == "weekly":
+                next_due = local_due + timedelta(days=7)
+            elif rule == "monthly":
+                year = local_due.year + (1 if local_due.month == 12 else 0)
+                month = 1 if local_due.month == 12 else local_due.month + 1
+                last_day = calendar.monthrange(year, month)[1]
+                next_due = local_due.replace(
+                    year=year, month=month, day=min(local_due.day, last_day)
+                )
+            else:
+                return
+        except ValueError:
+            return
 
     spawn = Task(
         telegram_user_id=telegram_user_id,
@@ -373,25 +393,30 @@ def update_task(db: Session, row: Task, fields: dict[str, str]) -> Task:
         if key in fields and fields[key] is not None:
             if key == "due_date":
                 due_value = fields[key]
-                row.due_date = (
-                    due_value
-                    if isinstance(due_value, datetime)
-                    else parse_date_local(due_value)
-                )
+                if isinstance(due_value, datetime):
+                    row.due_date = due_value
+                else:
+                    parsed = parse_date_local(due_value)
+                    if parsed is None:
+                        raise ValueError(f"الموعد غير صالح: {due_value!r}")
+                    row.due_date = parsed
             elif key == "person":
-                row.person = _clean_person(fields[key])
+                cleaned = _clean_person(fields[key])
+                if cleaned is None:
+                    raise ValueError("الشخص غير صالح")
+                row.person = cleaned
             elif key == "description":
-                row.description = _clean_text(fields[key]) or row.description
+                cleaned = _clean_text(fields[key])
+                if cleaned is None or not cleaned:
+                    # فارغ → إبقاء الوصف القديم (لا خطأ) — يطابق test_empty_description_kept
+                    continue
+                row.description = cleaned
             elif key == "priority":
                 row.priority = _normalize_priority(fields[key])
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)
-    changes = {
-        k: {"old": str(old[k])[:80], "new": str(getattr(row, k))[:80]}
-        for k in old
-        if str(getattr(row, k, None)) != str(old[k])
-    }
-    log_audit(row.telegram_user_id, "update", f"task:{row.id}", detail=f"changes={changes}")
+    changed_fields = [k for k in old if str(getattr(row, k, None)) != str(old[k])]
+    log_audit(row.telegram_user_id, "update", f"task:{row.id}", detail=f"fields_changed={changed_fields}")
     _invalidate_caches(db, row.telegram_user_id)
     return row

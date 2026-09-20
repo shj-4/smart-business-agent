@@ -33,14 +33,36 @@ def fix_bidi(text: str) -> str:
     المقاطع اللاتينية تشمل الأرقام الغربية والتواريخ مثل 2026-09-10 ورموز
     العملات والكلمات الإنجليزية؛ المقاطع العربية (بما فيها الأرقام
     العربية-الهندية ٠-٩) لا تتأثر.
+
+    يُستثنى الأوامر (/command) والروابط (http/https/t.me) والأكواد
+    داخلها من التطويق كي لا تُكسر.
     """
     if not text:
         return text
 
+    # فكّك النص إلى مقاطع: روابط/أوامر مقابل نص عادي
+    # الروابط: http://, https://, t.me/...
+    # الأوامر: /xxx في بداية السطر أو بعد مسافة (لا وسط كلمة مثل edit:1/x)
+    url_pattern = re.compile(r"https?://\S+|t\.me/\S+|(?<!\S)/\w[\w/]*")
+    parts = []
+    last = 0
+    for m in url_pattern.finditer(text):
+        # نص قبل الرابط/الأمر — طبّق عليه Bidi
+        if m.start() > last:
+            parts.append(_wrap_latin(text[last:m.start()]))
+        # الرابط/الأمر نفسه — لا تغيّر
+        parts.append(m.group(0))
+        last = m.end()
+    if last < len(text):
+        parts.append(_wrap_latin(text[last:]))
+    return "".join(parts)
+
+
+def _wrap_latin(segment: str) -> str:
     def _wrap(m: re.Match) -> str:
         return f"{RLM}{m.group(0)}{RLM}"
 
-    return _LATIN_RUN.sub(_wrap, text)
+    return _LATIN_RUN.sub(_wrap, segment)
 
 
 def _apply_fix(text_arg_index: int, args: tuple, kwargs: dict):

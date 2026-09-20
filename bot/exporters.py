@@ -12,9 +12,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy.orm import Session
-from app.database.crud.company import company_filter, report_company_filter
 
-from app.database.crud import accessible_user_ids
+from app.database.crud.company import report_company_filter
 from app.database.models import Note, Task, Transaction
 from app.timeutil import to_local_naive
 
@@ -97,6 +96,16 @@ def generate_transactions_excel(
     return buf
 
 
+def _sanitize_excel_cell(value: str | None) -> str:
+    """يُحيّد حقن صيغ Excel: خلايا تبدأ بـ = + - @ تُسبق ب '."""
+    if value is None:
+        return ""
+    s = str(value)
+    if s and s[0] in ("=", "+", "-", "@"):
+        return "'" + s
+    return s
+
+
 def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
     """يكتب معاملات مالية في ورقة عمل (العناوين + الصفوف + الإجماليات)."""
     headers = ["التاريخ", "النوع", "المبلغ", "العملة", "الشخص", "التصنيف", "الوصف"]
@@ -116,10 +125,10 @@ def _write_transactions_sheet(ws: Worksheet, rows: list[Transaction]) -> None:
                 date_str,
                 type_label,
                 float(amount),
-                r.currency or "",
-                r.person or "",
-                r.category or "",
-                r.description or "",
+                _sanitize_excel_cell(r.currency or ""),
+                _sanitize_excel_cell(r.person or ""),
+                _sanitize_excel_cell(r.category or ""),
+                _sanitize_excel_cell(r.description or ""),
             ]
         )
 
@@ -170,14 +179,14 @@ def generate_tasks_excel(
                 report_company_filter(db, telegram_user_id, Task),
                 Task.deleted_at.is_(None),
             )
-            .order_by(Task.due_date.asc().nulls_last())
+            .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
             .all()
         )
     else:
         tasks = (
             db.query(Task)
             .filter(Task.deleted_at.is_(None))
-            .order_by(Task.due_date.asc().nulls_last())
+            .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
             .all()
         )
 
@@ -212,8 +221,8 @@ def _write_tasks_sheet(ws: Worksheet, tasks: list[Task]) -> None:
         ws.append(
             [
                 STATUS_LABELS.get(t.status, t.status),
-                t.description or "",
-                t.person or "",
+                _sanitize_excel_cell(t.description or ""),
+                _sanitize_excel_cell(t.person or ""),
                 due_str,
                 created_str,
             ]
@@ -268,9 +277,9 @@ def _write_notes_sheet(ws: Worksheet, notes: list[Note]) -> None:
         ws.append(
             [
                 TYPE_LABELS.get(n.note_type, n.note_type),
-                n.description or "",
-                n.person or "",
-                n.category or "",
+                _sanitize_excel_cell(n.description or ""),
+                _sanitize_excel_cell(n.person or ""),
+                _sanitize_excel_cell(n.category or ""),
                 created_str,
             ]
         )
@@ -315,7 +324,7 @@ def generate_export_excel(
                 report_company_filter(db, telegram_user_id, Task),
                 Task.deleted_at.is_(None),
             )
-            .order_by(Task.due_date.asc().nulls_last())
+            .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
             .all()
         )
         notes = (
@@ -328,7 +337,7 @@ def generate_export_excel(
             .all()
         )
     else:
-        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.asc().nulls_last()).all()
+        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
         notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
 
     wb = Workbook()
@@ -387,20 +396,26 @@ _pdf_font.cached = None
 
 def _pdf_text(value: str | None, font: str) -> str:
     """يعيد نصًا (قد يكون عربيًا) جاهزًا لعرض صحيح في PDF — تشكيل+اتجاه إن توفرت."""
+    from xml.sax.saxutils import escape
+
     text = str(value or "")
+    # escape لـ < و & قبل تمريره لـ Paragraph (يفسرها كـ markup)
+    def _esc(s: str) -> str:
+        return escape(s, {'"': "&quot;", "'": "&#39;"})
+
     if font == "Helvetica" or not text.strip():
-        return text.replace("\n", " ")
+        return _esc(text.replace("\n", " "))
     if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
         try:
             import arabic_reshaper
             from bidi.algorithm import get_display
 
-            return get_display(arabic_reshaper.reshape(text))
+            return _esc(get_display(arabic_reshaper.reshape(text)))
         except Exception:  # noqa: BLE001
             pass
-        return text.replace("\n", " ")
+        return _esc(text.replace("\n", " "))
     # اتجاه عكسي يتجنّب كسر النص الإنجليزي مع أرقام
-    return text.replace("\n", " ")
+    return _esc(text.replace("\n", " "))
 
 
 def generate_export_pdf(
@@ -453,7 +468,7 @@ def generate_export_pdf(
                 report_company_filter(db, telegram_user_id, Task),
                 Task.deleted_at.is_(None),
             )
-            .order_by(Task.due_date.asc().nulls_last())
+            .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
             .all()
         )
         notes = (
@@ -466,7 +481,7 @@ def generate_export_pdf(
             .all()
         )
     else:
-        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.asc().nulls_last()).all()
+        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
         notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
 
     styles = getSampleStyleSheet()

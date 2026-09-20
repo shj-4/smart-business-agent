@@ -156,8 +156,12 @@ def convert(amount: Decimal | float | str, from_cur: str, to_cur: str) -> dict:
     if from_cur is None or to_cur is None:
         return {"error": f"عملة غير معروفة: {raw_from} → {raw_to}"}
 
+    # عملات تستخدم 3 منازل عشرية (دينار أردني/كويتي/بحريني/عماني)
+    THREE_DEC = frozenset({"JOD", "KWD", "BHD", "OMR"})
+    q_target = Decimal("0.001") if (to_cur and to_cur.upper() in THREE_DEC) else Decimal("0.01")
+    q_amount = Decimal("0.001") if (from_cur and from_cur.upper() in THREE_DEC) else Decimal("0.01")
     try:
-        amount = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        amount = Decimal(str(amount)).quantize(q_amount, rounding=ROUND_HALF_UP)
     except Exception:
         return {"error": "مبلغ غير صالح"}
 
@@ -174,7 +178,7 @@ def convert(amount: Decimal | float | str, from_cur: str, to_cur: str) -> dict:
     if rate is None:
         return {"error": f"تعذر جلب سعر صرف {from_cur} → {to_cur}"}
 
-    result = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    result = (amount * rate).quantize(q_target, rounding=ROUND_HALF_UP)
     return {"amount": amount, "from": from_cur, "to": to_cur, "rate": rate, "result": result}
 
 
@@ -202,14 +206,19 @@ def convert_totals_to_base(
 ) -> dict:
     """يحوّل مجموعًا بعدة عملات إلى عملة أساسية.
 
-    totals: {currency: amount (Decimal)}.
+    totals: {currency: amount (Decimal)} — الأجزاء الحية فقط (الصفوف بلا مبلغ
+            مثبّت). لا تُضمّن هنا مبالغ الصفوف المثبّتة؛ تلك تذهب إلى `stored`.
     stored: {currency: amount} مبالغ محوَّلة مسبقًا (بعملة الأساس) وقت تسجيل
             العملية — تُفضَّل على سعر اليوم للدقة التاريخية (يُسمّى بالـ
             exchange_rate fixed-at-creation). تُستخدم الأسعار الحية فقط للعملات
             التي لا يوجد لها مبلغ مخزَّن.
+    العقد الموحّد: totals = حي فقط، stored = مثبّت فقط، ثم الجمع
+    (live × rate + stored). يمنع إسقاط الجزء الحي عند وجود stored لنفس
+    العملة (خلط صفوف قديمة بلا تثبيت مع صفوف جديدة مثبّتة).
+
     يعيد: {"base": base_currency, "total": Decimal|None, "partial": bool, "rates": {...}}
 
-    - `total` None إذا فشل كل التحويل (مشكلة شبكة).
+    - `total` None إذا فشل تحويل أي جزء حي (مشكلة شبكة).
     - `partial` True إذا نجحت بعض العملات فقط (لا يمكن عرض مجموع كامل).
     """
     base_currency = base_currency.upper().strip()
@@ -221,24 +230,27 @@ def convert_totals_to_base(
     total = Decimal("0")
     partial = False
     rates = {}
-    # combos تضم العملات من المجموع والمبالغ المخزّنة معًا — عملة مخزّنة فقط
-    # (لا قيمة حيّة متناظرة) تحسب من مبلغها المثبَّت، والعملة الحية فقط تُحوَّل
-    # بسعر اليوم.
+    # نجمع كل العملات من الحي والمثبّت معًا؛ لكل عملة نحسب:
+    #  - المثبّت (إن وجد) يُضاف مباشرة بلا تحويل
+    #  - الحي (إن وجد) يُحوَّل بسعر اليوم ويُضاف
+    # هذا يمنع إسقاط الجزء الحي عند وجود stored لنفس العملة.
     for currency in dict.fromkeys([*totals, *stored]):
-        amount = totals.get(currency)
+        live_amount = totals.get(currency)
+        stored_amount = stored.get(currency) if currency in stored else None
         code = _normalize_currency_code(currency) or currency
         if code == base_norm:
-            if amount is None:
-                continue
-            rates[currency] = Decimal("1.0000")
-            total += amount
+            # العملة الأساس: المبالغ الحية بعملة الأساس تُضاف مباشرة؛ المثبّتة
+            # للأساس تُتجاهل (مكررة) — يطابق test_stored_currency_same_as_base_is_ignored.
+            if live_amount is not None:
+                rates[currency] = Decimal("1.0000")
+                total += live_amount
             continue
-        if currency in stored and stored[currency] is not None:
-            # مبلغ محوَّل ومثبَّت لحظة التسجيل — لا حاجة لسعر اليوم
-            total += Decimal(str(stored[currency]))
+        # جزء مثبّت (إن وجد) — لا يحتاج سعر صرف
+        if stored_amount is not None:
+            total += Decimal(str(stored_amount))
+            # نضع rate=1.0 مبدئيًا؛ قد يُستبدل بسعر حي لاحقًا إن وجد حي أيضًا
             rates[currency] = Decimal("1.0000")
-            continue
-        if amount is None:
+        if live_amount is None:
             continue
         try:
             rate = get_rate(code, base_currency)
@@ -249,7 +261,7 @@ def convert_totals_to_base(
             rates[currency] = None
             continue
         rates[currency] = rate
-        total = total + (amount * rate)
+        total = total + (live_amount * rate)
 
     total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     # إذا فشل تحويل عملة واحدة، لا نعرض مجموعًا ناقصًا قد يضلل المستخدم

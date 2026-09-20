@@ -19,6 +19,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from app.database.db import SessionLocal
+from bot.formatters import safe_reply
 from bot.icons import ERROR, EXPENSE, INCOME, SUCCESS, WARNING
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,7 @@ async def _cmd_overview(update: Update, uid: int) -> None:
     from app.database.crud import bonus_overview
 
     data = await asyncio.to_thread(lambda: _db_call(lambda db: bonus_overview(db, uid)))
-    await update.message.reply_text(format_bonus_overview(data))
+    await safe_reply(update.message, format_bonus_overview(data))
 
 
 async def _cmd_report(update: Update, uid: int, args: list[str]) -> None:
@@ -352,10 +353,19 @@ async def _cmd_report(update: Update, uid: int, args: list[str]) -> None:
 
     from app.database.crud import bonus_report_summary
     report = await asyncio.to_thread(lambda: _db_call(lambda db: bonus_report_summary(db, uid, period, person)))
-    await update.message.reply_text(format_bonus_report(report, person))
+    await safe_reply(update.message, format_bonus_report(report, person))
 
 
 async def _cmd_add(update: Update, uid: int, args: list[str]) -> None:
+    from app.database.crud.company import has_permission
+    from app.database.db import SessionLocal as _SL
+    db = _SL()
+    try:
+        if not has_permission(db, uid, "budget.manage"):
+            await update.message.reply_text("ليس لديك صلاحية منح البونس (تحتاج budget.manage).")
+            return
+    finally:
+        db.close()
     if len(args) < 2:
         await update.message.reply_text(
             "الاستخدام:\n"
@@ -389,7 +399,7 @@ async def _cmd_add(update: Update, uid: int, args: list[str]) -> None:
             f"{f' — {tx.person}' if tx.person else ''}"
         )
     else:
-        await update.message.reply_text("تعذّر تسجيل البونس. تحقق من المدخلات.")
+        await update.message.reply_text("تعذّر تسجيل البونس. تحقق من الصلاحية والمدخلات.")
 
 
 async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
@@ -406,10 +416,19 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
     if sub in ("list", "قائمة", "عرض"):
         from app.database.crud import list_bonus_events
         events = await asyncio.to_thread(lambda: _db_call(lambda db: list_bonus_events(db, uid)))
-        await update.message.reply_text(format_events_list(events))
+        await safe_reply(update.message, format_events_list(events))
         return
 
     if sub in ("end", "إنهاء", "نهاية"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية إنهاء الفعاليات (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 2 or not args[1].strip().isdigit():
             await update.message.reply_text("استخدم: /bonus event إنهاء <رقم الفعالية>")
             return
@@ -419,10 +438,19 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
         if ev:
             await update.message.reply_text(f"{SUCCESS} تم إنهاء الفعالية: {ev.name}")
         else:
-            await update.message.reply_text("لم أجد هذه الفعالية.")
+            await update.message.reply_text("لم أجد هذه الفعالية أو ليس لديك صلاحية.")
         return
 
     if sub in ("add", "إضافة", "جديد"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية إنشاء الفعاليات (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 2:
             await update.message.reply_text("استخدم: /bonus event إضافة اسم الفعالية [ميزانية] [عملة]")
             return
@@ -445,7 +473,8 @@ async def _cmd_event(update: Update, uid: int, args: list[str]) -> None:
                 break
 
         from app.database.crud import create_bonus_event
-        ev = await asyncio.to_thread(lambda: _db_call(lambda db: create_bonus_event(db, uid, name, budget=budget, currency=currency)))
+        from app.timeutil import now_utc as _now
+        ev = await asyncio.to_thread(lambda: _db_call(lambda db: create_bonus_event(db, uid, name, budget=budget, currency=currency, start_at=_now(), end_at=None)))
         if ev:
             budget_txt = _fmt_amount(ev.budget, ev.currency) if ev.budget else "—"
             await update.message.reply_text(
@@ -474,10 +503,19 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
     if sub in ("list", "قائمة", "عرض"):
         from app.database.crud import employee_bonus_overview
         plans = await asyncio.to_thread(lambda: _db_call(lambda db: employee_bonus_overview(db, uid)["plans"]))
-        await update.message.reply_text(format_plans_list(plans))
+        await safe_reply(update.message, format_plans_list(plans))
         return
 
     if sub in ("disable", "تعطيل", "حذف"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية تعطيل خطط المكافآت (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 2 or not args[1].strip().isdigit():
             await update.message.reply_text("استخدم: /bonus plan تعطيل <رقم الخطة>")
             return
@@ -487,10 +525,19 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
         if plan:
             await update.message.reply_text(f"{SUCCESS} تعطّلت خطة مكافأة {plan.person}.")
         else:
-            await update.message.reply_text("لم أجد هذه الخطة.")
+            await update.message.reply_text("لم أجد هذه الخطة أو ليس لديك صلاحية.")
         return
 
     if sub in ("add", "إضافة", "جديد"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية إنشاء خطط المكافآت (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 3:
             await update.message.reply_text("استخدم: /bonus plan إضافة <الشخص> <المبلغ> [monthly|quarterly|one_off] [سقف شهري]")
             return
@@ -551,11 +598,23 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
     sub = args[0].strip().lower()
 
     if sub in ("enable", "تفعيل", "تشغيل"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية تفعيل نقاط الولاء (budget.manage).")
+                return
+        finally:
+            db.close()
         points_rate = float(args[1]) if len(args) > 1 else 1.0
         points_value = float(args[2]) if len(args) > 2 else 0.01
         min_redeem = int(args[3]) if len(args) > 3 else 0
         from app.database.crud import loyalty_config_enable
         cfg = await asyncio.to_thread(lambda: _db_call(lambda db: loyalty_config_enable(db, uid, points_rate, points_value, min_redeem)))
+        if cfg is None:
+            await update.message.reply_text("تعذّر تفعيل نقاط الولاء (صلاحية مفقودة).")
+            return
         await update.message.reply_text(
             f"{SUCCESS} فُعّلت نقاط الولاء:\n"
             f"   المعدّل: {float(cfg.points_rate):g} نقطة/وحدة\n"
@@ -565,12 +624,30 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
         return
 
     if sub in ("disable", "تعطيل", "إيقاف"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية تعطيل نقاط الولاء (budget.manage).")
+                return
+        finally:
+            db.close()
         from app.database.crud import disable_loyalty
         ok = await asyncio.to_thread(lambda: _db_call(lambda db: disable_loyalty(db, uid)))
-        await update.message.reply_text(f"{SUCCESS} تعطّلت نقاط الولاء." if ok else "نقاط الولاء غير مفعّلة أصلاً.")
+        await update.message.reply_text(f"{SUCCESS} تعطّلت نقاط الولاء." if ok else "نقاط الولاء غير مفعّلة أصلاً أو ليس لديك صلاحية.")
         return
 
     if sub in ("add", "منح", "إضافة"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية منح النقاط (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 3:
             await update.message.reply_text("استخدم: /bonus points منح <الشخص> <عدد النقاط>")
             return
@@ -582,10 +659,22 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
             return
         from app.database.crud import loyalty_add_points
         account = await asyncio.to_thread(lambda: _db_call(lambda db: loyalty_add_points(db, uid, person, points)))
+        if account is None:
+            await update.message.reply_text("تعذّر منح النقاط (صلاحية مفقودة).")
+            return
         await update.message.reply_text(f"{SUCCESS} أُضيف {points} نقطة لـ {account.person}.\n   الرصيد: {account.points_balance} نقطة")
         return
 
     if sub in ("redeem", "استبدال", "خصم"):
+        from app.database.crud.company import has_permission
+        from app.database.db import SessionLocal as _SL
+        db = _SL()
+        try:
+            if not has_permission(db, uid, "budget.manage"):
+                await update.message.reply_text("ليس لديك صلاحية استبدال النقاط (budget.manage).")
+                return
+        finally:
+            db.close()
         if len(args) < 3:
             await update.message.reply_text("استخدم: /bonus points استبدال <الشخص> <عدد النقاط>")
             return
@@ -613,7 +702,7 @@ async def _cmd_points(update: Update, uid: int, args: list[str]) -> None:
         if cfg is None:
             await update.message.reply_text("نقاط الولاء غير مفعّلة. استخدم: /bonus points تفعيل")
         else:
-            await update.message.reply_text(format_loyalty_accounts(accounts, cfg))
+            await safe_reply(update.message, format_loyalty_accounts(accounts, cfg))
         return
 
     await update.message.reply_text("لم أفهم. الاستخدام:\n/bonus points تفعيل|تعطيل|منح|استبدال|حسابات ...")
@@ -701,27 +790,37 @@ async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         for uid, plans in seen_owners.items():
             for plan in plans:
-                skip = False
-                if plan.monthly_cap is not None:
-                    # مقارنة السقف تتم بعملة الصرف (تُحوَّل إن اختلفت) — منحة
-                    # تكسر السقف تُؤجَّل (لا إنفاق فوقه؛ الاستحقاق يتقدّم فتُعاد
-                    # الشهر القادم).
-                    skip = bonus_grant_would_overshoot_cap(db, plan)
-                if not skip:
-                    tx = record_bonus_grant(db, uid, plan.amount, plan.currency, direction="expense", person=plan.person, description=f"مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})")
-                    if tx:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=uid,
-                                text=(
-                                    f"🎁 تم منح مكافأة لـ {plan.person}!\n"
-                                    f"   {EXPENSE} المبلغ: {float(plan.amount):,.2f} {plan.currency or ''}\n"
-                                    f"   📝 مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})"
-                                ),
-                            )
-                        except Exception as exc:
-                            logger.error("فشل إرسال تذكير مكافأة للمستخدم %s: %s", uid, exc)
-                advance_employee_bonus_due(db, plan)
+                try:
+                    skip = False
+                    if plan.monthly_cap is not None:
+                        skip = bonus_grant_would_overshoot_cap(db, plan)
+                    if not skip:
+                        tx = record_bonus_grant(db, uid, plan.amount, plan.currency, direction="expense", person=plan.person, description=f"مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})")
+                        if tx:
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=uid,
+                                    text=(
+                                        f"🎁 تم منح مكافأة لـ {plan.person}!\n"
+                                        f"   {EXPENSE} المبلغ: {float(plan.amount):,.2f} {plan.currency or ''}\n"
+                                        f"   📝 مكافأة دورية ({PLAN_FREQ_LABELS.get(plan.frequency, plan.frequency)})"
+                                    ),
+                                )
+                            except Exception as exc:
+                                logger.error("فشل إرسال تذكير مكافأة للمستخدم %s: %s", uid, exc)
+                    # تقدّم الموعد حتى لو تُخطّى بسبب السقف — لا تكرار المنح كل 30د
+                    advance_employee_bonus_due(db, plan)
+                except Exception:
+                    logger.exception("خطأ في معالجة خطة مكافأة %s للمستخدم %s", plan.id, uid)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    # رغم الفشل نتقدم الموعد لتجنب تكرار كل 30 دقيقة بلا نهاية
+                    try:
+                        advance_employee_bonus_due(db, plan)
+                    except Exception:
+                        pass
 
         today = now_utc().date()
         event_owners = db.query(BonusEvent.telegram_user_id).filter(BonusEvent.status.in_(["planned", "active"])).distinct().all()

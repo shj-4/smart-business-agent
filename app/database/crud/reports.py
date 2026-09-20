@@ -91,7 +91,9 @@ def monthly_totals(
         )
     )
 
-    base_at_call = (settings.base_currency or "").upper().strip()
+    from app.database.crud.company import get_user_base_currency as _get_base
+
+    base_at_call = _get_base(db, telegram_user_id)
     cols = [
         Transaction.type,
         Transaction.currency,
@@ -112,8 +114,9 @@ def monthly_totals(
     )
 
     # تجميع (شهر، عملة) لكل نوع
-    agg = {}  # month_key -> {currency: {expense: Decimal, income: Decimal}}
-    stored_agg = {}  # month_key -> {currency: {expense/income بعملة الأساس}}
+    agg = {}  # month_key -> {currency: {expense: Decimal, income: Decimal}} (كامل للعرض)
+    stored_agg = {}  # month_key -> {currency: {expense/income بعملة الأساس}} (مثبّتة فقط)
+    live_agg = {}  # month_key -> {currency: {expense/income}} (حي فقط — للعقد الموحّد)
     for (
         tx_type,
         currency,
@@ -129,17 +132,30 @@ def monthly_totals(
             key, {}
         ).setdefault(cur_name, {"expense": Decimal("0"), "income": Decimal("0")})
         per_cur[tx_type] = per_cur.get(tx_type, Decimal("0")) + (amount or Decimal("0"))
-        if (
+        # تحديد إن كان الصف مثبّتًا (له مبلغ بعملة الأساس)
+        is_stored = (
             include_stored
             and base_at_creation == base_at_call
             and amount_in_base is not None
-        ):
+            and (currency or "").upper() != base_at_call  # للأساس: المثبّت يُتجاهل
+        )
+        if is_stored:
             stored_cur = stored_agg.setdefault(
                 key, {}
             ).setdefault(cur_name, {"expense": Decimal("0"), "income": Decimal("0")})
             stored_cur[tx_type] = stored_cur.get(tx_type, Decimal("0")) + Decimal(
                 str(amount_in_base)
             )
+        else:
+            # حي: إما بلا تثبيت، أو بعملة الأساس (حتى لو له تثبيت)
+            if include_stored:
+                live_cur = live_agg.setdefault(
+                    key, {}
+                ).setdefault(cur_name, {"expense": Decimal("0"), "income": Decimal("0")})
+                live_cur[tx_type] = live_cur.get(tx_type, Decimal("0")) + (amount or Decimal("0"))
+            else:
+                # عند عدم طلب المثبّت، لا نحتاج live منفصل
+                pass
 
     out = []
     for y_local, m_local in months_labels:
@@ -153,6 +169,7 @@ def monthly_totals(
         if include_stored:
             entry["stored"] = stored_agg.get(key, {})
             entry["stored_base"] = base_at_call
+            entry["live_by_currency"] = live_agg.get(key, {})
         out.append(entry)
     return out
 
@@ -289,7 +306,9 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
         report_company_filter, report_scope_ids,
     )
 
-    base = (settings.base_currency or "").upper().strip()
+    from app.database.crud.company import get_user_base_currency as _get_base2
+
+    base = _get_base2(db, telegram_user_id)
     ids = report_scope_ids(db, telegram_user_id) or {-1}
 
     entries = monthly_totals(db, telegram_user_id, months=2, include_stored=True)
@@ -297,7 +316,9 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
     previous = entries[-2] if len(entries) > 1 else {}
 
     def _month_unified(entry: dict, kind: str) -> Decimal | None:
-        by = entry.get("by_currency") or {}
+        # العقد الموحّد: totals = حي فقط، stored = مثبّت فقط
+        live = entry.get("live_by_currency")
+        by = live if live is not None else (entry.get("by_currency") or {})
         stored = entry.get("stored") or {}
         totals = {
             c: v.get(kind) for c, v in by.items() if v.get(kind) is not None
@@ -453,7 +474,9 @@ def forecast_totals(
 
     months = max(1, min(int(months), 12))
     history = max(2, int(history))
-    base = (settings.base_currency or "").upper().strip()
+    from app.database.crud.company import get_user_base_currency as _get_base3
+
+    base = _get_base3(db, telegram_user_id)
     entries = monthly_totals(db, telegram_user_id, months=history, include_stored=True)
     if not entries:
         return {"base": base, "history": history, "months": [], "last_key": None}

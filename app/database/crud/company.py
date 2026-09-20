@@ -111,24 +111,32 @@ def can_edit_record(db: Session, actor_id: int, owner_id: int | None) -> bool:
 
 
 def company_filter(db: Session, telegram_user_id: int, model) -> object:
-    """فلتر توافقي: للشركات يطابق company_id، وللأفراد يطابق telegram_user_id.
+    """فلتر توافقي: للشركات يطابق company_id فقط، وللأفراد يطابق telegram_user_id.
 
-    الصيغة: or_(company_id == cid, and_(company_id.is_(None), telegram_user_id.in_(ids)))
-    للتوافق مع السجلات القديمة (company_id NULL) والجديدة.
+    سابقًا كان هناك fallback `OR company_id IS NULL` الذي كان يسرب بيانات قديمة
+    (سجلات قبل الانضمام لشركة) إلى أعضاء الشركة الجدد بعد الانضمام — تسريب بيانات.
+    الآن للشركات نطابق فقط company_id == cid (لا تسريب)، وللأفراد نطابق
+    telegram_user_id عبر accessible_user_ids.
     """
     from app.database.crud import accessible_user_ids
 
     cid = company_id_for_user(db, telegram_user_id)
     if cid is None:
         return model.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id))
-    # شركة: نطابق كل سجلات الشركة + السجلات القديمة المتروكة بلا company_id
-    ids = accessible_user_ids(db, telegram_user_id)
-    # fallback للأفراد المرتبطين بالشركة عبر accessible (للسجلات القديمة)
-    # لكن لضمان بقاء سجلات مغادر، نستخدم company_id == cid كأساس
-    return or_(
-        model.company_id == cid,
-        and_(model.company_id.is_(None), model.telegram_user_id.in_(ids)),
-    )
+    # شركة: نطابق فقط سجلات الشركة (لا fallback إلى company_id IS NULL)
+    return model.company_id == cid
+
+
+def get_user_base_currency(db: Session, telegram_user_id: int) -> str:
+    """يعيد العملة الأساسية للمستخدم: عملة شركته إن وجدت وإلا settings.base_currency."""
+    from app.config import settings
+
+    cid = company_id_for_user(db, telegram_user_id)
+    if cid is not None:
+        comp = get_company(db, cid)
+        if comp and comp.base_currency:
+            return comp.base_currency.upper().strip()
+    return (settings.base_currency or "ILS").upper().strip()
 
 
 # ---------- الدعوات ----------
@@ -136,7 +144,8 @@ def company_filter(db: Session, telegram_user_id: int, model) -> object:
 
 def _new_token(kind: str) -> str:
     if kind == "code":
-        return f"{secrets.randbelow(10**6):06d}"
+        # 8 أرقام → 100M احتمال (كان 6 أرقام → 1M فقط) + فترة قصيرة
+        return f"{secrets.randbelow(10**8):08d}"
     return secrets.token_urlsafe(16)  # 22 حرفًا — يناسب حد start payload (64)
 
 
@@ -156,7 +165,7 @@ def create_invite(
     if m.role == ROLE_MANAGER and role not in ASSIGNABLE_BY_MANAGER:
         return None
     if kind == "code":
-        ttl_hours, max_uses = min(ttl_hours or 1, 24), 1  # الكود قصير العمر/استخدام واحد
+        ttl_hours, max_uses = 1, 1  # الكود 8 أرقام/ساعة واحدة فقط — كان 24 ساعة وتناقض الرسالة
     for _ in range(5):  # إعادة المحاولة عند تصادم الكود
         token = _new_token(kind)
         if not db.query(InviteLink).filter(InviteLink.token == token).first():
@@ -181,15 +190,39 @@ def create_invite(
 def redeem_invite(
     db: Session, telegram_user_id: int, token: str, display_name: str | None = None
 ) -> tuple[bool, str | Company]:
-    """يستهلك دعوة. يعيد (True, Company) أو (False, رسالة_خطأ)."""
+    """يستهلك دعوة. يعيد (True, Company) أو (False, رسالة_خطأ).
+
+    حدّ موحّد للمحاولات داخل الدالة نفسها — يحمي كل مسارات /join و onboarding
+    و /start inv_... من التخمين (كان الحماية في /join فقط)."""
     from app.database.crud import _invalidate_caches
+
+    # حدّ موحّد: فحص الحظر و is_rate_limited قبل أي معالجة
+    try:
+        from bot.ratelimit import is_join_blocked, is_rate_limited, register_join_denied
+    except Exception:
+        is_join_blocked = lambda uid: False
+        is_rate_limited = lambda uid: False
+        register_join_denied = lambda uid: 0
+
+    if is_join_blocked(telegram_user_id):
+        return False, "تم حظرك مؤقتًا لكثرة المحاولات. حاول بعد 15 دقيقة."
+    if is_rate_limited(telegram_user_id):
+        return False, "أرسلت الكثير من المحاولات، انتظر قليلاً."
 
     if company_id_for_user(db, telegram_user_id) is not None:
         return False, "أنت عضو في شركة بالفعل."
     inv = db.query(InviteLink).filter(InviteLink.token == (token or "").strip()).first()
     if inv is None or inv.revoked:
+        try:
+            register_join_denied(telegram_user_id)
+        except Exception:
+            pass
         return False, "الدعوة غير صالحة."
     if inv.expires_at and inv.expires_at < now_utc():
+        try:
+            register_join_denied(telegram_user_id)
+        except Exception:
+            pass
         return False, "انتهت صلاحية الدعوة."
     # تحديث ذرّي: يمنع تجاوز max_uses عند ضغطين متزامنين
     updated = (
