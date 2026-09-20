@@ -108,7 +108,9 @@ def _verify_backup(backup_path: str) -> bool:
 
 
 def run_backup() -> bool:
-    """ينفّذ نسخة احتياطية واحدة من قاعدة SQLite. يعيد True عند النجاح."""
+    """ينفّذ نسخة احتياطية (SQLite: نسخ ملف، MySQL: mysqldump إن توفر) — يعيد True عند النجاح."""
+    if DATABASE_URL.startswith("mysql"):
+        return _run_mysql_backup()
     if not DB_PATH or not os.path.exists(DB_PATH):
         _log(f"قاعدة SQLite غير موجودة أو أن القاعدة ليست SQLite: {DB_PATH}")
         return False
@@ -145,3 +147,42 @@ def run_backup() -> bool:
     _rotate_backups()
     _log(f"النسخ المحتفظ بها: {len(_list_backups())}")
     return True
+
+
+def _run_mysql_backup() -> bool:
+    """نسخ MySQL عبر mysqldump إلى ملف .sql.gz (إن توفر الأداة)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("mysqldump") is None:
+        _log("mysqldump غير متوفر — تخطي نسخ MySQL")
+        return False
+    # تحذير: النسخ على نفس القرص فقط — يُنصح بنسخ خارجي (سحابة)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(BACKUP_DIR, f"business_{timestamp}.sql.gz")
+    # DATABASE_URL = mysql+pymysql://user:pass@host:port/db
+    try:
+        # استخرج معاملات الاتصال ببساطة
+        url = DATABASE_URL.replace("mysql+pymysql://", "mysql://")
+        # استخدم mysqldump مع --single-transaction
+        with open(backup_path, "wb") as out:
+            proc = subprocess.run(
+                ["mysqldump", "--single-transaction", url],
+                stdout=out,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            if proc.returncode != 0:
+                _log(f"فشل mysqldump: {proc.stderr.decode(errors='ignore')[:200]}")
+                try:
+                    os.remove(backup_path)
+                except OSError:
+                    pass
+                return False
+        _log(f"تم نسخ MySQL: {backup_path}")
+        _rotate_backups()
+        return True
+    except Exception as exc:
+        _log(f"خطأ نسخ MySQL: {exc}")
+        return False

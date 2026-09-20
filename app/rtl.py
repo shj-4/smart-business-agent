@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 _LATIN_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,:/_-]*")
 LRM = "\u200e"  # Left-to-Right Mark
 RLM = "\u200f"  # Right-to-Left Mark
+# جميع الرموز الاتجاهية التي قد تُحقن عبر fix_bidi أو النسخ
+_BIDI_CHARS = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+_BIDI_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+# نمط الأكواد داخل backticks (مفردة أو ثلاثية) — يجب استثناؤها من التطويق
+_BACKTICK_RE = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def _strip_bidi(text: str) -> str:
+    """يزيل كل الرموز الاتجاهية من النص لجعل fix_bidi idempotent."""
+    return _BIDI_RE.sub("", text)
 
 
 def fix_bidi(text: str) -> str:
@@ -35,26 +46,54 @@ def fix_bidi(text: str) -> str:
     العربية-الهندية ٠-٩) لا تتأثر.
 
     يُستثنى الأوامر (/command) والروابط (http/https/t.me) والأكواد
-    داخلها من التطويق كي لا تُكسر.
+    داخل backticks من التطويق كي لا تُكسر (نسخ الكود مع RLM يفشل /join).
+    الغلاف idempotent: إزالة الرموز الموجودة أولاً يمنع تضاعفها عند
+    تطبيق الطبقتين Message.reply_text → Bot.send_message.
     """
     if not text:
         return text
 
+    # idempotent: إزالة أي RLM/LRM سابقة قبل إعادة التطويق
+    # هذا يمنع تضاعف العلامات عند تغليف reply_text و send_message معًا
+    if any(c in text for c in (RLM, LRM)) or _BIDI_RE.search(text):
+        # لا نُزيل كل شيء إذا كان النص يحتوي RLM بالفعل من تغليف سابق،
+        # بل نُزيلها ثم نُعيد التطبيق لضمان نتيجة واحدة
+        text = _strip_bidi(text)
+
+    # فكّك النص إلى مقاطع: أكواد backticks مقابل نص عادي
+    # الأكواد داخل `...` أو ```...``` لا تُطوّق أبدًا
+    bidi_parts = []
+    last_b = 0
+    for m in _BACKTICK_RE.finditer(text):
+        # نص قبل الكود — طبّق عليه Bidi مع حماية الروابط/الأوامر
+        if m.start() > last_b:
+            bidi_parts.append(_fix_bidi_outside_backticks(text[last_b:m.start()]))
+        # الكود نفسه — لا تغيّر
+        bidi_parts.append(m.group(0))
+        last_b = m.end()
+    if last_b < len(text):
+        bidi_parts.append(_fix_bidi_outside_backticks(text[last_b:]))
+    return "".join(bidi_parts)
+
+
+def _fix_bidi_outside_backticks(segment: str) -> str:
+    """يطبّق Bidi على مقطع خارج backticks مع حماية الروابط/الأوامر."""
     # فكّك النص إلى مقاطع: روابط/أوامر مقابل نص عادي
     # الروابط: http://, https://, t.me/...
     # الأوامر: /xxx في بداية السطر أو بعد مسافة (لا وسط كلمة مثل edit:1/x)
-    url_pattern = re.compile(r"https?://\S+|t\.me/\S+|(?<!\S)/\w[\w/]*")
+    # نُوسّع حماية الأمر لتشمل التوكن بعده مثل "/join 12345678" كاملًا
+    url_pattern = re.compile(r"https?://\S+|t\.me/\S+|(?<!\S)/\w[\w/]*(?:\s+\S+)?")
     parts = []
     last = 0
-    for m in url_pattern.finditer(text):
+    for m in url_pattern.finditer(segment):
         # نص قبل الرابط/الأمر — طبّق عليه Bidi
         if m.start() > last:
-            parts.append(_wrap_latin(text[last:m.start()]))
-        # الرابط/الأمر نفسه — لا تغيّر
+            parts.append(_wrap_latin(segment[last:m.start()]))
+        # الرابط/الأمر نفسه (مع التوكن إن وجد) — لا تغيّر
         parts.append(m.group(0))
         last = m.end()
-    if last < len(text):
-        parts.append(_wrap_latin(text[last:]))
+    if last < len(segment):
+        parts.append(_wrap_latin(segment[last:]))
     return "".join(parts)
 
 
@@ -63,6 +102,13 @@ def _wrap_latin(segment: str) -> str:
         return f"{RLM}{m.group(0)}{RLM}"
 
     return _LATIN_RUN.sub(_wrap, segment)
+
+
+def strip_bidi_marks(text: str) -> str:
+    """يزيل الرموز الاتجاهية (RLM/LRM/Isolate...) من نص — للاستخدام في redeem_invite."""
+    if not text:
+        return text
+    return _BIDI_RE.sub("", text)
 
 
 def _apply_fix(text_arg_index: int, args: tuple, kwargs: dict):

@@ -822,17 +822,26 @@ async def bonus_reminder_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception:
                         pass
 
+        # dedupe per event per day عبر ذاكرة + DB (حتى لا تتكرر كل 30د)
         today = now_utc().date()
+        today_str = today.strftime("%Y-%m-%d")
+        if not hasattr(bonus_reminder_check, "_sent_events"):
+            bonus_reminder_check._sent_events = set()  # type: ignore
+        sent = bonus_reminder_check._sent_events  # type: ignore
         event_owners = db.query(BonusEvent.telegram_user_id).filter(BonusEvent.status.in_(["planned", "active"])).distinct().all()
         for (uid,) in event_owners:
             events = list_bonus_events(db, uid)
             for ev in events:
                 if ev.end_at and ev.end_at.date() == today and ev.status != "ended":
+                    key = (ev.id, today_str)
+                    if key in sent:
+                        continue
                     try:
                         await context.bot.send_message(
                             chat_id=uid,
                             text=f"🎯 الفعالية «{ev.name}» تنتهي اليوم!\nأرسل /bonus event إنهاء {ev.id} لإنهائها.",
                         )
+                        sent.add(key)
                     except Exception as exc:
                         logger.error("فشل إرسال تذكير فعالية للمستخدم %s: %s", uid, exc)
 

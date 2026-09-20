@@ -164,10 +164,19 @@ def test_wrong_credentials_rejected(client):
     assert client.get("/api/transactions", headers=wrong).status_code == 401
 
 
-def test_health_endpoints_remain_public(client):
-    assert client.get("/health").status_code == 200
-    assert client.get("/status").status_code == 200
+def test_health_endpoints_require_auth(client):
+    # /health و /status كانا عامّين ويكشفان عدد السجلات واسم ملف القاعدة — الآن محميان
+    assert client.get("/health").status_code == 401
+    assert client.get("/status").status_code == 401
+    assert client.get("/health", headers=_auth_header()).status_code == 200
+    assert client.get("/status", headers=_auth_header()).status_code == 200
     assert client.get("/").status_code == 200
+
+
+# للتوافق مع أي اختبار قديم يستدعي الاسم القديم
+def test_health_endpoints_remain_public(client):
+    # تم تغيير السلوك: الآن يتطلب مصادقة
+    test_health_endpoints_require_auth(client)
 
 
 def test_new_ui_features_require_auth_and_render(client, db_session):

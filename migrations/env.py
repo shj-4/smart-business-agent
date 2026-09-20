@@ -15,8 +15,8 @@ from app.database.db import DATABASE_URL, Base  # noqa: E402
 
 config = context.config
 
-# نستخدم نفس URL قاعدة البيانات المعرّف في التطبيق (db.py)
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+# نستخدم نفس URL قاعدة البيانات المعرّف في التطبيق (db.py) — مع هروب % لـ ConfigParser
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)

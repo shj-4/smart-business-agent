@@ -109,7 +109,30 @@ class Settings(BaseSettings):
         "تبديل النموذج من .env دون إعادة نشر الكود.",
     )
 
-    @field_validator("admin_user_ids", mode="before")
+    # --- الوصول والحصص (البند 6: حماية حصة Gemini) ---
+    allowed_user_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list,
+        description="قائمة السماح: معرّفات Telegram المسموح لها باستخدام البوت. "
+        "إن تُركت فارغة يُسمح للجميع (وضع تطوير/اختبار). في الإنتاج اضبطها أو استخدم رمز تسجيل.",
+    )
+    registration_token: str = Field(
+        default="",
+        description="رمز التسجيل: إن ضُبط، يمكن للمستخدمين الجدد التسجيل عبر /register <الرمز> "
+        "ليُضافوا إلى قائمة السماح. يبقى فارغًا لتعطيل التسجيل.",
+    )
+    daily_ai_limit_per_user: int = Field(
+        default=50,
+        gt=0,
+        description="الحد اليومي لاستدعاءات Gemini لكل مستخدم (يشمل تحليل نص/صورة/إصلاح JSON). "
+        "يُعاد تعيينه عند منتصف الليل بتوقيت Asia/Gaza.",
+    )
+    daily_ai_limit_global: int = Field(
+        default=1000,
+        gt=0,
+        description="الحد اليومي الكلي لاستدعاءات Gemini لكل العملية (حماية من إغراق جماعي).",
+    )
+
+    @field_validator("admin_user_ids", "allowed_user_ids", mode="before")
     @classmethod
     def _parse_admin_ids(cls, v):
         if v is None or v == "":
@@ -124,6 +147,46 @@ class Settings(BaseSettings):
                     continue
             return ids
         return v
+
+    @field_validator("first_day_of_week")
+    @classmethod
+    def _validate_first_day(cls, v):
+        if v not in range(7):
+            raise ValueError("first_day_of_week يجب أن يكون 0-6 (0=الاثنين, 6=الأحد)")
+        return v
+
+    @field_validator("report_time")
+    @classmethod
+    def _validate_report_time(cls, v):
+        import re as _re
+
+        if not _re.match(r"^\d{2}:\d{2}$", str(v).strip()):
+            raise ValueError("report_time يجب أن يكون HH:MM")
+        hh, mm = map(int, str(v).strip().split(":"))
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            raise ValueError("report_time ساعة غير صالحة")
+        return f"{hh:02d}:{mm:02d}"
+
+    @field_validator("base_currency")
+    @classmethod
+    def _validate_base_currency(cls, v):
+        if not v or not str(v).strip():
+            return "ILS"
+        code = str(v).strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            raise ValueError("base_currency يجب أن يكون رمز ISO 3 أحرف")
+        return code
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v):
+        try:
+            import zoneinfo
+
+            zoneinfo.ZoneInfo(str(v))
+        except Exception as err:
+            raise ValueError(f"timezone غير صالحة: {v}") from err
+        return str(v)
 
 
 settings = Settings()

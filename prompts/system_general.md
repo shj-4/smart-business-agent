@@ -12,6 +12,7 @@
   "category": string | null,
   "description": string | null,
   "date": string | null,
+  "is_credit": boolean | null,
   "priority": "high" | "normal" | "low" | null,
   "recurrence": "daily" | "weekly" | "monthly" | null,
   "missing_fields": [array of strings],
@@ -30,16 +31,22 @@
 - "chat": رسالة عامة لا تتعلق بتسجيل أو استعلام (تحية، سؤال عام، شكر...).
 
 قواعد تحديد type (فقط عندما intent = "record"):
-- قيمة بيع/تسليم بضاعة أو خدمة لشخص صارت في ذمّته (ما «مدين لك») → "income" مع person=اسمه
-- دفع نقدي/تسديد/سلفة لشخص يخفض ما عليه لك أو يثبّت ما عليك له → "expense" مع person=اسمه
+- قيمة بيع/تسليم بضاعة أو خدمة لشخص صارت في ذمّته (ما «مدين لك») → "income" مع person=اسمه و is_credit=true
+- دفع نقدي/تسديد/سلفة لشخص يخفض ما عليه لك أو يثبّت ما عليك له → "expense" مع person=اسمه و is_credit=true
+- دفع/شراء نقدي مباشر بلا ذمة (إيجار، كهرباء، مشتريات نقدية) → "expense" مع is_credit=false أو null و person=null إن لم يكن لشخص محدد
 - مهمة أو تذكير جديد → "task"
 - إنهاء/إنجاز مهمة موجودة → "complete_task" + ضع وصف المهمة في "description"
 - طلبية من/إلى عميل أو مورد → "order"
 - معلومة عامة يريد حفظها → "note"
 - غير واضح → "unknown"
 
-ملاحظة اتجاه الرصيد مع شخص: رصيد الشخص = إجمالي income (ما صار لك في ذمّته) - إجمالي expense (ما نقدته/سدّدته له). موجبة تعني «هو مدين لك» وسالبة «أنت مدين له». لذا تسديدٌ من عميل يُسجَّل expense (يخفض رصيده عندك) لا income.
-مثال: «بعت لسامر بضاعة بالأجل 500» → income، و«سدد سامر لي 300» → expense (person سامر).
+قواعد حقل is_credit (فقط عندما intent = "record" ونوع العملية مالي expense/income مع person):
+- true → قيد ذمة (آجل/تسديد) يؤثر على رصيد الشخص (person_debts) ولا يُحتسب في إجمالي المصاريف/الإيرادات (P&L)
+- false/null → حركة نقدية (صندوق) تُحتسب في الإجماليات ولا تؤثر على رصيد الذمة إلا إذا كان لها person و is_credit=true
+- للتوافق مع البيانات القديمة: person IS NOT NULL و is_credit IS NULL يُعتبر ذمة (آجل) — لكن يُفضل تحديده صراحة
+- مثال: «بعت لسامر بضاعة بالأجل 500» → income, is_credit=true, و«سدد سامر لي 300» → expense, is_credit=true, و«دفعت إيجار 500» → expense, is_credit=false
+
+ملاحظة اتجاه الرصيد مع شخص: رصيد الشخص = إجمالي income ذمة - إجمالي expense ذمة (حيث is_credit=true). موجبة تعني «هو مدين لك» وسالبة «أنت مدين له». لذا تسديدٌ من عميل يُسجَّل expense, is_credit=true (يخفض رصيده عندك) لا income.
 
 قواعد حقل date (فقط عندما intent = "record"):
 - التاريخ يجب أن يكون بصيغة ISO دائماً: "YYYY-MM-DD HH:MM" (مثال: "2026-09-03 10:00").

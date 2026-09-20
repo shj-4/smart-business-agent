@@ -2,11 +2,16 @@
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.database.models import Company, CompanyMember, InviteLink
-from app.permissions import ASSIGNABLE_BY_MANAGER, ROLE_MANAGER, ROLE_OWNER, ROLE_PERMISSIONS, role_has
+from app.permissions import (
+    ASSIGNABLE_BY_MANAGER,
+    ROLE_MANAGER,
+    ROLE_OWNER,
+    ROLE_PERMISSIONS,
+    role_has,
+)
 from app.timeutil import now_utc
 
 
@@ -34,6 +39,42 @@ def company_member_ids(db: Session, company_id: int) -> set[int]:
         .all()
     )
     return {uid for (uid,) in rows}
+
+
+def _backfill_company_id_for_user(db: Session, telegram_user_id: int, company_id: int) -> int:
+    """ينقل السجلات القديمة (company_id IS NULL) للمستخدم إلى شركته الجديدة.
+
+    يُستدعى عند إنشاء شركة (بما فيها "فردي") أو عند الانضمام بموافقة،
+    لمنع اختفاء السجلات القديمة من القوائم/التقارير/التصدير/الميزانيات.
+    يعيد عدد الصفوف المحدّثة.
+    """
+    from app.database.models import (
+        Budget,
+        CreditLimit,
+        EmployeeBonusPlan,
+        Invoice,
+        LoyaltyAccount,
+        Note,
+        Task,
+        Transaction,
+    )
+
+    total = 0
+    for model in (Transaction, Note, Task, Budget, CreditLimit, Invoice, EmployeeBonusPlan, LoyaltyAccount):
+        if not hasattr(model, "company_id") or not hasattr(model, "telegram_user_id"):
+            continue
+        try:
+            updated = (
+                db.query(model)
+                .filter(model.telegram_user_id == telegram_user_id, model.company_id.is_(None))
+                .update({model.company_id: company_id}, synchronize_session=False)
+            )
+            total += int(updated or 0)
+        except Exception:
+            # تجاهل أخطاء الجداول التي قد لا تحتوي العمود بعد (قبل الهجرة)
+            db.rollback()
+    # LoyaltyConfig لا يحوي company_id per-user بل per-telegram_user_id فقط، لا حاجة
+    return total
 
 
 def create_company(
@@ -65,6 +106,19 @@ def create_company(
     db.add(company)
     db.flush()  # للحصول على id
     db.add(CompanyMember(telegram_user_id=owner_id, company_id=company.id, role=ROLE_OWNER, status="active"))
+    # نقل السجلات القديمة (NULL) إلى الشركة الجديدة حتى لا تختفي
+    try:
+        _backfill_company_id_for_user(db, owner_id, company.id)
+    except Exception:
+        # لا نكسر إنشاء الشركة بسبب فشل النقل
+        try:
+            db.rollback()
+            db.add(company)
+            db.add(CompanyMember(telegram_user_id=owner_id, company_id=company.id, role=ROLE_OWNER, status="active"))
+            db.commit()
+            db.refresh(company)
+        except Exception:
+            pass
     db.commit()
     db.refresh(company)
     _invalidate_caches(db, owner_id)
@@ -196,13 +250,34 @@ def redeem_invite(
     و /start inv_... من التخمين (كان الحماية في /join فقط)."""
     from app.database.crud import _invalidate_caches
 
+    def _clean_invite_token(t: str | None) -> str:
+        if not t:
+            return ""
+        try:
+            from app.rtl import strip_bidi_marks as _strip
+        except Exception:
+            import re as _re
+            _bidi_re = _re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+            def _strip(x: str) -> str:  # type: ignore
+                return _bidi_re.sub("", x)
+        cleaned = _strip(str(t))
+        cleaned = cleaned.strip().strip("`").strip()
+        cleaned = "".join(cleaned.split())
+        return cleaned
+
+    # تنظيف الرمز من RLM/LRM قبل أي معالجة (نسخ من backticks يحملها)
+    token = _clean_invite_token(token)
+
     # حدّ موحّد: فحص الحظر و is_rate_limited قبل أي معالجة
     try:
         from bot.ratelimit import is_join_blocked, is_rate_limited, register_join_denied
     except Exception:
-        is_join_blocked = lambda uid: False
-        is_rate_limited = lambda uid: False
-        register_join_denied = lambda uid: 0
+        def is_join_blocked(uid):
+            return False
+        def is_rate_limited(uid):
+            return False
+        def register_join_denied(uid):
+            return 0
 
     if is_join_blocked(telegram_user_id):
         return False, "تم حظرك مؤقتًا لكثرة المحاولات. حاول بعد 15 دقيقة."
@@ -211,7 +286,7 @@ def redeem_invite(
 
     if company_id_for_user(db, telegram_user_id) is not None:
         return False, "أنت عضو في شركة بالفعل."
-    inv = db.query(InviteLink).filter(InviteLink.token == (token or "").strip()).first()
+    inv = db.query(InviteLink).filter(InviteLink.token == token).first()
     if inv is None or inv.revoked:
         try:
             register_join_denied(telegram_user_id)
@@ -245,6 +320,12 @@ def redeem_invite(
             invited_by=inv.created_by,
         )
     )
+    # نقل سجلاته القديمة (company_id IS NULL) إلى الشركة الجديدة
+    try:
+        _backfill_company_id_for_user(db, telegram_user_id, inv.company_id)
+    except Exception:
+        # لا نكسر الانضمام بسبب فشل النقل
+        pass
     db.commit()
     _invalidate_caches(db, telegram_user_id)
     return True, get_company(db, inv.company_id)

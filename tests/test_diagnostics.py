@@ -129,10 +129,20 @@ class TestEncryptionCheck:
 class TestHealthCommand:
     def test_replies_report(self, monkeypatch, db_env):
         monkeypatch.setattr(handlers, "SessionLocal", lambda: db_env)
+        # health_command الآن مقيّد بالأدمن — اجعل المستخدم أدمن
+        monkeypatch.setattr("app.config.settings.admin_user_ids", [111])
         update, replies = _text_command_context()
         _run(handlers.health_command(update, SimpleNamespace()))
         assert replies
         assert "🩺 الفحص الصحي" in replies[0]
+
+    def test_rejects_non_admin(self, monkeypatch, db_env):
+        monkeypatch.setattr(handlers, "SessionLocal", lambda: db_env)
+        monkeypatch.setattr("app.config.settings.admin_user_ids", [999])
+        update, replies = _text_command_context()
+        _run(handlers.health_command(update, SimpleNamespace()))
+        assert replies
+        assert "للمسؤول فقط" in replies[0]
 
 
 class TestStatsCommand:

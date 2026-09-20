@@ -4,7 +4,6 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from dateutil import parser as date_parser
 from sqlalchemy.orm import Session
 
 from app.cache import clear as clear_cache
@@ -188,9 +187,10 @@ def _to_valid_amount(value, currency: str | None = None) -> Decimal | None:
     if d is None:
         return None
     try:
-        from app.validation import AMOUNT_MAX, AMOUNT_MIN
+        from app.validation import AMOUNT_MIN, get_amount_max
 
-        if d < AMOUNT_MIN or d > AMOUNT_MAX:
+        max_v = get_amount_max(currency)
+        if d < AMOUNT_MIN or d > max_v:
             return None
         if d <= 0:
             return None
@@ -221,20 +221,24 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 def parse_date_local(date_str: str) -> datetime | None:
-    """يحوّل نص تاريخ (صيغة ISO أو صيغة مرنة) إلى datetime بالتوقيت المحلي (UTC).
-
-    يتوافق مع كل إصدارات بايثون: نجرب أولاً صيغة صريحة "YYYY-MM-DD HH:MM[:SS]"
-    ثم dateutil المرن. القيمة الناتجة تُعتبر بالتوقيت المحلي وتُرجع كـ UTC.
-    """
+    """يحوّل نص تاريخ صارم إلى UTC (يرفض تواريخ فضفاضة مثل "10" أو "May")."""
     if not date_str:
         return None
     s = date_str.strip().replace("Z", "+00:00")
+    # رفض تواريخ قصيرة/فضفاضة (dateutil يتساهل ويُرجع 10 من الشهر أو May الحالي)
+    if len(s) < 8 or s.isdigit() or s.strip().lower() in ("may", "jun", "jul", "today", "tomorrow"):
+        # نسمح فقط بصيغ رقمية كاملة  YYYY-MM-DD...
+        if not any(c in s for c in ("-", "/", ":", "T")):
+            return None
     formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
         "%Y-%m-%d",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%Y/%m/%d",
     ]
     for fmt in formats:
         try:
@@ -242,15 +246,14 @@ def parse_date_local(date_str: str) -> datetime | None:
             return to_utc_naive(parsed)
         except ValueError:
             continue
-    # معالجة أي جزء زمني صريح (+00:00 إلخ)
     try:
         parsed = datetime.fromisoformat(s)
-    except ValueError:
-        try:
-            parsed = date_parser.parse(s)
-        except Exception:
+        # fromisoformat لا يزال متساهل لكن لا يقبل "May"
+        if parsed.year < 1900 or parsed.year > 2100:
             return None
-    return to_utc_naive(parsed)
+        return to_utc_naive(parsed)
+    except ValueError:
+        return None
 
 def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
     """يُستدعى بعد أي كتابة: يمسح الاستعلامات المؤقتة لكل من يرى بيانات هذا المستخدم.
@@ -267,15 +270,26 @@ def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
 
 
 def get_or_create_user_pref(db: Session, telegram_user_id: int):
+    from sqlalchemy.exc import IntegrityError
+
     from app.database.models import UserPref
 
     pref = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
-    if pref is None:
-        from app.timeutil import now_utc
+    if pref is not None:
+        return pref
+    from app.timeutil import now_utc
 
-        pref = UserPref(telegram_user_id=telegram_user_id, updated_at=now_utc())
-        db.add(pref)
+    pref = UserPref(telegram_user_id=telegram_user_id, updated_at=now_utc())
+    db.add(pref)
+    try:
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        # سباق concurrent: آخر أنشأه قبلك
+        pref = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
+        if pref is None:
+            raise
+    else:
         db.refresh(pref)
     return pref
 

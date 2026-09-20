@@ -23,8 +23,8 @@ from decimal import Decimal
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from app.database.crud.company import company_filter
 
+from app.database.crud.company import company_filter, report_company_filter
 from app.database.models import (
     BonusEvent,
     EmployeeBonusPlan,
@@ -62,12 +62,15 @@ def _category_like(category: str) -> str:
 
 
 def _bonus_category_filter():
-    """شرط SQL: التصنيف يطابق أيًا من أسماء البونس المتعارف عليها (نص عادي)."""
-    return or_(*[Transaction.category.ilike(_category_like(a), escape="\\") for a in BONUS_ALIASES])
+    """شرط SQL: التصنيف يطابق تمامًا أحد أسماء البونس (تمييز دقيق)."""
+    from sqlalchemy import func
+
+    # مطابقة تامة غير حساسة لحالة الأحرف، بلا % — تتجنب "تغليف هدايا" → بونس
+    return or_(*[func.lower(Transaction.category) == a.lower() for a in BONUS_ALIASES])
 
 
 def _base_currency_amount(tx) -> Decimal | None:
-    """المبلغ بعملة الأساس إن توثّقت (سعر صرف وقت التسجيل) وإلا المبلغ الأصلي."""
+    """المبلغ بعملة الأساس إن توثّق، وإلا None (لا تُخلط عملات)."""
     from app.config import settings
 
     base = (settings.base_currency or "").upper().strip()
@@ -77,6 +80,9 @@ def _base_currency_amount(tx) -> Decimal | None:
         and tx.amount_in_base_currency is not None
     ):
         return Decimal(str(tx.amount_in_base_currency))
+    # بلا مبلغ مثبّت و بعملة أجنبية → لا تُعدّه شيكل (يُحتسب 0 ويُفقد النقاط بدل خلط)
+    if tx.currency and tx.currency.upper() != base:
+        return None
     return tx.amount
 
 
@@ -90,14 +96,15 @@ def list_bonus_transactions(
     person: str | None = None,
     limit: int = 50,
 ) -> list[Transaction]:
-    """معاملات البونس (expense/income بتصنيف بونس) في فترة، عبر مساحة العمل."""
-    from app.database.crud import accessible_user_ids, get_period_range
+    """معاملات البونس (expense/income بتصنيف بونس) في فترة — يحترم report.view_all."""
+    from app.database.crud import get_period_range
+
 
     start, _end = get_period_range(period)
     q = (
         db.query(Transaction)
         .filter(
-            company_filter(db, telegram_user_id, Transaction),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             _bonus_category_filter(),
         )
@@ -148,9 +155,13 @@ def record_bonus_grant(
     description: str | None = None,
     raw_message: str | None = None,
 ) -> Transaction | None:
-    """يسجّل بونس/مكافأة كمعاملة بتصنيف "بونس" (expense منح/income استلام)."""
+    """يسجّل بونس/مكافأة كمعاملة بتصنيف "بونس" (expense منح/income استلام).
+
+    يرفض المبلغ غير الصالح (سالب/صفر/ضخم) قبل إنشاء المعاملة — بدل إنشاء
+    سجل بمبلغ NULL والإبلاغ "تم التسجيل" مع مبلغ "—".
+    """
     from app.audit import log_audit
-    from app.database.crud import _clean_person, _clean_text, create_transaction
+    from app.database.crud import _clean_person, _clean_text, _to_valid_amount, create_transaction
     from app.database.crud.company import has_permission
 
     if not has_permission(db, telegram_user_id, "budget.manage"):
@@ -158,12 +169,18 @@ def record_bonus_grant(
         return None
     if direction not in ("expense", "income"):
         direction = "expense"
+    # تحقق مبكر من المبلغ: سالب/صفر/ضخم → ارفض قبل create_transaction
+    # create_transaction كان يحوّل المبلغ غير الصالح إلى None ويُنشئ السجل مع مبلغ — ثم يبلغ البوت نجاحًا زائفًا
+    validated = _to_valid_amount(amount, currency=currency)
+    if validated is None:
+        log_audit(telegram_user_id, "denied_bonus_grant_invalid_amount", "bonus", detail=f"amount={amount!r} currency={currency!r}")
+        return None
     return create_transaction(
         db,
         telegram_user_id,
         {
             "type": direction,
-            "amount": amount,
+            "amount": validated,
             "currency": currency,
             "person": _clean_person(person),
             "category": BONUS_CATEGORY,
@@ -225,11 +242,9 @@ def create_bonus_event(
 def list_bonus_events(
     db: Session, telegram_user_id: int, status: str | None = None
 ) -> list[BonusEvent]:
-    """فعاليات المستخدم (أحدث أولًا) — عبر مساحة العمل — مع فلترة اختيارية بالحالة."""
-    from app.database.crud import accessible_user_ids
+    """فعاليات المستخدم (أحدث أولًا) — يحترم report.view_all."""
 
-    uids = accessible_user_ids(db, telegram_user_id)
-    q = db.query(BonusEvent).filter(company_filter(db, telegram_user_id, BonusEvent))
+    q = db.query(BonusEvent).filter(report_company_filter(db, telegram_user_id, BonusEvent))
     if status:
         q = q.filter(BonusEvent.status == status)
     return q.order_by(BonusEvent.id.desc()).all()
@@ -240,7 +255,6 @@ def set_bonus_event_status(
 ) -> BonusEvent | None:
     """يتحكم بحالة الفعالية (planned/active/ended) — يملكها أعضاء المساحة."""
     from app.audit import log_audit
-    from app.database.crud import accessible_user_ids
     from app.database.crud.company import has_permission
 
     if not has_permission(db, telegram_user_id, "budget.manage"):
@@ -248,7 +262,6 @@ def set_bonus_event_status(
         return None
     if status not in EVENT_STATUS_LABELS:
         return None
-    uids = accessible_user_ids(db, telegram_user_id)
     event = (
         db.query(BonusEvent)
         .filter(BonusEvent.id == event_id, company_filter(db, telegram_user_id, BonusEvent))
@@ -289,7 +302,7 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
 
     lo = event.start_at
     hi = event.end_at
-    uids = accessible_user_ids(db, event.telegram_user_id)
+    accessible_user_ids(db, event.telegram_user_id)
 
     granted_rows = (
         db.query(Transaction)
@@ -414,11 +427,9 @@ def create_employee_bonus_plan(
 def list_employee_bonus_plans(
     db: Session, telegram_user_id: int, include_disabled: bool = False
 ) -> list[EmployeeBonusPlan]:
-    """خطط مكافآت الموظفين (المفعّلة أولًا) — عبر مساحة العمل."""
-    from app.database.crud import accessible_user_ids
+    """خطط مكافآت الموظفين (المفعّلة أولًا) — يحترم report.view_all."""
 
-    uids = accessible_user_ids(db, telegram_user_id)
-    q = db.query(EmployeeBonusPlan).filter(company_filter(db, telegram_user_id, EmployeeBonusPlan))
+    q = db.query(EmployeeBonusPlan).filter(report_company_filter(db, telegram_user_id, EmployeeBonusPlan))
     if not include_disabled:
         q = q.filter(EmployeeBonusPlan.enabled.is_(True))
     return q.order_by(EmployeeBonusPlan.next_due_at.asc()).all()
@@ -429,13 +440,11 @@ def disable_employee_bonus_plan(
 ) -> EmployeeBonusPlan | None:
     """يعطّل خطة مكافأة موظف (لا حذف — لحفظ السجل التاريخي)."""
     from app.audit import log_audit
-    from app.database.crud import accessible_user_ids
     from app.database.crud.company import has_permission
 
     if not has_permission(db, telegram_user_id, "budget.manage"):
         log_audit(telegram_user_id, "denied_disable_bonus_plan", f"bonus_plan:{plan_id}", detail="budget.manage required")
         return None
-    uids = accessible_user_ids(db, telegram_user_id)
     plan = (
         db.query(EmployeeBonusPlan)
         .filter(EmployeeBonusPlan.id == plan_id, company_filter(db, telegram_user_id, EmployeeBonusPlan))
@@ -508,7 +517,7 @@ def _employee_bonus_monthly_spent(
       بعملة الأساس؛ عند تعذّر التوحيد نجمع عملة الأساس فقط (لا رقمًا مختلطًا).
     """
     from app.config import settings
-    from app.database.crud import _unified_totals_for_rows, accessible_user_ids
+    from app.database.crud import _unified_totals_for_rows
     from app.timeutil import now_local, to_utc_naive
 
     local_now = now if now is not None else now_local()
@@ -640,7 +649,7 @@ def loyalty_config_get(db: Session, telegram_user_id: int) -> LoyaltyConfig | No
     )
     if cfg is not None:
         return cfg
-    uids = accessible_user_ids(db, telegram_user_id)
+    accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyConfig)
         .filter(company_filter(db, telegram_user_id, LoyaltyConfig))
@@ -752,7 +761,7 @@ def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> Loya
     )
     if account is not None:
         return account
-    uids = accessible_user_ids(db, telegram_user_id)
+    accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
         .filter(
@@ -881,12 +890,10 @@ def loyalty_redeem_points(
 def list_loyalty_accounts(
     db: Session, telegram_user_id: int, limit: int = 20
 ) -> list[LoyaltyAccount]:
-    from app.database.crud import accessible_user_ids
 
-    uids = accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
-        .filter(company_filter(db, telegram_user_id, LoyaltyAccount))
+        .filter(report_company_filter(db, telegram_user_id, LoyaltyAccount))
         .order_by(LoyaltyAccount.points_balance.desc())
         .limit(limit)
         .all()

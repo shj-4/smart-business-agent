@@ -117,7 +117,6 @@ def generate_monthly_chart(
     # بنفس العملة الأساسية المطلوبة) — العقد الموحّد: live + stored
     converted = []
     all_zero = True
-    has_data = False
     for month in raw:
         stored = month.get("stored") if month.get("stored_base") == base else None
         live = month.get("live_by_currency") if month.get("stored_base") == base else None
@@ -129,14 +128,11 @@ def generate_monthly_chart(
             if (res.get("expense") is not None and res["expense"] != 0) or (
                 res.get("income") is not None and res["income"] != 0
             ):
-                has_data = True
                 all_zero = False
             continue
         if (res["expense"] or Decimal("0")) != 0 or (res["income"] or Decimal("0")) != 0:
-            has_data = True
             all_zero = False
             # قيمة صفرية حقيقية (ليست partial)
-            has_data = True
 
     if all_zero:
         return None
@@ -192,7 +188,7 @@ def _render_monthly_png(
         title_text = _reshape_ar(f"الإيرادات مقابل المصاريف — آخر {months} أشهر ({base})")
         ylabel_text = _reshape_ar(f"المبلغ ({base})")
         # تسميات المحور X قد تحتوي شهر عربي — شكّلها أيضًا
-        reshaped_labels = [_reshape_ar(str(l)) for l in labels]
+        reshaped_labels = [_reshape_ar(str(lbl)) for lbl in labels]
         ax.bar(
             [p - width / 2 for p in x_pos],
             incomes,
@@ -316,7 +312,6 @@ def generate_global_monthly_chart(db, months: int | None = None, base_currency: 
 
     converted = []
     all_zero = True
-    has_data = False
     for b in buckets:
         stored = b["stored"] if b["stored_base"] == base else None
         live = b.get("live_by_currency") if b.get("stored_base") == base else None
@@ -327,11 +322,9 @@ def generate_global_monthly_chart(db, months: int | None = None, base_currency: 
             if (res.get("expense") is not None and res["expense"] != 0) or (
                 res.get("income") is not None and res["income"] != 0
             ):
-                has_data = True
                 all_zero = False
             continue
         if (res["expense"] or 0) != 0 or (res["income"] or 0) != 0:
-            has_data = True
             all_zero = False
 
     if all_zero:

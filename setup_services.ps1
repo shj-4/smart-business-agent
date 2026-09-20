@@ -14,6 +14,10 @@ if (-not (Test-Path "$ROOT\bot.py"))       { Write-Error "bot.py not found: $ROO
 if (-not (Test-Path "$ROOT\start_bot.cmd")){ Write-Error "start_bot.cmd not found" }
 if (-not (Test-Path "$ROOT\start_api.cmd")){ Write-Error "start_api.cmd not found" }
 
+# إنشاء مجلد logs المطلوب لـ NSSM (كان في .gitignore ولا يُنشأ)
+if (-not (Test-Path "$ROOT\logs")) { New-Item -ItemType Directory -Path "$ROOT\logs" | Out-Null; Write-Host "  Created logs\" }
+if (-not (Test-Path "$ROOT\data\backups")) { New-Item -ItemType Directory -Path "$ROOT\data\backups" | Out-Null; Write-Host "  Created data\backups\" }
+
 Write-Host "== Removing old services (if any) =="
 foreach ($svc in 'SmartBusinessBot','SmartBot','SmartBotAPI') {
     $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -36,7 +40,8 @@ Write-Host "== Creating bot service: SmartBot =="
 & $NSSM set SmartBot AppRotateFiles 1
 & $NSSM set SmartBot AppRotateBytes 1048576
 & $NSSM set SmartBot Start SERVICE_AUTO_START
-& $NSSM set SmartBot ObjectName LocalSystem
+# لا تشغّل كـ LocalSystem مع مدخلات غير موثوقة (صور/PDF) — استخدم حسابًا محدودًا إن وجد
+try { $svcAccount = if ($env:SMART_BOT_SERVICE_ACCOUNT) { $env:SMART_BOT_SERVICE_ACCOUNT } else { "NT AUTHORITY\NetworkService" }; & $NSSM set SmartBot ObjectName $svcAccount | Out-Null; Write-Host "  SmartBot account: $svcAccount" } catch { & $NSSM set SmartBot ObjectName LocalSystem | Out-Null }
 Write-Host "  Created SmartBot"
 
 Write-Host "== Creating API service: SmartBotAPI =="
@@ -47,7 +52,7 @@ Write-Host "== Creating API service: SmartBotAPI =="
 & $NSSM set SmartBotAPI AppRotateFiles 1
 & $NSSM set SmartBotAPI AppRotateBytes 1048576
 & $NSSM set SmartBotAPI Start SERVICE_AUTO_START
-& $NSSM set SmartBotAPI ObjectName LocalSystem
+try { $svcAccount2 = if ($env:SMART_BOT_SERVICE_ACCOUNT) { $env:SMART_BOT_SERVICE_ACCOUNT } else { "NT AUTHORITY\NetworkService" }; & $NSSM set SmartBotAPI ObjectName $svcAccount2 | Out-Null; Write-Host "  SmartBotAPI account: $svcAccount2" } catch { & $NSSM set SmartBotAPI ObjectName LocalSystem | Out-Null }
 Write-Host "  Created SmartBotAPI"
 
 Write-Host "== Creating daily backup task: SmartBotBackup =="

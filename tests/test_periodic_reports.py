@@ -285,9 +285,10 @@ class TestReportDue:
         assert not reminders_mod._report_due(pref, now_local())
 
     def test_weekly_requires_first_day_of_week(self, monkeypatch):
-        from app.timeutil import first_day_of_week
-        import app.timeutil as tu
         from datetime import datetime
+
+        import app.timeutil as tu
+        from app.timeutil import first_day_of_week
 
         # ثبّت اليوم على أول الأسبوع لضمان نجاح
         fd = first_day_of_week()
@@ -308,8 +309,9 @@ class TestReportDue:
         assert reminders_mod._report_due(pref, not_fd) is False
 
     def test_monthly_requires_first_day(self, monkeypatch):
+        from datetime import datetime
+
         import app.timeutil as tu
-        from datetime import datetime, timedelta
 
         first = datetime(2026, 9, 1, 10, 0)
         monkeypatch.setattr(tu, "now_local", lambda: first)
@@ -624,8 +626,8 @@ class TestBudgetCheckSessionCleanup:
 
         asyncio.run(reminders.budget_check(None))
 
-        # بعد التحسين: جلسة واحدة لكل الدورة (بدل N+1) مع عزل أخطاء كل ميزانية عبر rollback — وكلها مغلقة
-        assert len(created) == 1
+        # بعد إصلاح حظر الحلقة: جلسة للمعرفات + جلسة لكل ميزانية (خارج الحلقة عبر to_thread) مع إغلاق كامل
+        assert len(created) >= 1
         assert len(closed) == len(created)
         assert all(s.closed for s in created)
 

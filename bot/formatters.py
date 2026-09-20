@@ -55,6 +55,10 @@ FIELD_LABELS = {
     "person": "الشخص",
     "description": "الوصف",
     "date": "الموعد",
+    "category": "التصنيف",
+    "priority": "الأولوية",
+    "recurrence": "التكرار",
+    "is_credit": "نوع الحركة",
 }
 
 MAX_MESSAGE_LEN = 4096  # حد تيليجرام لطول الرسالة الواحدة

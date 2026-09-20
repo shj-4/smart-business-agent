@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit
-from app.database.crud.company import company_filter
+from app.database.crud.company import company_filter, report_company_filter
 from app.database.models import (
     Budget,
     Transaction,
@@ -46,24 +46,12 @@ def create_budget(
 
     if not monthly_limit:
         return None
-    # معالجة "12 months" مقابل monthly فقط: إن كان النص يحتوي سنة/12 شهر نعتبره سنوي
-    # ونحوّل إلى شهري (يقسم على 12) — يحافظ على عقد الميزانية الشهرية
-    raw_limit_str = str(monthly_limit)
-    is_yearly = False
-    if any(k in raw_limit_str.lower() for k in ("year", "سنة", "12 months", "12 شهر")):
-        is_yearly = True
-    # أيضًا إن كان scope يحتوي yearly (مستقبلًا)
-    if scope == "yearly":
-        scope = "currency"
-        is_yearly = True
+    # لا نعالج "سنوي" عبر الاسم — الميزانية دائمًا شهرية؛ السنوية تُنشأ كـ 12× شهرية
     try:
         from app.database.crud.common import _quantize_for_currency
 
-        # تحديد العملة للتقريب قبل التكميم
         tmp_cur = currency
         raw_dec = Decimal(str(monthly_limit).split()[0] if " " in str(monthly_limit) else str(monthly_limit))
-        if is_yearly:
-            raw_dec = raw_dec / Decimal("12")
         limit = _quantize_for_currency(raw_dec, tmp_cur)
     except InvalidOperation:
         return None
@@ -128,7 +116,7 @@ def list_budgets(db: Session, telegram_user_id: int) -> list[Budget]:
 
     return (
         db.query(Budget)
-        .filter(company_filter(db, telegram_user_id, Budget))
+        .filter(report_company_filter(db, telegram_user_id, Budget))
         .order_by(Budget.created_at.asc())
         .all()
     )
@@ -138,7 +126,7 @@ def get_budget(db: Session, telegram_user_id: int, budget_id: int) -> Budget | N
     return (
         db.query(Budget)
         .filter(
-            company_filter(db, telegram_user_id, Budget),
+            report_company_filter(db, telegram_user_id, Budget),
             Budget.id == budget_id,
         )
         .first()
@@ -167,26 +155,8 @@ def budget_usage(db: Session, budget: Budget) -> dict:
 
 
     local_now = now_local()
-    # دعم "12 months" vs monthly فقط: إن كان اسم الميزانية يحتوي سنة/12 شهر
-    # نحسب استهلاك آخر 12 شهرًا بدل شهر واحد
-    is_yearly = False
-    try:
-        bname = (budget.name or "").lower()
-        if any(k in bname for k in ("year", "سنة", "12 months", "12 شهر", "سنوي")):
-            is_yearly = True
-    except Exception:
-        pass
-    if is_yearly:
-        # آخر 12 شهرًا: من أول الشهر قبل 11 شهرًا
-        y, m = local_now.year, local_now.month
-        for _ in range(11):
-            if m == 1:
-                y, m = y - 1, 12
-            else:
-                m -= 1
-        local_start = local_now.replace(year=y, month=m, day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # جميع الميزانيات شهرية فقط — السنوية تُحسب كـ 12 ميزانية شهرية منفصلة
+    local_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     start = to_utc_naive(local_start)
 
     q = db.query(Transaction).filter(

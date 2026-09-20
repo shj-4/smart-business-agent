@@ -13,6 +13,7 @@
 يُفعَّل تلقائيًا عند تشغيل البوت عبر bot.py → register_handlers.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -92,7 +93,7 @@ async def overdue_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
 
             # بناء رسالة التذكير
-            lines = ["⚠️ **لديك مهام متأخرة:**\n"]
+            lines = ["لديك مهام متأخرة:\n"]
             for i, t in enumerate(overdue_tasks, 1):
                 due_str = ""
                 if t.due_date:
@@ -100,9 +101,11 @@ async def overdue_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
                     due_local = to_local_naive(t.due_date)
                     due_str = f" (موعد: {due_local.strftime('%Y-%m-%d %H:%M')})"
-                lines.append(f"{i}. {t.description}{due_str}")
+                # إزالة Markdown (** و `) لأن الإرسال بلا parse_mode لتجنب BadRequest مع نصوص المستخدم
+                safe_desc = str(t.description).replace("*", "").replace("`", "").replace("[", "").replace("_", " ")
+                lines.append(f"{i}. {safe_desc}{due_str}")
 
-            lines.append("\nأرسل `شو المهام المتأخرة؟` لعرضها بالتفصيل.")
+            lines.append("\nأرسل: شو المهام المتأخرة؟ لعرضها بالتفصيل.")
 
             message = "\n".join(lines)
 
@@ -156,25 +159,10 @@ WARNING_THRESHOLD = 0.8  # تنبيه اقتراب عند تجاوز 80%
 
 
 async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يفحص كل الميزانيات الشهرية ويرسل تنبيهات (اقتراب/تجاوز).
-
-    يُنفَّذ مع بقية المهام الدورية. لكل ميزانية:
-    - إذا تغيّر الشهر (month_key) → إعادة ضبط حالة التنبيه.
-    - إذا الاستهلاك ≥ السقف ولم يُنبه بالتجاوز بعد → تنبيه "تجاوز".
-    - وإلا إذا الاستهلاك ≥ 80% ولم يُنبه بالاقتراب → تنبيه "اقتراب".
-
-    تُعالَج كل ميزانية مرة واحدة بالضبط لكل دورة: بدل التكرار على مالكي
-    الميزانيات ثم list_budgets (الذي يوسّع لكل أعضاء المساحة)، والذي كان
-    يُعيد الميزانية نفسها مرة واحدة لكل مبتدئ ميزانية في المساحة — فتُحسب
-    N مرات دون داعٍ، وتحتمل أي تعديل مستقبلي تكرار تنبيهات فعلية.
-
-    تحسين الأداء: جلسة DB واحدة لكل الدورة (بدل N اتصالات كل 15 دقيقة) مع
-    عزل أخطاء كل ميزانية عبر try/rollback و commit دوري. مع مئات الميزانيات
-    كان النمط السابق `for bid: db=SessionLocal()` مكلفًا.
-    """
-    from app.database.crud import budget_monthly_reset, budget_usage
+    """يفحص كل الميزانيات الشهرية ويرسل تنبيهات (اقتراب/تجاوز) دون حظر الحلقة."""
     from app.database.models import Budget
 
+    # جلب المعرفات فقط بجلسة قصيرة (سريعة)
     db = SessionLocal()
     try:
         try:
@@ -185,26 +173,51 @@ async def budget_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             logger.exception("خطأ في جلب الميزانيات")
             return
-
-        for bid in budget_ids:
-            try:
-                budget = db.query(Budget).filter(Budget.id == bid).first()
-                if budget is None:
-                    continue
-                budget_monthly_reset(db, budget)
-                usage = budget_usage(db, budget)
-                await _notify_budget(context, db, budget, usage)
-            except Exception:
-                logger.exception("خطأ في فحص ميزانية #%s", bid)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
     finally:
         try:
             db.close()
         except Exception:
             pass
+
+    for bid in budget_ids:
+        try:
+            # العمل الثقيل (فك تشفير + تحويل عملات) خارج الحلقة
+            def _eval(_bid=bid):  # noqa: B023
+                s = SessionLocal()
+                try:
+                    b = s.query(Budget).filter(Budget.id == _bid).first()
+                    if b is None:
+                        return None
+                    from app.database.crud import budget_monthly_reset, budget_usage
+
+                    budget_monthly_reset(s, b)
+                    usage = budget_usage(s, b)
+                    # نحتاج نسخ البيانات قبل إغلاق الجلسة
+                    return (b.id, usage)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            result = await asyncio.to_thread(_eval)
+            if result is None:
+                continue
+            bid_real, usage = result
+            # الإشعار يحتاج جلسة لإرسال + تحديث alerted_status
+            db2 = SessionLocal()
+            try:
+                budget = db2.query(Budget).filter(Budget.id == bid_real).first()
+                if budget is None:
+                    continue
+                await _notify_budget(context, db2, budget, usage)
+            finally:
+                try:
+                    db2.close()
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("خطأ في فحص ميزانية #%s", bid)
 
 
 async def _broadcast_budget_alert(
@@ -372,18 +385,7 @@ def setup_invoice_check(app: Application) -> None:
 
 
 async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني عند تحقيقه (مرة واحدة لكل مستوى).
-
-    مثل الميزانيات: يُعاد ضبط حالة التنبيه عند تغيّر الشهر المحلي
-    (credit_monthly_reset) — فلا يعلّق السقف المارَّ التنبيهات للأبد.
-
-    تُعالَج كل حدود ائتمانية مرة واحدة بالضبط لكل دورة — كما في budget_check
-    (الوضع السابق كان يكرر الحساب مرة لكل منشئ حدّ في المساحة المشتركة).
-
-    تحسين الأداء: جلسة واحدة لكل الدورة بدل N اتصالات كل 15 دقيقة، مع عزل
-    أخطاء كل حدّ عبر rollback.
-    """
-    from app.database.crud import credit_monthly_reset, credit_usage
+    """يرسل تنبيه اقتراب/تجاوز لكل حد ائتماني دون حظر الحلقة."""
     from app.database.models import CreditLimit
 
     db = SessionLocal()
@@ -395,31 +397,52 @@ async def credit_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             logger.exception("خطأ في جلب الحدود الائتمانية")
             return
-
-        for lid in limit_ids:
-            try:
-                limit_row = db.query(CreditLimit).filter(CreditLimit.id == lid).first()
-                if limit_row is None:
-                    continue
-                credit_monthly_reset(db, limit_row)
-                usage = credit_usage(db, limit_row)
-                # عملات متعددة بلا توحيد (لا أسعار) — لا نبني رقمًا مختلطًا ولا ننبه عليه
-                if not usage.get("unified_ok"):
-                    continue
-                if not usage.get("amount") or usage.get("limit", 0) <= 0:
-                    continue
-                await _notify_credit(context, db, limit_row, usage)
-            except Exception:
-                logger.exception("خطأ في فحص حد ائتماني #%s", lid)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
     finally:
         try:
             db.close()
         except Exception:
             pass
+
+    for lid in limit_ids:
+        try:
+            def _eval(_lid=lid):  # noqa: B023
+                s = SessionLocal()
+                try:
+                    row = s.query(CreditLimit).filter(CreditLimit.id == _lid).first()
+                    if row is None:
+                        return None
+                    from app.database.crud import credit_monthly_reset, credit_usage
+
+                    credit_monthly_reset(s, row)
+                    usage = credit_usage(s, row)
+                    return (row.id, usage)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            result = await asyncio.to_thread(_eval)
+            if result is None:
+                continue
+            rid, usage = result
+            if not usage.get("unified_ok"):
+                continue
+            if not usage.get("amount") or usage.get("limit", 0) <= 0:
+                continue
+            db2 = SessionLocal()
+            try:
+                limit_row = db2.query(CreditLimit).filter(CreditLimit.id == rid).first()
+                if limit_row is None:
+                    continue
+                await _notify_credit(context, db2, limit_row, usage)
+            finally:
+                try:
+                    db2.close()
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("خطأ في فحص حد ائتماني #%s", lid)
 
 
 async def _notify_credit(
@@ -542,8 +565,8 @@ def _report_due(pref: ReportPref, now_local_dt: datetime) -> bool:
 
 
 async def periodic_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل التقارير الدورية للمستخدمين الذين فعّلوها (عند استحقاق الموعد)."""
-    from app.database.crud import list_report_prefs, mark_report_sent
+    """يرسل التقارير الدورية دون حظر الحلقة ومع تعويض الفائت."""
+    from app.database.crud import list_report_prefs
     from app.timeutil import now_local
     from bot.reports import build_periodic_summary
 
@@ -551,26 +574,103 @@ async def periodic_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     db = SessionLocal()
     try:
         prefs = list_report_prefs(db)
+        prefs_data = [(p.telegram_user_id, p.frequency, p.last_sent_at, p.deliver_time) for p in prefs]
     except Exception:
         logger.exception("خطأ في جلب تفضيلات التقارير")
-        db.close()
-        return
-
-    for pref in prefs:
         try:
-            if not _user_pref_flag(db, pref.telegram_user_id, "notif_periodic_report"):
+            db.close()
+        except Exception:
+            pass
+        return
+    try:
+        db.close()
+    except Exception:
+        pass
+
+    for uid, freq, _last_sent, _deliver in prefs_data:
+        try:
+            # تحميل تفضيل طازج للتحقق من _report_due مع منطق التعويض
+            def _check(u):
+                s = SessionLocal()
+                try:
+                    from app.database.crud import get_report_pref
+
+                    pref = get_report_pref(s, u)
+                    if pref is None:
+                        return False, None
+                    return _report_due(pref, now_dt) or _report_due_with_catchup(pref, now_dt), pref
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            due, pref_obj = await asyncio.to_thread(_check, uid)
+            if not due or pref_obj is None:
                 continue
-            if not _report_due(pref, now_dt):
-                continue
-            message = build_periodic_summary(
-                db, pref.telegram_user_id, pref.frequency, now_dt=now_dt
-            )
-            await context.bot.send_message(chat_id=pref.telegram_user_id, text=message)
-            mark_report_sent(db, pref)
-            logger.info("أُرسل التقرير %s للمستخدم %s", pref.frequency, pref.telegram_user_id)
+            db_tmp = SessionLocal()
+            try:
+                if not _user_pref_flag(db_tmp, uid, "notif_periodic_report"):
+                    continue
+            finally:
+                try:
+                    db_tmp.close()
+                except Exception:
+                    pass
+
+            def _build(u, f, ndt):
+                s = SessionLocal()
+                try:
+                    return build_periodic_summary(s, u, f, now_dt=ndt)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            message = await asyncio.to_thread(_build, uid, freq, now_dt)
+            await context.bot.send_message(chat_id=uid, text=message)
+            # حدث last_sent في جلسة جديدة
+            def _mark(u):
+                s = SessionLocal()
+                try:
+                    from app.database.crud import get_report_pref, mark_report_sent
+
+                    p = get_report_pref(s, u)
+                    if p:
+                        mark_report_sent(s, p)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+            await asyncio.to_thread(_mark, uid)
+            logger.info("أُرسل التقرير %s للمستخدم %s", freq, uid)
         except Exception as exc:
-            logger.error("فشل إرسال التقرير الدوري للمستخدم %s: %s", pref.telegram_user_id, exc)
-    db.close()
+            logger.error("فشل إرسال التقرير الدوري للمستخدم %s: %s", uid, exc)
+
+
+def _report_due_with_catchup(pref: ReportPref, now_local_dt: datetime) -> bool:
+    """تعويض التقرير الفائت إذا كان البوت متوقفًا يوم الاستحقاق (خلال 48h)."""
+    try:
+        from app.timeutil import to_local_naive
+
+        if pref.last_sent_at is None:
+            return False
+        last_local = to_local_naive(pref.last_sent_at)
+        if pref.frequency == "weekly":
+            # إذا مضى أسبوع ولم يُرسل (بسبب توقف)، عوض خلال يومين
+            if (now_local_dt.date() - last_local.date()).days >= 7:
+                return (now_local_dt.date() - last_local.date()).days < 9
+        if pref.frequency == "monthly":
+            if (now_local_dt.year, now_local_dt.month) != (last_local.year, last_local.month):
+                # فائت هذا الشهر ولم يُرسل بعد، عوض خلال أول 3 أيام
+                if now_local_dt.day <= 3:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def setup_periodic_reports(app: Application) -> None:
@@ -593,54 +693,104 @@ _LAST_DEVIATION_SENT: dict[int, str] = {}
 
 
 async def deviation_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يرسل تنبيهًا يوميًا واحدًا لكل مساحة عمل عند انحراف شهرٍ فوق حدٍّ.
-
-    يحترم صلاحية report.view_all وتفضيل notif_deviation لكل عضو.
-    يتجاهل التنبيه إذا الشهر لم يكتمل بعد (month_partial) ومر أقل من 50%
-    منه — يمنع ضجيج −95% في أول أيام الشهر.
-    """
-    from app.database.crud import accessible_user_ids, deviation_summary, user_ids_with_data
+    """يرسل تنبيهًا يوميًا واحدًا لكل فضاء عمل (dedupe per workspace) دون حظر الحلقة."""
+    from app.database.crud import deviation_summary, user_ids_with_data
     from app.database.crud.company import has_permission
 
+    # خريطة workspace -> representative uid لمنع N إرسالات
     db = SessionLocal()
     try:
         today = now_utc().strftime("%Y-%m-%d")
-        for uid in user_ids_with_data(db):
-            try:
-                summary = deviation_summary(db, uid)
-                # تجاهل الانحراف إذا الشهر ما زال جزئيًا (بداية الشهر يعطي −95%)
-                if summary.get("month_partial") and summary.get("month_elapsed_pct", 100) < 50:
-                    continue
-                flagged = [d for d in summary["deviations"] if d.get("significant")]
-                if not flagged or _LAST_DEVIATION_SENT.get(uid) == today:
-                    continue
-
-                msg = (
-                    "🚨 انحراف واضح في إنفاقاتك هذا الشهر\n\n"
-                    + "\n".join(
-                        f"• {('مصاريف' if d['kind'] == 'expense' else 'إيرادات')} ({d['currency']}): {d['pct']}%"
-                        for d in flagged
-                    )
-                    + "\n\nللمفاصلة: /deviation"
-                )
-                sent_any = False
-                for member in accessible_user_ids(db, uid):
-                    if not has_permission(db, member, "report.view_all") and member != uid:
-                        # العضو بلا view_all يرى بياناته فقط، لا انحراف زميله
-                        continue
-                    if not _user_pref_flag(db, member, "notif_deviation"):
-                        continue
-                    try:
-                        await context.bot.send_message(chat_id=member, text=msg)
-                        sent_any = True
-                    except Exception:  # noqa: BLE001
-                        logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
-                if sent_any:
-                    _LAST_DEVIATION_SENT[uid] = today
-            except Exception:  # noqa: BLE001
-                logger.exception("خطأ في حسابات الانحراف للمستخدم %s", uid)
+        # حمّل كل uid ثم حدّد representative لكل workspace
+        all_uids = user_ids_with_data(db)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    # اجمع workspaces
+    seen_ws: set = set()
+    for uid in all_uids:
+        # حدد anchor للمساحة
+        def _anchor(u):
+            s = SessionLocal()
+            try:
+                from app.database.crud import workspace_for_user
+
+                return workspace_for_user(s, u) or u
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+        anchor = await asyncio.to_thread(_anchor, uid)
+        if anchor in seen_ws:
+            continue
+        seen_ws.add(anchor)
+        if _LAST_DEVIATION_SENT.get(anchor) == today:
+            continue
+
+        def _calc(u):
+            s = SessionLocal()
+            try:
+                return deviation_summary(s, u)
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+        summary = await asyncio.to_thread(_calc, uid)
+        if summary.get("month_partial") and summary.get("month_elapsed_pct", 100) < 50:
+            continue
+        flagged = [d for d in summary["deviations"] if d.get("significant")]
+        if not flagged:
+            continue
+
+        msg = (
+            "🚨 انحراف واضح في إنفاقاتك هذا الشهر\n\n"
+            + "\n".join(
+                f"• {('مصاريف' if d['kind'] == 'expense' else 'إيرادات')} ({d['currency']}): {d['pct']}%"
+                for d in flagged
+            )
+            + "\n\nللمفاصلة: /deviation"
+        )
+        # إرسال لكل أعضاء المساحة مرة واحدة
+        def _members(u):
+            s = SessionLocal()
+            try:
+                from app.database.crud import accessible_user_ids
+
+                return list(accessible_user_ids(s, u))
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+        members = await asyncio.to_thread(_members, uid)
+        sent_any = False
+        for member in members:
+            db2 = SessionLocal()
+            try:
+                if not has_permission(db2, member, "report.view_all") and member != uid:
+                    continue
+                if not _user_pref_flag(db2, member, "notif_deviation"):
+                    continue
+            finally:
+                try:
+                    db2.close()
+                except Exception:
+                    pass
+            try:
+                await context.bot.send_message(chat_id=member, text=msg)
+                sent_any = True
+            except Exception:
+                logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
+        if sent_any:
+            _LAST_DEVIATION_SENT[anchor] = today
 
 
 def setup_deviation_check(app: Application) -> None:
@@ -675,8 +825,11 @@ def build_proactive_digest(db: Session, uid: int, *, days_ahead: int = PROACTIVE
     يرجع None إذا لم يكن هناك ما يستحق التنبيه (لا رسالة فارغة). الفترة الآتية
     تُحسب بحدود local → UTC عبر to_utc_naive. الأسماء/المبالغ من القاعدة — ليست
     نصوصًا قابلة للتنفيذ.
+
+    يحترم report.view_all: من لا يملكها يرى مهامه وفواتيره فقط.
     """
-    from app.database.crud import accessible_user_ids, budget_usage, list_budgets
+    from app.database.crud import budget_usage, list_budgets
+    from app.database.crud.company import report_company_filter
     from app.timeutil import to_local_naive, to_utc_naive
 
     now = now_local()
@@ -694,12 +847,10 @@ def build_proactive_digest(db: Session, uid: int, *, days_ahead: int = PROACTIVE
             return "قريبًا"
         return None
 
-    ids = accessible_user_ids(db, uid)
-
     tasks = (
         db.query(Task)
         .filter(
-            Task.telegram_user_id.in_(ids),
+            report_company_filter(db, uid, Task),
             Task.deleted_at.is_(None),
             Task.status.in_(["pending", "overdue"]),
         )
@@ -722,7 +873,7 @@ def build_proactive_digest(db: Session, uid: int, *, days_ahead: int = PROACTIVE
     invoices = (
         db.query(Invoice)
         .filter(
-            Invoice.telegram_user_id.in_(ids),
+            report_company_filter(db, uid, Invoice),
             Invoice.status.in_(["pending", "overdue"]),
         )
         .all()
@@ -815,15 +966,15 @@ BACKUP_INTERVAL_HOURS = 24
 
 
 async def daily_backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """نسخة احتياطية يومية من قاعدة SQLite عبر خدمة app.database.backup."""
+    """نسخة احتياطية يومية دون حظر الحلقة."""
     from app.database.backup import _has_backup_for_today, run_backup
 
-    # لا تنشئ نسخة ثانية في نفس اليوم ولا بعد كل إعادة تشغيل — واحدة يوميًا
     try:
-        if _has_backup_for_today():
+        has = await asyncio.to_thread(_has_backup_for_today)
+        if has:
             logger.info("تخطي النسخ الاحتياطي اليومي — نسخة اليوم موجودة بالفعل")
             return
-        run_backup()
+        await asyncio.to_thread(run_backup)
     except Exception:
         logger.exception("فشل النسخ الاحتياطي اليومي")
 

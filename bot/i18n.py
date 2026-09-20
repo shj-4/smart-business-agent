@@ -16,7 +16,7 @@
 
 from collections import OrderedDict
 
-from bot.icons import BACK, EXPENSE, HOME, NEW, TASK
+from bot.icons import BACK, EXPENSE, HOME, NEW, TASK, WARNING
 
 _STRINGS: dict[str, dict[str, str]] = {
     "main_title": {
@@ -34,20 +34,24 @@ _STRINGS: dict[str, dict[str, str]] = {
     "btn_tasks": {"ar": f"{TASK} مهامي", "en": f"{TASK} My tasks"},
     "btn_tools": {"ar": "🧰 أدوات", "en": "🧰 Tools"},
     "btn_settings": {"ar": "⚙️ الإعدادات", "en": "⚙️ Settings"},
-    "tools_title": {"ar": "🧰 أدوات — اختر:", "en": "🧰 Tools — choose:"},
-    "btn_edit_last": {"ar": "✏️ تعديل آخر سجل", "en": "✏️ Edit last record"},
+    "tools_title": {"ar": "🧰 صندوق الأدوات ✨ — كل شيء بضغطتين", "en": "🧰 Toolbox ✨ — everything in two taps"},
+    "btn_edit_last": {"ar": "✏️ تعديل آخر سجل", "en": "✏️ Edit last"},
     "btn_budget": {"ar": f"{EXPENSE} الميزانيات", "en": f"{EXPENSE} Budgets"},
-    "btn_finance": {"ar": "💳 بطاقة الذمم الموحّدة", "en": "💳 Unified ledger card"},
-    "btn_chart": {"ar": "📈 الرسم البياني", "en": "📈 Chart"},
-    "btn_kpi": {"ar": "🧭 لوحة مؤشرات الأداء", "en": "🧭 KPI dashboard"},
+    "btn_finance": {"ar": "💳 الذمم الموحّدة", "en": "💳 Unified ledger"},
+    "btn_debts": {"ar": "💳 الديون", "en": "💳 Debts"},
+    "btn_invoices": {"ar": "🧾 الفواتير", "en": "🧾 Invoices"},
+    "btn_orders": {"ar": "🛒 طلبياتي", "en": "🛒 Orders"},
+    "btn_credit": {"ar": f"{WARNING} الحدود", "en": f"{WARNING} Limits"},
+    "btn_chart": {"ar": "📈 الرسم", "en": "📈 Chart"},
+    "btn_kpi": {"ar": "🧭 المؤشرات", "en": "🧭 KPIs"},
     "btn_export": {"ar": "📦 تصدير Excel", "en": "📦 Export Excel"},
     "btn_export_pdf": {"ar": "📄 تصدير PDF", "en": "📄 Export PDF"},
-    "btn_summary": {"ar": "🧾 تقرير شامل", "en": "🧾 Summary report"},
-    "btn_convert": {"ar": "💱 تحويل عملة", "en": "💱 Convert currency"},
-    "btn_workspace": {"ar": "🏢 المساحة المشتركة", "en": "🏢 Shared workspace"},
+    "btn_summary": {"ar": "🧾 تقرير شامل", "en": "🧾 Summary"},
+    "btn_convert": {"ar": "💱 تحويل عملة", "en": "💱 Convert"},
+    "btn_workspace": {"ar": "🏢 مساحتي", "en": "🏢 Workspace"},
     "btn_bonus": {"ar": "🎁 البونس والنقاط", "en": "🎁 Bonus & points"},
     "btn_search": {"ar": "🔍 بحث", "en": "🔍 Search"},
-    "btn_history": {"ar": "🕘 آخر العمليات", "en": "🕘 Recent records"},
+    "btn_history": {"ar": "🕘 آخر العمليات", "en": "🕘 Recent"},
     "btn_back": {"ar": f"{BACK} رجوع", "en": f"{BACK} Back"},
     "btn_home": {"ar": f"{HOME} القائمة الرئيسية", "en": f"{HOME} Main menu"},
     "lang_prompt": {

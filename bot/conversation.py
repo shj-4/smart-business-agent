@@ -51,9 +51,47 @@ from bot.formatters import (
     safe_reply,
 )
 from bot.icons import BACK, SUCCESS
-from bot.ratelimit import is_rate_limited
+from bot.ratelimit import (
+    check_and_increment_daily,
+    is_daily_limited,
+    is_rate_limited,
+    is_user_allowed,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_allowed_or_reply(update: Update) -> tuple[bool, str | None]:
+    """يتحقق من قائمة السماح للمستخدم.
+
+    يعيد (True, None) إذا مسموح، وإلا (False, رسالة_السبب).
+    الحصة اليومية تُفحص منفصلة قبل استدعاء Gemini.
+    """
+    try:
+        uid = update.effective_user.id if update.effective_user else None
+        if uid is None:
+            return False, "تعذر تحديد المستخدم."
+        if not is_user_allowed(uid):
+            try:
+                from app.config import settings
+                token_set = bool((getattr(settings, "registration_token", "") or "").strip())
+                allowed_set = bool(getattr(settings, "allowed_user_ids", []))
+            except Exception:
+                token_set, allowed_set = False, False
+            if token_set:
+                return False, (
+                    "عذرًا، ليس لديك صلاحية استخدام هذا البوت.\n"
+                    "أرسل رمز التسجيل عبر: /register <الرمز>\n"
+                    "تواصل مع الإدارة للحصول على الرمز."
+                )
+            elif allowed_set:
+                return False, "عذرًا، ليس لديك صلاحية استخدام هذا البوت. تواصل مع الإدارة لإضافتك إلى قائمة السماح."
+            else:
+                return False, "عذرًا، ليس لديك صلاحية استخدام هذا البوت."
+    except Exception as e:
+        logger.warning("فشل فحص الصلاحية: %s", e)
+    return True, None
+
 
 # حالات المحادثة
 COLLECT = 1  # ننتظر إكمال بيانات ناقصة
@@ -64,7 +102,7 @@ QUICK_ACTIONS = InlineKeyboardMarkup([
     [InlineKeyboardButton("📊 أسئلة مالية", callback_data="menu:reports"), InlineKeyboardButton("💱 تحويل عملة", callback_data="tool:convert")],
 ])
 
-_AMOUNT_RE = re.compile(r"(?P<num>\d+(?:[.,]\d+)?)\s*(?P<cur>[\u0600-\u06FF\w]+)?")
+_AMOUNT_RE = re.compile(r"(?P<num>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<cur>[\u0600-\u06FF\w]+)?")
 
 # النوع (من نتيجة التحليل) → نموذج /edit (نفس حقول محادثة /edit)
 _CONFIRM_TYPE_MODEL = {
@@ -96,10 +134,17 @@ def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | 
     """يطبّق قيمة نصّية على حقل في نتائج التأكيد. يُعيد (result, خطأ|None)."""
     value = raw.strip()
     if field == "amount":
-        m = _AMOUNT_RE.match(value)
+        # توحيد الفواصل قبل المطابقة
+        arabic_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+        v_norm = value.translate(arabic_digits).replace("\u066c", ",").replace("٫", ".")
+        if re.search(r"\d{1,3}(,\d{3})+(\.\d+)?", v_norm):
+            v_norm = v_norm.replace(",", "")
+        elif "," in v_norm and "." not in v_norm:
+            v_norm = v_norm.replace(",", ".")
+        m = _AMOUNT_RE.match(v_norm)
         if not m:
             return result, "لم أتعرف على رقم صالح. مثال: 300 أو 300.5"
-        num = m.group("num").replace(",", ".")
+        num = m.group("num").replace(",", "")
         try:
             amount = Decimal(num)
         except DecimalInvalidOperation:
@@ -170,18 +215,22 @@ def parse_budget_text(scope: str, raw: str) -> dict | None:
 
 
 def parse_convert_text(raw: str) -> dict | None:
-    """يقرأ "المبلغ من إلى" بصيغة حرة. يعيد {amount, from, to} أو None."""
+    """يقرأ "المبلغ من إلى" بصيغة حرة — بحدود كلمات للروابط."""
     from app.database.crud import CURRENCY_ALIASES
     from app.exchange import CURRENCY_NAMES
 
     text = (raw or "").strip().strip("?؟")
-    nums = re.findall(r"\d+(?:[.,]\d+)?", text)
+    # إزالة فواصل آلاف قبل التقاط الأرقام
+    tmp = text.replace("\u066c", ",")
+    if re.search(r"\d{1,3}(,\d{3})+", tmp):
+        tmp = tmp.replace(",", "")
+    nums = re.findall(r"\d+(?:\.\d+)?", tmp)
     if not nums:
         return None
-    amount = Decimal(nums[0].replace(",", "."))
-    stripped = re.sub(r"\d+(?:[.,]\d+)?", " ", text)
+    amount = Decimal(nums[0])
+    stripped = re.sub(r"\d+(?:\.\d+)?", " ", tmp)
     for connector in _CONVERT_CONNECTORS:
-        stripped = stripped.replace(connector, " ")
+        stripped = re.sub(r"\b" + re.escape(connector) + r"\b", " ", stripped)
     tokens = [t for t in stripped.split() if t]
 
     codes: list[str] = []
@@ -214,9 +263,12 @@ _GREETING_RE = re.compile(
 
 
 def parse_rate_question(raw: str) -> dict | None:
-    """يكتشف سؤال سعر صرف بلا مبلغ: "كم صرف شيكل على دينار" → {"from": "ILS", "to": "JOD"}."""
+    """يكتشف سؤال سعر صرف بلا مبلغ — بمطابقة كلمات كاملة وتجاهل أسئلة الإنفاق."""
     text = (raw or "").strip().strip("?؟!.")
     if not text or len(text) < 4:
+        return None
+    # تجاهل أسئلة المصاريف "كم صرفت..." (فعل ماضٍ + عملات في نفس الجملة)
+    if re.search(r"كم\s*صرفت", text):
         return None
     if _RATE_KEYWORDS.search(text):
         from app.database.crud import CURRENCY_ALIASES
@@ -230,8 +282,13 @@ def parse_rate_question(raw: str) -> dict | None:
             if code is None:
                 code = t.upper() if t.upper() in CURRENCY_NAMES else None
             if code is None:
+                # مطابقة كلمة كاملة فقط بحدود كلمات، لا substring داخل "Sarah"
                 for alias, acode in CURRENCY_ALIASES.items():
-                    if alias in low and len(alias) >= 2:
+                    if len(alias) <= 3:
+                        if re.search(r"\b" + re.escape(alias) + r"\b", low):
+                            code = acode
+                            break
+                    elif alias == low or alias in low.split():
                         code = acode
                         break
             if code and code not in codes:
@@ -456,8 +513,8 @@ def _do_save(
         return None
 
     # طبقة صلاحيات موحّدة: record.create للإنشاء، و edit للعمليات
-    from app.database.crud.company import has_permission
     from app.audit import log_audit
+    from app.database.crud.company import has_permission
 
     if data_type in ("expense", "income", "task", "order", "note"):
         if not has_permission(db, telegram_user_id, "record.create"):
@@ -522,6 +579,25 @@ def missing_fields_for(result: dict) -> list[str]:
     if data_type in ("expense", "income"):
         if result.get("amount") is None:
             missing.append("amount")
+        # العملة: لا نطلبها إن لم يذكرها المستخدم (تُستخدم عملة الأساس)، لكن إن ذكر عملة
+        # غير مفهومة (يوان/BTC/ريال المبهمة أو IQD خارج القائمة) يجب أن نطلبها.
+        # الكشف عبر: currency is None مع وجود خام محفوظ أو flag في missing_fields
+        if result.get("currency") is None:
+            raw = (
+                result.get("currency_raw")
+                or result.get("_raw_currency")
+                or result.get("raw_currency")
+            )
+            mf = result.get("missing_fields") or []
+            # حالة 1: خام محفوظ غير فارغ (يوان/BTC/ريال...) → غير معروف
+            if raw and str(raw).strip():
+                if "currency" not in missing:
+                    missing.append("currency")
+            # حالة 2: sanitize/schemas وضعت currency في missing_fields صراحةً
+            elif "currency" in mf:
+                if "currency" not in missing:
+                    missing.append("currency")
+            # لا نضيف currency إذا لم يكن هناك خام ولا flag (يعني المستخدم لم يذكر عملة أصلاً)
     elif data_type == "task":
         if not result.get("description") and not result.get("person"):
             missing.append("description")
@@ -632,8 +708,45 @@ async def _handle_record_result(
         return None
 
     if data_type == "complete_task":
+        from app.database.crud import find_pending_tasks
         from bot.menus import MAIN_HOME_KEYBOARD
 
+        hint = (result.get("description") or "").strip()
+        # قصير جدًا → اطلب توضيح
+        if len(hint) < 3:
+            await update.message.reply_text(
+                "وصف المهمة قصير جدًا — أرسل وصفًا أدق (3 أحرف على الأقل) أو اختر من /menu → مهامي.",
+                reply_markup=MAIN_HOME_KEYBOARD,
+            )
+            return None
+        # تعدد المطابقات → اعرض قائمة اختيار بدل إنجاز أول تطابق (الأحدث) عشوائيًا
+        def _find_candidates():
+            db = SessionLocal()
+            try:
+                return find_pending_tasks(db, update.effective_user.id, hint)
+            finally:
+                db.close()
+
+        candidates = await asyncio.to_thread(_find_candidates)
+        if len(candidates) > 1:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            rows = [
+                [InlineKeyboardButton(f"✅ {c.description[:40]}", callback_data=f"tsk:done:{c.id}")]
+                for c in candidates[:8]
+            ]
+            rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu:main")])
+            await update.message.reply_text(
+                f"وجدت {len(candidates)} مهمة تطابق \"{hint}\" — اختر التي تريد إنجازها:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return None
+        if len(candidates) == 0:
+            await update.message.reply_text(
+                "لم أجد مهمة مطابقة ضمن مهامك المعلّقة.", reply_markup=MAIN_HOME_KEYBOARD
+            )
+            return None
+        # مرشح واحد → إنجاز مباشر (مع صلاحية)
         def _save():
             db = SessionLocal()
             try:
@@ -671,6 +784,12 @@ async def _handle_query(update: Update, result: dict) -> None:
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """نقطة دخول النصوص: تعديل حقل التأكيد → تعديل مهمة → ميزانية → تحويل → جمع نواقص → تسجيل/استعلام."""
+    # فحص السماح العام لجميع الرسائل النصية (يسمح لـ /register و /start حتى لو غير مسموح)
+    # text_router يستقبل TEXT فقط (لا أوامر)، لذا نفحص مباشرة
+    allowed, reason = _is_allowed_or_reply(update)
+    if not allowed:
+        await update.message.reply_text(reason)
+        return None
     if context.user_data.get("confirm_editing_field"):
         return await edit_confirm_field_value(update, context)
     if context.user_data.get("pending_task_edit_id"):
@@ -716,7 +835,12 @@ def _company_info_reply(telegram_user_id: int) -> str:
     """رد مباشر من DB عن شركتك (بلا Gemini)."""
     db = SessionLocal()
     try:
-        from app.database.crud.company import company_id_for_user, company_member_ids, get_company, get_company_member
+        from app.database.crud.company import (
+            company_id_for_user,
+            company_member_ids,
+            get_company,
+            get_company_member,
+        )
         from app.permissions import ROLE_LABELS
 
         cid = company_id_for_user(db, telegram_user_id)
@@ -752,9 +876,31 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     # نوع صريح من زر "تسجيل عملية ← نوع" يُحتفظ به قبل مسح الحالة المعلّقة
     seed = context.user_data.pop("record_seed_type", None)
     _clear_all_pending(context)
-    user_text = update.message.text
+    user_text = update.message.text or ""
     telegram_user_id = update.effective_user.id
     msg_id = update.message.message_id
+
+    # --- حماية الحصة وقائمة السماح (البند 6) ---
+    # السماح لـ /register و /start حتى لو غير مسموح، ليتمكن من التسجيل
+    _txt_low = (user_text or "").strip().lower()
+    _is_register_cmd = _txt_low.startswith("/register") or _txt_low.startswith("/start")
+    if not _is_register_cmd:
+        allowed, reason = _is_allowed_or_reply(update)
+        if not allowed:
+            await update.message.reply_text(reason)
+            return None
+        # فحص الحصة اليومية قبل استهلاك Gemini
+        if is_daily_limited(telegram_user_id):
+            try:
+                from app.config import settings
+                per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+            except Exception:
+                per_user = 50
+            await update.message.reply_text(
+                f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+                "حاول غدًا بعد منتصف الليل بتوقيت Asia/Gaza."
+            )
+            return None
 
     if is_rate_limited(telegram_user_id):
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
@@ -785,6 +931,19 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return analyze_message(text)
 
     from app.ai_queue import aiq
+
+    # حصة يومية: كل رسالة تستهلك 1-3 استدعاءات Gemini، لذا نحصي قبل التحليل
+    if not check_and_increment_daily(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+            "حاول غدًا بعد منتصف الليل بتوقيت Asia/Gaza."
+        )
+        return None
 
     result = await aiq.submit(lambda: _safe_analyze(user_text, company_dict))
     # لا تسجّل محتوى الحقول الحساسة (amount/person/description) — سجّل الأسماء والمعرّفات فقط
@@ -837,6 +996,24 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """يملأ الحقل الناقص من ردّ المستخدم (حالة COLLECT)."""
+    # فحص السماح والحصة قبل معالجة رد الإكمال
+    _uid = update.effective_user.id if update.effective_user else None
+    if _uid is not None:
+        allowed, reason = _is_allowed_or_reply(update)
+        if not allowed:
+            await update.message.reply_text(reason)
+            return None
+        if is_daily_limited(_uid):
+            try:
+                from app.config import settings
+                per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+            except Exception:
+                per_user = 50
+            await update.message.reply_text(
+                f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+                "حاول غدًا."
+            )
+            return None
     if is_rate_limited(update.effective_user.id):
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
         return None
@@ -848,6 +1025,18 @@ async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if not partial or not data_type:
         await update.message.reply_text("أعتذر، انتهت جلسة الإكمال. أرسل العملية من جديد من فضلك.")
         _clear_all_pending(context)
+        return None
+
+    # حصة يومية قبل استدعاء Gemini لإكمال الحقل
+    if _uid is not None and not check_and_increment_daily(_uid):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي ({per_user} طلب/يوم). حاول غدًا."
+        )
         return None
 
     reply_result = await asyncio.to_thread(analyze_message, update.message.text)
@@ -1025,6 +1214,23 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     _clear_all_pending(context)
     telegram_user_id = update.effective_user.id
 
+    # فحص السماح والحصة اليومية
+    allowed, reason = _is_allowed_or_reply(update)
+    if not allowed:
+        await update.message.reply_text(reason)
+        return None
+    if is_daily_limited(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+            "حاول غدًا."
+        )
+        return None
+
     if is_rate_limited(telegram_user_id):
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
         return None
@@ -1040,6 +1246,18 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     except Exception:
         logger.exception("خطأ في تنزيل الملف الصوتي")
         await update.message.reply_text("حدث خطأ أثناء تحميل الملف الصوتي، حاول مرة أخرى")
+        return None
+
+    # حصة يومية قبل استدعاء Gemini (قد يستهلك 2-3 استدعاءات)
+    if not check_and_increment_daily(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي ({per_user} طلب/يوم). حاول غدًا."
+        )
         return None
 
     # التعرف + التحليل عبر طابور الـ AI (إذا مفعّل) — وإلا مباشرةً كالسابق

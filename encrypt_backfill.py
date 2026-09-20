@@ -84,8 +84,8 @@ def _encrypt_row(db: Session, model, obj) -> None:
     الصفوف التي فشل فكّ تشفيرها (قيمة "غير قابلة للقراءة" أو is_encrypted ولا
     يمكن فكّها) تُرفض — لا نعيد تشفير العبارة النائبة فوق النص الأصلي فيضيع.
     """
+
     from app.security import UNREADABLE_VALUE, is_encrypted
-    from sqlalchemy import inspect as sa_inspect
 
     # احصل على القيم الخام من DB (قبل فك التشفير) لتمييز المشفّر الفاشل
     # نستخدم inspect لقراءة القيمة المخزنة مباشرة إن أمكن

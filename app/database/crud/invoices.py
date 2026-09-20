@@ -2,15 +2,13 @@
 الفواتير والطلبيات وحالاتها.
 """
 from datetime import datetime
-from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import log_audit
-from app.database.crud.company import company_filter, has_permission
-
 from app.config import settings
+from app.database.crud.company import has_permission
 from app.database.models import (
     Invoice,
     Note,
@@ -33,7 +31,6 @@ def create_invoice(
         _to_valid_amount,
         normalize_currency,
     )
-
 
     # استخدم عملة الشركة أولاً لتحديد 3 منازل لـ JOD/KWD/BHD/OMR
     from app.database.crud.company import get_user_base_currency as _get_base
@@ -89,12 +86,12 @@ def create_invoice(
 def list_invoices(
     db: Session, telegram_user_id: int, status: str | None = None, limit: int = 50
 ) -> list[Invoice]:
-    """فواتير المستخدم (كل أعضاء المساحة) مطابقة لحالة اختيارية، الأحدث أولًا."""
-    from app.database.crud import accessible_user_ids
+    """فواتير المستخدم مطابقة لحالة اختيارية، الأحدث أولًا — يحترم report.view_all."""
+    from app.database.crud.company import report_company_filter
 
 
     q = db.query(Invoice).filter(
-        company_filter(db, telegram_user_id, Invoice)
+        report_company_filter(db, telegram_user_id, Invoice)
     )
     if status and status in ("pending", "paid", "overdue"):
         q = q.filter(Invoice.status == status)
@@ -116,20 +113,34 @@ def list_invoices(
     return invoices
 
 def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bool:
-    """سداد فاتورة آجلة — تعيد True عند النجاح."""
+    """سداد فاتورة آجلة — تعيد True عند النجاح. يتطلب report.view_all أو ملكية الفاتورة."""
     from app.database.crud import _invalidate_caches
+    from app.database.crud.company import can_edit_record, report_company_filter
 
-    if not has_permission(db, telegram_user_id, "record.create"):
-        log_audit(telegram_user_id, "denied_mark_invoice_paid", f"invoice:{invoice_id}", detail="record.create required")
-        return False
-    invoice = (
+    # فحص الصلاحية: تسديد الفاتورة تعديل، ليس إنشاء
+    # نحتاج record.edit_any أو (record.edit_own + ملكية) لمنع أي عضو من تسديد أي فاتورة
+    invoice_q = (
         db.query(Invoice)
         .filter(
-            company_filter(db, telegram_user_id, Invoice),
+            report_company_filter(db, telegram_user_id, Invoice),
             Invoice.id == invoice_id,
         )
         .first()
     )
+    if invoice_q is None:
+        return False
+    # تحقق إضافي: إن لم يكن لديه view_all، يجب أن يكون مالك الفاتورة أو لديه edit_any
+    if not has_permission(db, telegram_user_id, "report.view_all"):
+        # بلا view_all: يجب أن يكون المالك أو لديه edit_own/edit_any
+        if not can_edit_record(db, telegram_user_id, invoice_q.telegram_user_id):
+            log_audit(telegram_user_id, "denied_mark_invoice_paid", f"invoice:{invoice_id}", detail="record.edit required")
+            return False
+    elif not has_permission(db, telegram_user_id, "record.create") and not has_permission(db, telegram_user_id, "record.edit_any"):
+        # حتى مع view_all، يحتاج صلاحية تعديل
+        if not can_edit_record(db, telegram_user_id, invoice_q.telegram_user_id):
+            log_audit(telegram_user_id, "denied_mark_invoice_paid", f"invoice:{invoice_id}", detail="record.edit required")
+            return False
+    invoice = invoice_q
     if invoice is None or invoice.status == "paid":
         return False
 
@@ -165,11 +176,11 @@ def mark_overdue_invoices(db: Session, now_dt=None) -> list[Invoice]:
 def list_orders(
     db: Session, telegram_user_id: int, status: str | None = None, limit: int = 50
 ) -> list[Note]:
-    """الطلبيات (note_type=order) مع فلتر حالة اختياري، الأحدث أولًا."""
-    from app.database.crud import accessible_user_ids
+    """الطلبيات (note_type=order) مع فلتر حالة اختياري، الأحدث أولًا — يحترم report.view_all."""
+    from app.database.crud.company import report_company_filter
 
     q = db.query(Note).filter(
-        company_filter(db, telegram_user_id, Note),
+        report_company_filter(db, telegram_user_id, Note),
         Note.deleted_at.is_(None),
         Note.note_type == "order",
     )
@@ -178,24 +189,34 @@ def list_orders(
     return q.order_by(Note.created_at.desc()).limit(limit).all()
 
 def set_order_status(db: Session, telegram_user_id: int, note_id: int, status: str) -> bool:
-    """يغيّر حالة طلبية (open/done) — يعيد False إن لم توجد طلبية أو حالة غير صالحة."""
+    """يغيّر حالة طلبية (open/done) — يعيد False إن لم توجد طلبية أو حالة غير صالحة. يتطلب edit."""
     from app.database.crud import _invalidate_caches
+    from app.database.crud.company import can_edit_record, report_company_filter
 
-    if not has_permission(db, telegram_user_id, "record.create"):
-        log_audit(telegram_user_id, "denied_set_order_status", f"order:{note_id}", detail="record.create required")
-        return False
     if status not in ORDER_STATUSES:
         return False
-    note = (
+    note_q = (
         db.query(Note)
         .filter(
-            company_filter(db, telegram_user_id, Note),
+            report_company_filter(db, telegram_user_id, Note),
             Note.id == note_id,
             Note.note_type == "order",
             Note.deleted_at.is_(None),
         )
         .first()
     )
+    if note_q is None:
+        return False
+    # تحقق الصلاحية: تعديل الطلبية يتطلب edit
+    if not has_permission(db, telegram_user_id, "report.view_all"):
+        if not can_edit_record(db, telegram_user_id, note_q.telegram_user_id):
+            log_audit(telegram_user_id, "denied_set_order_status", f"order:{note_id}", detail="record.edit required")
+            return False
+    elif not has_permission(db, telegram_user_id, "record.create") and not has_permission(db, telegram_user_id, "record.edit_any"):
+        if not can_edit_record(db, telegram_user_id, note_q.telegram_user_id):
+            log_audit(telegram_user_id, "denied_set_order_status", f"order:{note_id}", detail="record.edit required")
+            return False
+    note = note_q
     if note is None:
         return False
 

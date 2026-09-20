@@ -64,14 +64,12 @@ def _unified_totals_for_rows(rows, base_currency: str) -> dict:
     }
 
 
-def _best_effort_base_amount(amount, currency: str | None):
-    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None).
-
-    دقة تاريخية: نقوم بمحاولة تحويل واحدة لحظة الإنشاء؛ إن فشلت (لا إنترنت/
-    عملة غير معرفة) تُترك القيم None، وفي كل تقرير لاحق تُعاد العملية للباقي
-    بأسعار اليوم عبر convert_totals_to_base(stored=...).
-    """
-    base = (settings.base_currency or "").upper().strip()
+def _best_effort_base_amount(amount, currency: str | None, base_currency: str | None = None):
+    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None)."""
+    if base_currency is None:
+        base = (settings.base_currency or "").upper().strip()
+    else:
+        base = (base_currency or "").upper().strip()
     if amount is None or not currency or not base or currency.upper() == base:
         return None, None
     try:

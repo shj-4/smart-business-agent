@@ -8,8 +8,10 @@
 - كل هذا معزول في قفل (lock) لأن threading.Timer وأحداث البوت تعمل معًا.
 """
 
+import json
 import threading
 import time
+from pathlib import Path as _Path
 
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60.0
@@ -32,6 +34,15 @@ _admin_denied: dict = {}
 _join_denied: dict = {}
 _last_prune: float = 0.0
 _cleanup_timer = None
+
+# --- قائمة السماح والحصة اليومية (البند 6) ---
+
+# مسار تخزين المستخدمين المسجلين عبر /register
+_REGISTERED_FILE = _Path(__file__).resolve().parent.parent / "data" / "registered_users.json"
+_registered_users: set[int] = set()
+_daily_counts: dict[tuple[int, str], int] = {}  # (user_id, date_str) -> count
+_global_daily_counts: dict[str, int] = {}  # date_str -> count
+_daily_date: str = ""  # آخر تاريخ تم تنظيفه
 
 
 def _prune_rate_buckets(now: float) -> None:
@@ -148,6 +159,191 @@ def join_denied_count(user_id: int) -> int:
 
 def is_join_blocked(user_id: int) -> bool:
     return join_denied_count(user_id) >= JOIN_ATTEMPTS_MAX
+
+
+# ---------- قائمة السماح (allowlist) ----------
+
+def _load_registered_users() -> None:
+    """تحميل المستخدمين المسجلين من ملف JSON إن وجد."""
+    global _registered_users
+    try:
+        if _REGISTERED_FILE.exists():
+            data = json.loads(_REGISTERED_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                _registered_users = {int(x) for x in data if str(x).isdigit() or isinstance(x, int)}
+    except Exception:
+        pass
+
+
+def _save_registered_users() -> None:
+    """حفظ المستخدمين المسجلين إلى ملف JSON."""
+    try:
+        _REGISTERED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _REGISTERED_FILE.write_text(json.dumps(sorted(_registered_users), ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# حمّل عند الاستيراد
+_load_registered_users()
+
+
+def is_user_allowed(user_id: int) -> bool:
+    """هل المستخدم مسموح له باستخدام البوت؟
+
+    القواعد:
+    - الأدمن دائمًا مسموح.
+    - إن كانت ALLOWED_USER_IDS مضبوطة (غير فارغة) → يجب أن يكون ضمنها أو ضمن المسجلين.
+    - إن كان REGISTRATION_TOKEN مضبوطًا → يجب أن يكون مسجلاً عبر /register أو ضمن ALLOWED_USER_IDS/أدمن.
+    - إن لم تُضبط أي منهما → السماح للجميع (وضع تطوير/اختبار).
+    """
+    try:
+        from app.config import settings
+    except Exception:
+        return True
+    try:
+        uid = int(user_id)
+    except Exception:
+        return False
+    # أدمن دائمًا مسموح
+    if uid in (getattr(settings, "admin_user_ids", []) or []):
+        return True
+    allowed = getattr(settings, "allowed_user_ids", []) or []
+    token = (getattr(settings, "registration_token", "") or "").strip()
+    # إن كانت قائمة السماح مضبوطة
+    if allowed:
+        if uid in allowed:
+            return True
+        if uid in _registered_users:
+            return True
+        return False
+    # إن كان رمز التسجيل مضبوطًا ولم تكن قائمة السماح مضبوطة
+    if token:
+        if uid in _registered_users:
+            return True
+        return False
+    # لا قيود
+    return True
+
+
+def register_via_token(user_id: int, token: str) -> bool:
+    """يسجل المستخدم إذا كان الرمز صحيحًا. يعيد True عند النجاح."""
+    try:
+        from app.config import settings
+    except Exception:
+        return False
+    expected = (getattr(settings, "registration_token", "") or "").strip()
+    if not expected:
+        return False
+    if (token or "").strip() != expected:
+        return False
+    with _RATE_LOCK:
+        _registered_users.add(int(user_id))
+        _save_registered_users()
+    return True
+
+
+def is_user_registered(user_id: int) -> bool:
+    with _RATE_LOCK:
+        return int(user_id) in _registered_users
+
+
+def get_allowed_users_count() -> int:
+    with _RATE_LOCK:
+        return len(_registered_users)
+
+
+# ---------- الحصة اليومية ----------
+
+def _today_str() -> str:
+    """تاريخ اليوم بتوقيت Asia/Gaza كـ YYYY-MM-DD."""
+    try:
+        from app.timeutil import now_local
+        return now_local().date().isoformat()
+    except Exception:
+        import datetime
+        return datetime.date.today().isoformat()
+
+
+def _prune_daily_counts(now_date: str) -> None:
+    """يحذف إدخالات الأيام القديمة (غير اليوم)."""
+    global _daily_counts, _global_daily_counts, _daily_date
+    if _daily_date != now_date:
+        # يوم جديد → امسح كل العدادات القديمة
+        _daily_counts = {k: v for k, v in _daily_counts.items() if k[1] == now_date}
+        _global_daily_counts = {k: v for k, v in _global_daily_counts.items() if k == now_date}
+        _daily_date = now_date
+    else:
+        # حتى لو نفس اليوم، احذف أي تاريخ قديم متبقي
+        _daily_counts = {k: v for k, v in _daily_counts.items() if k[1] == now_date}
+        _global_daily_counts = {k: v for k, v in _global_daily_counts.items() if k == now_date}
+
+
+def get_daily_count(user_id: int, date_str: str | None = None) -> int:
+    if date_str is None:
+        date_str = _today_str()
+    with _RATE_LOCK:
+        _prune_daily_counts(date_str)
+        return _daily_counts.get((int(user_id), date_str), 0)
+
+
+def get_global_daily_count(date_str: str | None = None) -> int:
+    if date_str is None:
+        date_str = _today_str()
+    with _RATE_LOCK:
+        _prune_daily_counts(date_str)
+        return _global_daily_counts.get(date_str, 0)
+
+
+def is_daily_limited(user_id: int) -> bool:
+    """هل بلغ المستخدم أو الحد الكلي الحد اليومي؟"""
+    try:
+        from app.config import settings
+        per_user = int(getattr(settings, "daily_ai_limit_per_user", 50) or 50)
+        per_global = int(getattr(settings, "daily_ai_limit_global", 1000) or 1000)
+    except Exception:
+        per_user, per_global = 50, 1000
+    date_str = _today_str()
+    with _RATE_LOCK:
+        _prune_daily_counts(date_str)
+        if _daily_counts.get((int(user_id), date_str), 0) >= per_user:
+            return True
+        if _global_daily_counts.get(date_str, 0) >= per_global:
+            return True
+    return False
+
+
+def check_and_increment_daily(user_id: int) -> bool:
+    """يتحقق من الحصة اليومية ويزيد العداد إن كان مسموحًا.
+
+    يعيد True إذا كان مسموحًا (وتم الزيادة)، False إذا بلغ الحد.
+    يجب استدعاؤه قبل كل استدعاء Gemini (تحليل نص/صورة).
+    """
+    try:
+        from app.config import settings
+        per_user = int(getattr(settings, "daily_ai_limit_per_user", 50) or 50)
+        per_global = int(getattr(settings, "daily_ai_limit_global", 1000) or 1000)
+    except Exception:
+        per_user, per_global = 50, 1000
+    date_str = _today_str()
+    with _RATE_LOCK:
+        _prune_daily_counts(date_str)
+        cur_user = _daily_counts.get((int(user_id), date_str), 0)
+        cur_global = _global_daily_counts.get(date_str, 0)
+        if cur_user >= per_user or cur_global >= per_global:
+            return False
+        _daily_counts[(int(user_id), date_str)] = cur_user + 1
+        _global_daily_counts[date_str] = cur_global + 1
+        return True
+
+
+def reset_daily_counts() -> None:
+    """لأغراض الاختبار: تصفير العدادات اليومية."""
+    global _daily_counts, _global_daily_counts, _daily_date
+    with _RATE_LOCK:
+        _daily_counts.clear()
+        _global_daily_counts.clear()
+        _daily_date = _today_str()
 
 
 def _new_cleanup_timer():

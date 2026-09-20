@@ -84,6 +84,7 @@ from .common import (
     toggle_notification_pref,
 )
 from .company import (
+    _backfill_company_id_for_user,
     _new_token,
     can_edit_record,
     company_filter,
@@ -179,6 +180,7 @@ from .tasks import (
     create_task,
     delete_task_by_id,
     find_pending_task,
+    find_pending_tasks,
     list_done_tasks,
     list_overdue_tasks,
     list_pending_tasks,

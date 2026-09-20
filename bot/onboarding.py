@@ -7,7 +7,14 @@
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 from app.database.db import SessionLocal
 from app.permissions import BUSINESS_TYPES
@@ -178,14 +185,36 @@ async def invite_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ASK_INVITE
 
 
+def _clean_onboarding_token(token: str | None) -> str:
+    if not token:
+        return ""
+    try:
+        from app.rtl import strip_bidi_marks
+    except Exception:
+        import re as _re
+        _bidi_re = _re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+        def strip_bidi_marks(t: str) -> str:  # type: ignore
+            return _bidi_re.sub("", t)
+    cleaned = strip_bidi_marks(str(token))
+    cleaned = cleaned.strip().strip("`").strip()
+    cleaned = "".join(cleaned.split())
+    return cleaned
+
+
 async def got_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw = (update.message.text or "").strip()
+    # تنظيف الرموز الاتجاهية قبل الاستخراج (نسخ من backticks يحمل RLM)
+    try:
+        from app.rtl import strip_bidi_marks
+        raw = strip_bidi_marks(raw)
+    except Exception:
+        pass
     # دعم رابط كامل t.me/bot?start=inv_XXXX
     token = raw
     if "inv_" in token:
         # استخراج التوكن بعد inv_
         token = token.split("inv_")[-1].split()[0].split("&")[0].strip()
-    token = token.strip()
+    token = _clean_onboarding_token(token)
     telegram_user_id = update.effective_user.id
     display_name = update.effective_user.first_name or None
 
@@ -207,14 +236,27 @@ async def got_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await send_main_menu(update.message, context, text=f"أهلاً بك في {company.name} 👋")
         except Exception:
             logger.exception("فشل إرسال القائمة بعد الانضمام")
-        # إشعار للمالك
+        # إشعار للمالك — في PTB v20+ يجب استخدام context.bot
         try:
-            await update.effective_user.bot.send_message(
-                chat_id=company.owner_telegram_user_id,
-                text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
-            )
+            bot = None
+            if hasattr(context, "bot") and context.bot is not None:
+                bot = context.bot
+            elif hasattr(update, "get_bot"):
+                try:
+                    bot = update.get_bot()
+                except Exception:
+                    bot = None
+            if bot is None and hasattr(update, "effective_user") and hasattr(update.effective_user, "bot"):
+                bot = update.effective_user.bot  # fallback للاختبارات
+            if bot is not None:
+                await bot.send_message(
+                    chat_id=company.owner_telegram_user_id,
+                    text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
+                )
+            else:
+                logger.warning("لا يوجد bot لإرسال إشعار انضمام للمالك %s", company.owner_telegram_user_id)
         except Exception:
-            pass
+            logger.exception("فشل إرسال إشعار انضمام للمالك")
     else:
         await update.message.reply_text(f"❌ {result}\nحاول مجددًا أو أرسل /cancel للإلغاء.")
         return ASK_INVITE

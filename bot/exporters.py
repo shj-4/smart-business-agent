@@ -49,8 +49,13 @@ def _style_header(ws: Worksheet, cols: int) -> None:
         cell = ws.cell(row=1, column=col)
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.alignment = Alignment(horizontal="center", vertical="center", readingOrder=2)
         cell.border = THIN_BORDER
+    # اتجاه الورقة من اليمين لليسار — يحل مشكلة ترتيب الأعمدة والحروف المنفصلة في Excel
+    try:
+        ws.sheet_view.rightToLeft = True
+    except Exception:
+        pass
 
 
 def _auto_width(ws: Worksheet) -> None:
@@ -364,7 +369,11 @@ def generate_export_excel(
 
 
 def _pdf_font() -> str:
-    """يسجّل خطًا يدعم العربية (TTF من النظام) ويُعيد اسمه، أو Helvetica كخلفية."""
+    """يسجّل خطًا يدعم العربية (TTF من النظام) ويُعيد اسمه، أو Helvetica كخلفية.
+
+    يحل مشكلة الحروف المنفصلة في PDF باختيار خط عربي حقيقي (Amiri/Noto/Tahoma/Arial)
+    وتسجيله في reportlab مع ترابط حروف صحيح عبر arabic_reshaper في _pdf_text.
+    """
     import os
 
     from reportlab.pdfbase import pdfmetrics
@@ -374,9 +383,15 @@ def _pdf_font() -> str:
         return _pdf_font.cached
     candidates = (
         r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\times.ttf",
         r"C:\Windows\Fonts\tahoma.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\Amiri-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"C:\Windows\Fonts\times.ttf",
     )
     chosen = "Helvetica"
     for path in candidates:
@@ -395,26 +410,30 @@ _pdf_font.cached = None
 
 
 def _pdf_text(value: str | None, font: str) -> str:
-    """يعيد نصًا (قد يكون عربيًا) جاهزًا لعرض صحيح في PDF — تشكيل+اتجاه إن توفرت."""
+    """يعيد نصًا (قد يكون عربيًا) جاهزًا لعرض صحيح في PDF — تشكيل + اتجاه.
+
+    يضمن ترابط الحروف العربية (ligatures) عبر arabic_reshaper + bidi، ويحل
+    مشكلة الحروف المنفصلة التي تظهر عند استخدام خط لا يدعم التشكيل التلقائي.
+    """
     from xml.sax.saxutils import escape
 
     text = str(value or "")
-    # escape لـ < و & قبل تمريره لـ Paragraph (يفسرها كـ markup)
+
     def _esc(s: str) -> str:
         return escape(s, {'"': "&quot;", "'": "&#39;"})
 
-    if font == "Helvetica" or not text.strip():
-        return _esc(text.replace("\n", " "))
+    if not text.strip():
+        return ""
+    # دائمًا طبّق إعادة التشكيل للنص العربي حتى لو الخط احتياطي — يحسّن الترابط
     if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
         try:
             import arabic_reshaper
             from bidi.algorithm import get_display
 
-            return _esc(get_display(arabic_reshaper.reshape(text)))
+            reshaped = arabic_reshaper.reshape(text.replace("\n", " "))
+            return _esc(get_display(reshaped))
         except Exception:  # noqa: BLE001
-            pass
-        return _esc(text.replace("\n", " "))
-    # اتجاه عكسي يتجنّب كسر النص الإنجليزي مع أرقام
+            return _esc(text.replace("\n", " "))
     return _esc(text.replace("\n", " "))
 
 

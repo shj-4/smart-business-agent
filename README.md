@@ -76,6 +76,11 @@ uvicorn app.main:app --port 8000 # (اختياري) واجهة API
 `/export` `/chart` `/report_on|off` `/budget` `/work` `/undo` `/lang`
 `/admin_stats` `/feedback` `/debts` `/invoices` `/orders` `/credit`
 `/stats` `/health` `/forecast` `/deviation` `/edit` `/bonus`
+`/company` `/join` `/notif` `/brief` `/fix` `/finance` `/kpi`
+
+- **الشركات:** `/start` → إنشاء شركة أو `/join <code>` برمز دعوة، `/company` إدارة الشركة.
+- **التنبيهات:** `/notif` تفضيلات الإشعارات، `/brief` نشرة يومية، `/kpi` لوحة مؤشرات.
+- **المالية:** `/finance` بطاقة ذمم موحدة، `/fix` تعديل سريع لآخر سجل.
 
 ## قاعدة البيانات والنسخ الاحتياطي
 

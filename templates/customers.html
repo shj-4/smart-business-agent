@@ -42,7 +42,7 @@
                         <form class="merge-form" method="post" action="/dashboard/customers/merge">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                             <input type="hidden" name="source" value="{{ p.person }}">
-                            {% if p.company_id %}<input type="hidden" name="company_id" value="{{ p.company_id }}">{% endif %}
+                            {% if p.company_id is not none %}<input type="hidden" name="company_id" value="{{ p.company_id }}">{% else %}<input type="hidden" name="company_id" value="__none__">{% endif %}
                             <input type="text" name="target" placeholder="ادمج في..." required>
                             <button type="submit">دمج</button>
                         </form>

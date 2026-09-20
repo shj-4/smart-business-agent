@@ -13,7 +13,7 @@ from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-from app.database.crud import complete_task, find_pending_task, undo_last_record
+from app.database.crud import complete_task, undo_last_record
 from app.database.db import SessionLocal
 from app.exchange import CURRENCY_NAMES, convert
 from app.formatting import fmt_amount
@@ -32,7 +32,7 @@ PERIOD_KEYS = {
     "monthly": "month",
     "all": "all",
 }
-PERIOD_HINT = "الإستخدام: today | week/weekly | month/monthly | all"
+PERIOD_HINT = "الاستخدام: today | week/weekly | month/monthly | all"
 
 
 def resolve_period_arg(raw: str) -> str | None:
@@ -43,13 +43,30 @@ def resolve_period_arg(raw: str) -> str | None:
     return PERIOD_KEYS.get((raw or "all").lower())
 
 
+def _clean_join_token(token: str | None) -> str:
+    """يزيل الرموز الاتجاهية و backticks من رمز الدعوة قبل المعالجة."""
+    if not token:
+        return ""
+    try:
+        from app.rtl import strip_bidi_marks
+    except Exception:
+        import re as _re
+        _bidi_re = _re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+        def strip_bidi_marks(t: str) -> str:  # type: ignore
+            return _bidi_re.sub("", t)
+    cleaned = strip_bidi_marks(str(token))
+    cleaned = cleaned.strip().strip("`").strip()
+    cleaned = "".join(cleaned.split())
+    return cleaned
+
+
 async def _handle_invite_start(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str) -> bool:
     """يعالج deep-link t.me/bot?start=inv_TOKEN. يعيد True إن عالجها."""
     from app.database.db import SessionLocal
 
     telegram_user_id = update.effective_user.id
     display_name = update.effective_user.first_name or None
-    token = (token or "").strip()
+    token = _clean_join_token(token)
     if not token:
         return False
     from app.database.crud.company import redeem_invite
@@ -63,12 +80,16 @@ async def _handle_invite_start(update: Update, context: ContextTypes.DEFAULT_TYP
         company = result
         await update.message.reply_text(f"✅ انضممت إلى شركة '{company.name}' بنجاح!")
         try:
-            await update.effective_user.bot.send_message(
-                chat_id=company.owner_telegram_user_id,
-                text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
-            )
+            bot = _get_bot(update, context)
+            if bot:
+                await bot.send_message(
+                    chat_id=company.owner_telegram_user_id,
+                    text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
+                )
+            else:
+                logger.warning("لا يوجد bot لإرسال إشعار انضمام للمالك %s", company.owner_telegram_user_id)
         except Exception:
-            pass
+            logger.exception("فشل إرسال إشعار انضمام للمالك")
         from bot.menus import send_main_menu
 
         try:
@@ -130,6 +151,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /register <token> — تسجيل مستخدم جديد عبر رمز التسجيل."""
+    from app.config import settings
+    from bot.ratelimit import is_user_allowed, register_via_token
+
+    telegram_user_id = update.effective_user.id
+    if is_user_allowed(telegram_user_id):
+        await update.message.reply_text("✅ أنت مسجل بالفعل ويمكنك استخدام البوت.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "استخدم: /register <رمز التسجيل>\n"
+            "تواصل مع الإدارة للحصول على الرمز."
+        )
+        return
+    token = (args[0] or "").strip()
+    if register_via_token(telegram_user_id, token):
+        await update.message.reply_text("✅ تم التسجيل بنجاح! يمكنك الآن استخدام البوت.")
+        try:
+            from bot.menus import send_main_menu
+            await send_main_menu(update.message, context)
+        except Exception:
+            pass
+    else:
+        # لا نكشف إن كان الرمز خطأ أم غير مضبوط، لتجنب التخمين
+        if not (settings.registration_token or "").strip():
+            await update.message.reply_text("التسجيل معطّل حاليًا. تواصل مع الإدارة.")
+        else:
+            await update.message.reply_text("❌ رمز التسجيل غير صحيح. تأكد من الرمز وحاول مجددًا.")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /help — دليل شامل للأوامر والأزرار بدون أي تحليل AI."""
     from bot.menus import send_main_menu
@@ -142,7 +195,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• كم صرفت هذا الشهر؟ / كم لي على سامر؟\n\n"
         "🧭 الأزرار الرئيسية:\n"
         f"• {NEW} تسجيل عملية — مصاريف/إيراد/طلبية/ملاحظة/مهمة\n"
-        "• 📊 التقارير — ملخصات، روسم، مقارنة فترات\n"
+        "• 📊 التقارير — ملخصات، رسوم بيانية، مقارنة فترات\n"
         f"• {TASK} مهامي — قوائم المهام وإنجازها وحذفها\n"
         "• 🧰 أدوات — آخر سجل، ميزانيات، رسم بياني، تصدير، تحويل، بحث، مساحة مشتركة\n\n"
         "⌨️ الأوامر السريعة:\n"
@@ -200,10 +253,27 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("استخدم: /done وصف المهمة\nمثال: /done الاتصال بسامر")
         return
 
+    from app.database.crud import find_pending_tasks
+
+    if len(text.strip()) < 3:
+        await update.message.reply_text("وصف المهمة قصير جدًا — أرسل 3 أحرف على الأقل أو اختر من القائمة.")
+        return
     db = SessionLocal()
     try:
-        task = find_pending_task(db, telegram_user_id, text)
-        if task:
+        candidates = find_pending_tasks(db, telegram_user_id, text)
+        if len(candidates) > 1:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            rows = [
+                [InlineKeyboardButton(f"✅ {c.description[:40]}", callback_data=f"tsk:done:{c.id}")]
+                for c in candidates[:8]
+            ]
+            await update.message.reply_text(
+                f"وجدت {len(candidates)} مهمة تطابق \"{text}\" — اختر التي تريد إنجازها:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        elif len(candidates) == 1:
+            task = candidates[0]
             from bot.menus import MAIN_HOME_KEYBOARD
 
             complete_task(db, telegram_user_id, task.id)
@@ -389,7 +459,8 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     from app.timeutil import first_day_of_week, now_local, to_utc_naive
 
     arg = (context.args[0] if context.args else "all").lower()
-    if arg in ("pdf", "بي_دي_إف"):
+    # دعم "pdf" ومرادفات عربية (بي دي إف مع/بدون شرطة سفلية) — كان "بي_دي_إف" وحده يربك المستخدم
+    if arg in ("pdf", "بي_دي_إف", "بي دي إف", "بي-دي-إف"):
         await _export_pdf(update, context)
         return
 
@@ -850,7 +921,6 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "مثال: /invoices add 500 ILS محمد due:2026-10-01 فاتورة مواد"
             )
             return
-        from bot.bonus import split_name_and_amount
 
         # تحليل: أول رقم هو المبلغ، الباقي عملة/شخص/تاريخ
         raw = " ".join(args[1:])
@@ -1020,7 +1090,14 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """أمر /health — فحص صحة النظام (قاعدة، هجرات، إعدادات، إصدارات)."""
+    """أمر /health — فحص صحة النظام (قاعدة، هجرات، إعدادات، إصدارات).
+
+    مقيّد بالأدمن فقط: يعرض إصدارات المكتبات، حالة الهجرات، أسماء المتغيرات
+    الناقصة، حالة ENCRYPTION_KEY، وحجم قاعدة البيانات — معلومات داخلية
+    لا يجب كشفها لكل مستخدم.
+    """
+    if not await _require_admin(update, "health", context):
+        return
     from bot.diagnostics import run_health_checks
     from bot.formatters import format_health_report
 
@@ -1090,7 +1167,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """أمر مخفي /admin_stats — إحصائيات عامة للمسؤول (لا يكشف بيانات فردية)."""
     from app.admin import build_admin_stats
 
-    if not await _require_admin(update, "admin_stats"):
+    if not await _require_admin(update, "admin_stats", context):
         return
 
     db = SessionLocal()
@@ -1133,14 +1210,42 @@ def _is_admin(user_id: int) -> bool:
     return user_id in settings.admin_user_ids
 
 
-async def _alert_admin_of_probe(update: Update, attacker_id: int, count: int) -> None:
+def _get_bot(update: Update | None, context: ContextTypes.DEFAULT_TYPE | None = None):
+    """يعيد كائن Bot المتاح: context.bot أولاً (PTB v20+)، ثم fallback للاختبارات."""
+    if context is not None and hasattr(context, "bot") and context.bot is not None:
+        return context.bot
+    if update is not None:
+        if hasattr(update, "get_bot"):
+            try:
+                b = update.get_bot()
+                if b is not None:
+                    return b
+            except Exception:
+                pass
+        if hasattr(update, "bot") and update.bot is not None:
+            return update.bot
+        # fallback قديم: effective_user.bot (غير موجود في PTB v20، لكن اختبارات SimpleNamespace تستخدمه)
+        try:
+            eu = getattr(update, "effective_user", None)
+            if eu is not None and hasattr(eu, "bot") and eu.bot is not None:
+                return eu.bot
+        except Exception:
+            pass
+    return None
+
+
+async def _alert_admin_of_probe(update: Update, attacker_id: int, count: int, context: ContextTypes.DEFAULT_TYPE | None = None) -> None:
     """يرسل إنذارًا فوريًا لأول أدمن مُعدّ عند تجاوز عتبة استكشاف الصلاحيات."""
     from app.config import settings
 
+    bot = _get_bot(update, context)
     try:
         if not settings.admin_user_ids:
             return
-        await update.bot.send_message(
+        if bot is None:
+            logger.error("فشل إرسال إنذار الأمان: لا يوجد bot متاح (context.bot is None)")
+            return
+        await bot.send_message(
             chat_id=settings.admin_user_ids[0],
             text=f"⚠️ إنذار أمني: {count} محاولات فاشلة لأوامر الأدمن من user={attacker_id} خلال ٥ دقائق.",
         )
@@ -1148,7 +1253,7 @@ async def _alert_admin_of_probe(update: Update, attacker_id: int, count: int) ->
         logger.exception("فشل إرسال إنذار الأمان الخاص بمحاولات الأدمن الفاشلة")
 
 
-async def _require_admin(update: Update, label: str) -> bool:
+async def _require_admin(update: Update, label: str, context: ContextTypes.DEFAULT_TYPE | None = None) -> bool:
     """بوابة موحّدة لأوامر الأدمن: يرفض غير المصرّح له مع تتبّع المحاولات
     الفاشلة وإنذار عند بلوغ عتبة استكشاف الصلاحيات."""
     from bot.ratelimit import (
@@ -1171,14 +1276,14 @@ async def _require_admin(update: Update, label: str) -> bool:
             int(ADMIN_ATTEMPTS_WINDOW),
         )
         if denied == ADMIN_ATTEMPTS_MAX:
-            await _alert_admin_of_probe(update, user_id, denied)
+            await _alert_admin_of_probe(update, user_id, denied, context)
     await update.message.reply_text("عذرًا، هذا الأمر متاح للمسؤول فقط.")
     return False
 
 
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر مخفي /feedback — يعرض رسائل التحليل الخاطئ بانتظار المراجعة اليدوية."""
-    if not await _require_admin(update, "feedback"):
+    if not await _require_admin(update, "feedback", context):
         return
 
     from app.database.crud import list_correction_feedback
@@ -1206,7 +1311,7 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def feedback_ack_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر مخفي /feedback_ack <id> — يعلّم سجل تحليل خاطئ كمراجَع يدويًا."""
-    if not await _require_admin(update, "feedback_ack"):
+    if not await _require_admin(update, "feedback_ack", context):
         return
 
     args = context.args
@@ -1245,8 +1350,8 @@ async def kpi_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /brief — نشرة إدارة يومية بالذكاء الاصطناعي (تسقط للنص المحلي عند فشل Gemini)."""
-    from bot.ratelimit import is_rate_limited
     from bot.formatters import safe_reply
+    from bot.ratelimit import is_rate_limited
 
     if is_rate_limited(update.effective_user.id):
         await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
@@ -1280,10 +1385,10 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not args:
         await update.message.reply_text("استخدم: /join <رمز الدعوة>\nمثال: /join 482913  أو  /join inv_a1b2c3")
         return
-    token = (args[0] or "").strip()
+    token = _clean_join_token(args[0])
     # دعم رابط كامل
     if "inv_" in token:
-        token = token.split("inv_")[-1].split()[0].split("&")[0].strip()
+        token = _clean_join_token(token.split("inv_")[-1].split()[0].split("&")[0])
     telegram_user_id = update.effective_user.id
 
     from bot.ratelimit import is_join_blocked, register_join_denied
@@ -1304,12 +1409,16 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         company = result
         await update.message.reply_text(f"✅ انضممت إلى شركة '{company.name}' بنجاح!")
         try:
-            await update.effective_user.bot.send_message(
-                chat_id=company.owner_telegram_user_id,
-                text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
-            )
+            bot = _get_bot(update, context)
+            if bot:
+                await bot.send_message(
+                    chat_id=company.owner_telegram_user_id,
+                    text=f"👤 انضم {display_name or telegram_user_id} إلى شركتك '{company.name}'.",
+                )
+            else:
+                logger.warning("لا يوجد bot لإرسال إشعار انضمام للمالك %s", company.owner_telegram_user_id)
         except Exception:
-            pass
+            logger.exception("فشل إرسال إشعار انضمام للمالك")
         from bot.menus import send_main_menu
 
         try:
@@ -1325,8 +1434,13 @@ async def company_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """أمر /company — عرض معلومات شركتك وإدارتها."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+    from app.database.crud.company import (
+        company_id_for_user,
+        company_member_ids,
+        get_company,
+        get_company_member,
+    )
     from app.database.db import SessionLocal
-    from app.database.crud.company import company_id_for_user, get_company, get_company_member, company_member_ids
     from app.permissions import ROLE_LABELS
 
     uid = update.effective_user.id
@@ -1507,6 +1621,7 @@ def register_handlers(app: Application) -> None:
     from app.rtl import install_bidi_patches
 
     install_bidi_patches()
+    app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("menu", menu_command))

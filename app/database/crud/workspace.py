@@ -51,7 +51,12 @@ def accessible_user_ids(db: Session, telegram_user_id: int) -> set[int]:
     فردي: {نفسه} فقط — سلوك اليوم تمامًا.
     عضو مساحة: كل أعضاء المساحة. يعطي "حسابًا مشتركًا" بلا تحرّك بيانات.
     """
-    from app.database.crud import company_id_for_user, company_member_ids, workspace_for_user, workspace_member_ids
+    from app.database.crud import (
+        company_id_for_user,
+        company_member_ids,
+        workspace_for_user,
+        workspace_member_ids,
+    )
 
     cid = company_id_for_user(db, telegram_user_id)
     if cid is not None:

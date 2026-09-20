@@ -44,20 +44,63 @@ def _decode_key_bytes(raw: str) -> bytes | None:
       كاملًا (لا إعادة تأويل نصية — مفتاح base64 مضبوط خاطئًا يُكشف ولا يُخطئ).
     - إن لم يكن base64 صالحًا إطلاقًا: يُقبل كنص مباشر بطول 16/24/32 بايت
       (توافق المفاتيح النصية القديمة خارج الأبجدية، مثل العربية).
+    - URL-safe: حوّل '-'→'+' و'_'→'/' ثم استخدم b64decode(validate=True)
+      لأن urlsafe_b64decode لا يقبل وسيط validate ويُبتلع TypeError.
+    - لتجنب تحويل مفتاح نصي من 32 حرفًا أبجديًا (مثل "x"*32) بصمت إلى
+      24 بايت AES-192، يُفضَّل النص المباشر عند الغموض: إذا كان الطول الخام
+      16/24/32 والمدخل أبجدي رقمي خالص وكل من الخام والمفكوك صالحين بطولين
+      مختلفين، يُعتبر نصًا مباشرًا (يُفرض base64 صريح عبر حروف +/=_-).
     """
-    decoded: bytes | None = None
-    try:
-        decoded = base64.b64decode(raw, validate=True)
-    except Exception:
+    # دعم مدخل bytes مباشر (اختبارات تمرر b"k"*24)
+    if isinstance(raw, bytes):
+        if len(raw) in _VALID_AES_KEY_LENGTHS:
+            return raw
         try:
-            decoded = base64.urlsafe_b64decode(raw, validate=True)
+            s = raw.decode("utf-8").strip()
         except Exception:
-            decoded = None
-    if decoded is not None:
-        if len(decoded) in _VALID_AES_KEY_LENGTHS:
+            return None
+        if not s:
+            return None
+    else:
+        s = (raw or "").strip()
+        if not s:
+            return None
+    # محاولة فك base64 (قياسي + URL-safe عبر التحويل) مع validate
+    # نُحوّل URL-safe إلى قياسي أولاً لأن urlsafe_b64decode لا يقبل validate
+    translated = s.replace("-", "+").replace("_", "/")
+    # إضافة حشو '=' إذا لزم (بعض المفاتيح URL-safe بدون حشو)
+    padded = translated + "=" * (-len(translated) % 4) if translated else translated
+    decoded: bytes | None = None
+    decoded_ok = False
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+        decoded_ok = True
+    except Exception:
+        decoded = None
+        decoded_ok = False
+    if decoded_ok:
+        # base64 صالح (نجح الفك)
+        if len(decoded) not in _VALID_AES_KEY_LENGTHS:
+            # طول مفكوك غير صالح → مفتاح base64 مضبوط خاطئًا، لا نُعيد تأويله كنص
+            return None
+        # طول صالح، تحقق من الغموض مع النص المباشر
+        raw_byte_len = len(s.encode("utf-8"))
+        # إذا كان المدخل يصلح كنص مباشر وكمفكوك base64 بطولين مختلفين
+        # وكان المدخل أبجدي رقمي خالص بلا +/=_-، نُفضّل النص المباشر
+        # لتجنب تحويل "x"*32 (32) بصمت إلى 24 بايت AES-192
+        if (
+            raw_byte_len in _VALID_AES_KEY_LENGTHS
+            and s.isalnum()
+            and len(decoded) != raw_byte_len
+            and not any(c in s for c in "+/=")
+            and "-" not in s and "_" not in s
+        ):
+            # غموض: نُسقط base64 ونترك المسار النصي أدناه
+            pass
+        else:
             return decoded
-        return None
-    key = raw.encode("utf-8")
+    # فشل base64 أو غموض: جرّب النص المباشر
+    key = s.encode("utf-8")
     if len(key) in _VALID_AES_KEY_LENGTHS:
         return key
     return None
@@ -204,14 +247,23 @@ class EncryptedNumeric(TypeDecorator):
         if value is None:
             return None
         try:
-            dec = Decimal(str(value)).quantize(Decimal("0.01"))
+            # لا نُكمّم قسرًا إلى 0.01 — القيمة القادمة من _to_decimal / exchange.convert
+            # مُكمَّمة أصلًا حسب العملة (0.001 لـ JOD/KWD/BHD/OMR وإلا 0.01).
+            # هنا نحفظ النص كما هو بعد التحقق، مع حد أقصى 3 منازل لمنع دقة عشوائية
+            # (12.3456 → 12.346) بدل إسقاط 12.345 إلى 12.35.
+            dec = Decimal(str(value))
         except (InvalidOperation, ValueError) as exc:
             # بدل كتابة NULL بصمت (فقدان بيانات بلا أثر في السجلات): نفشل الطلب
             # كي يُلتقط الخطأ في سجل الدعوة/المستدعي بدل إخفائه.
             raise ValueError(f"مبلغ غير صالح للعمود المشفَّر: {value!r}") from exc
         if not dec.is_finite():
             raise ValueError(f"مبلغ غير صالح (NaN/Infinity) للعمود المشفَّر: {value!r}")
-        plain = str(dec)
+        # حد أقصى 3 منازل: إذا كانت الدقة أكثر من 3، نقرّب إلى 3 (يحافظ على JOD)
+        # وإلا نترك القيمة كما هي (12.30 تبقى 12.30، 12.345 تبقى 12.345)
+        if dec.as_tuple().exponent < -3:
+            dec = dec.quantize(Decimal("0.001"))
+        # إزالة الأس الهائل غير المنطقي؟ لا حاجة، نترك القيمة كما هي
+        plain = format(dec, "f")
         enc = encrypt_text(plain)
         return enc if enc is not None else plain
 
@@ -226,6 +278,13 @@ class EncryptedNumeric(TypeDecorator):
         if dec is None:
             dec = raw  # قيمة قديمة مخزنة كنص واضح
         try:
-            return Decimal(dec).quantize(Decimal("0.01"))
+            result = Decimal(dec)
+            # لا نُكمّم إلى 0.01 — نُعيد القيمة كما خُزّنت (يحافظ على 0.001 لـ JOD)
+            # مع تقليم دقة مفرطة (>3) إلى 3 للاتساق مع process_bind_param
+            if result.as_tuple().exponent < -3:
+                result = result.quantize(Decimal("0.001"))
+            if not result.is_finite():
+                return None
+            return result
         except (InvalidOperation, ValueError):
             return None

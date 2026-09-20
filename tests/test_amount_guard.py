@@ -4,8 +4,8 @@
 """
 from decimal import Decimal
 
-from app.validation import AMOUNT_MAX, clamp_amount, valid_amount
 from app.database.crud.common import _to_valid_amount
+from app.validation import AMOUNT_MAX, clamp_amount, valid_amount
 
 
 class TestAmountGuard:
@@ -93,6 +93,18 @@ class TestAmountGuard:
         from app.database.crud import record_bonus_grant
 
         tx = record_bonus_grant(db_session, 999, -500, "ILS", direction="expense", person="موظف")
-        # record_bonus_grant يمر عبر create_transaction → يُحوّل إلى None
-        assert tx is not None
-        assert tx.amount is None
+        # بعد الإصلاح: المبلغ السالب يُرفض قبل إنشاء المعاملة
+        assert tx is None
+
+    def test_create_transaction_via_bonus_grant_huge_overflow(self, db_session):
+        from app.database.crud import record_bonus_grant
+        from app.validation import AMOUNT_MAX
+
+        tx = record_bonus_grant(db_session, 999, float(AMOUNT_MAX) * 2, "ILS", direction="expense", person="موظف")
+        assert tx is None
+
+    def test_create_transaction_via_bonus_grant_zero(self, db_session):
+        from app.database.crud import record_bonus_grant
+
+        tx = record_bonus_grant(db_session, 999, 0, "ILS", direction="expense", person="موظف")
+        assert tx is None

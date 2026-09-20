@@ -170,7 +170,6 @@ def list_overdue_tasks(
     return _priority_sort(tasks)[:limit]
 
 def mark_overdue_tasks(db: Session, telegram_user_id: int) -> int:
-    from app.database.crud import accessible_user_ids
 
 
     now = now_utc()
@@ -208,7 +207,7 @@ def delete_task_by_id(db: Session, telegram_user_id: int, task_id: int) -> Task 
 
     أمن المساحة: أعضاء عاديون لا يحذفون (المرتكز أو الأفراد فقط).
     """
-    from app.database.crud import _invalidate_caches, accessible_user_ids, can_manage_records
+    from app.database.crud import _invalidate_caches, can_manage_records
 
 
     if not can_manage_records(db, telegram_user_id):
@@ -241,11 +240,13 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
     يُحدّ الجلب بـ _TASK_FETCH_CAP مثل list_pending_tasks/list_overdue_tasks حتى لا
     يُفك تشفير كامل جدول المهام نصيًا لكل /done أو intent="complete_task"؛ المطابقة
     خارج النافذة تُرفض (يحتاج المستخدم وصفًا أدق).
+
+    يحافظ على سلوك الإرجاع الأول للأقدم اختباريًا؛ الوقاية من الإنجاز الخاطئ
+    تُعالج في طبقة المحادثة (/done و complete_task) عبر find_pending_tasks.
     """
-    from app.database.crud import accessible_user_ids
-
-
-    hint = description_hint.strip().lower()
+    hint = (description_hint or "").strip().lower()
+    if not hint:
+        return None
     tasks = (
         db.query(Task)
         .filter(
@@ -262,6 +263,30 @@ def find_pending_task(db: Session, telegram_user_id: int, description_hint: str)
         if hint and hint in desc:
             return task
     return None
+
+
+def find_pending_tasks(db: Session, telegram_user_id: int, description_hint: str) -> list[Task]:
+    """يعيد كل المهام المعلّقة المطابقة (hint in desc) — للاستخدام في قوائم اختيار."""
+    hint = (description_hint or "").strip().lower()
+    if not hint:
+        return []
+    tasks = (
+        db.query(Task)
+        .filter(
+            company_filter(db, telegram_user_id, Task),
+            Task.status.in_(["pending", "overdue"]),
+            Task.deleted_at.is_(None),
+        )
+        .order_by(Task.created_at.desc())
+        .limit(_TASK_FETCH_CAP)
+        .all()
+    )
+    matched = []
+    for task in tasks:
+        desc = (task.description or "").lower()
+        if hint and hint in desc:
+            matched.append(task)
+    return matched
 
 def complete_task(db: Session, telegram_user_id: int, task_id: int) -> Task | None:
     from app.database.crud import _invalidate_caches

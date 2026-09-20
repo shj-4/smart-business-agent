@@ -114,10 +114,19 @@ def _get_current_value(record: Task | Transaction | Note, field: str) -> str:
     return str(val)
 
 
+def _escape_md(text: str) -> str:
+    """تهرب محارف Markdown (* _ [ `) لمنع BadRequest عند parse_mode."""
+    if not text:
+        return text
+    for ch in ("_", "*", "[", "`"):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def _format_record_info(record: Task | Transaction | Note) -> str:
-    """يعرض معلومات السجل الحالي مع الحقول القابلة للتعديل."""
+    """يعرض معلومات السجل الحالي مع الحقول القابلة للتعديل (بدون Markdown خام)."""
     model_name = type(record).__name__
-    lines = [f"**{model_name}** — اختر حقلًا للتعديل:\n"]
+    lines = [f"{_escape_md(model_name)} — اختر حقلًا للتعديل:\n"]
 
     if model_name == "Transaction":
         lines.append(f"المبلغ: {_get_current_value(record, 'amount')}")
@@ -254,7 +263,7 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     info_text = _format_record_info(record)
     kb = _build_fields_keyboard(record)
-    await update.message.reply_text(info_text, reply_markup=kb, parse_mode="Markdown")
+    await update.message.reply_text(info_text, reply_markup=kb)
     return EDIT_FIELD
 
 
@@ -293,7 +302,7 @@ async def edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     info_text = _format_record_info(record)
     kb = _build_fields_keyboard(record)
-    await query.edit_message_text(info_text, reply_markup=kb, parse_mode="Markdown")
+    await query.edit_message_text(info_text, reply_markup=kb)
     return EDIT_FIELD
 
 
@@ -322,16 +331,15 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["edit_field"] = field
 
     await query.edit_message_text(
-        f"أرسل القيمة الجديدة للحقل **{label}**:\n"
-        f"القيمة الحالية: {current}\n\n"
+        f"أرسل القيمة الجديدة للحقل {_escape_md(label)}:\n"
+        f"القيمة الحالية: {_escape_md(current)}\n\n"
         f"(أرسل /cancel لإلغاء)",
-        parse_mode="Markdown",
     )
     return EDIT_FIELD
 
 
 async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    """يستقبل القيمة الجديدة ويُحدّث السجل."""
+    """يستقبل القيمة الجديدة ويُحدّث السجل مع تحقق كامل."""
     field = context.user_data.get("edit_field")
     model_name = context.user_data.get("edit_model")
     record_id = context.user_data.get("edit_id")
@@ -360,14 +368,26 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return ConversationHandler.END
 
         fields = {field: new_value}
-        if model_name == "Transaction":
-            update_transaction(db, record, fields)
-        elif model_name == "Task":
-            if field == "priority":
-                fields["priority"] = normalize_priority(new_value)
-            update_task(db, record, fields)
-        elif model_name == "Note":
-            update_note(db, record, fields)
+        if model_name == "Task" and field == "priority":
+            fields["priority"] = normalize_priority(new_value)
+        # معالجة الوصف الفارغ بتوحيد: مثل update_transaction
+        if field == "description" and not new_value.strip():
+            await update.message.reply_text("الوصف لا يمكن أن يكون فارغًا.")
+            return EDIT_FIELD
+        try:
+            if model_name == "Transaction":
+                update_transaction(db, record, fields)
+            elif model_name == "Task":
+                update_task(db, record, fields)
+            elif model_name == "Note":
+                update_note(db, record, fields)
+        except ValueError as ve:
+            await update.message.reply_text(f"قيمة غير صالحة: {ve}")
+            return EDIT_FIELD
+        except Exception as exc:
+            logger.exception("فشل التحديث")
+            await update.message.reply_text(f"فشل التحديث: {exc}")
+            return EDIT_FIELD
 
         label = FIELD_LABELS_AR.get(field, field)
         await update.message.reply_text(f"تم تحديث {label} بنجاح.\nأرسل /edit لعرض السجلات مجددًا.")

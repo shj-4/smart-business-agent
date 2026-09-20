@@ -49,17 +49,105 @@ def install_sentry() -> bool:
                 return None
             return crumb
 
-        def _before_send(event, hint):
-            # صفّ أي PII قد تسربت إلى الرسالة أو breadcrumbs
+        # EventScrubber لتصفية الحقول الحساسة تلقائيًا
+        try:
+            from sentry_sdk.scrubber import EventScrubber
+
+            scrubber = EventScrubber(
+                denylist=[
+                    "amount",
+                    "person",
+                    "description",
+                    "category",
+                    "currency",
+                    "raw_message",
+                    "telegram_user_id",
+                    "person",
+                    "amount_in_base_currency",
+                ],
+                recursive=True,
+            )
+        except Exception:
+            scrubber = None
+
+        _SENSITIVE_RE = None
+        try:
+            import re
+
+            _SENSITIVE_RE = re.compile(
+                r"(amount|person|description|category|currency|raw_message|telegram_user_id|parameters\s*:)",
+                re.IGNORECASE,
+            )
+        except Exception:
+            pass
+
+        def _scrub_text(text: str | None) -> str:
+            if not text:
+                return text  # type: ignore
             try:
-                # لا ترسل بيانات PII في الرسالة نفسها إن احتوت حقولًا حساسة
-                msg = str(event.get("message") or "")
-                if any(k in msg.lower() for k in ["person", "description"]):
-                    event["message"] = "[REDACTED]"
-                for bc in event.get("breadcrumbs", {}).get("values", []):
-                    if "message" in bc and any(k in str(bc["message"]).lower() for k in ["person", "description"]):
-                        bc["message"] = "[REDACTED]"
+                if _SENSITIVE_RE and _SENSITIVE_RE.search(str(text)):
+                    return "[REDACTED sensitive data]"
+                # IntegrityError parameters تحتوي القيم الحساسة
+                if "[parameters:" in str(text) or "parameters" in str(text).lower():
+                    return "[REDACTED IntegrityError parameters]"
             except Exception:
+                pass
+            return text
+
+        def _scrub_vars(vars_dict: dict | None) -> None:
+            if not isinstance(vars_dict, dict):
+                return
+            for k in list(vars_dict.keys()):
+                if any(s in k.lower() for s in ["amount", "person", "description", "category", "currency", "raw_message", "result", "telegram_user_id"]):
+                    try:
+                        vars_dict[k] = "[REDACTED]"
+                    except Exception:
+                        pass
+
+        def _before_send(event, hint):
+            # صفّ أي PII قد تسربت إلى الرسالة أو breadcrumbs أو المتغيرات المحلية
+            try:
+                # رسالة الحدث نفسه
+                if event.get("message"):
+                    event["message"] = _scrub_text(str(event.get("message")))
+                # استخدم EventScrubber إن توفر
+                if scrubber is not None:
+                    try:
+                        # scrubber.scrub_event يعدل الحدث في المكان
+                        scrubber.scrub_event(event)
+                    except Exception:
+                        pass
+                # exception.values[].value  (مثل IntegrityError مع [parameters: ...])
+                for exc in event.get("exception", {}).get("values", []) or []:
+                    if exc.get("value"):
+                        exc["value"] = _scrub_text(str(exc.get("value")))
+                    # frames → vars (include_local_variables لو بقيت مفعّلة)
+                    for frame in exc.get("stacktrace", {}).get("frames", []) or []:
+                        _scrub_vars(frame.get("vars"))
+                # threads.values[].stacktrace.frames[].vars
+                for thr in event.get("threads", {}).get("values", []) or []:
+                    for frame in thr.get("stacktrace", {}).get("frames", []) or []:
+                        _scrub_vars(frame.get("vars"))
+                # breadcrumbs
+                for bc in event.get("breadcrumbs", {}).get("values", []) or []:
+                    if "message" in bc and bc["message"]:
+                        bc["message"] = _scrub_text(str(bc["message"]))
+                        if any(k in str(bc["message"]).lower() for k in ["person", "description"]):
+                            bc["message"] = "[REDACTED]"
+                    if "data" in bc and isinstance(bc["data"], dict):
+                        for dk in list(bc["data"].keys()):
+                            if any(s in dk.lower() for s in ["amount", "person", "description"]):
+                                bc["data"][dk] = "[REDACTED]"
+                    # لو كان هناك vars في breadcrumb (نادر)
+                    if "vars" in bc:
+                        _scrub_vars(bc.get("vars"))
+                # extra
+                if "extra" in event and isinstance(event["extra"], dict):
+                    for ek in list(event["extra"].keys()):
+                        if any(s in ek.lower() for s in ["amount", "person", "description"]):
+                            event["extra"][ek] = "[REDACTED]"
+            except Exception:
+                # لا نكسر الإرسال بسبب خطأ في التصفية
                 pass
             return event
 
@@ -69,6 +157,8 @@ def install_sentry() -> bool:
             environment=(getattr(settings, "app_env", None) or "development"),
             # لا نرسل بيانات مالية؛ Sentry تصفّي المتغيرات الحساسة مبدئيًا
             send_default_pii=False,
+            include_local_variables=False,
+            event_scrubber=scrubber,
             before_breadcrumb=_before_breadcrumb,
             before_send=_before_send,
         )

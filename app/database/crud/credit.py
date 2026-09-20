@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from app.audit import log_audit
 from app.database.crud.company import company_filter, has_permission
-
 from app.database.models import (
     CreditLimit,
     Transaction,
@@ -121,11 +120,8 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     يعيد: {outstanding, amount, by_currency, unified_ok, side, limit, percent, over}
     side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced" | "unknown".
     """
-    from app.config import settings
-    from app.database.crud import accessible_user_ids
-    from app.money import _unified_totals_for_rows
-
     from app.database.crud.company import report_company_filter
+    from app.money import _unified_totals_for_rows
 
     rows = (
         db.query(Transaction)

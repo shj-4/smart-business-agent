@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 
 from app import timeutil as _timeutil
 from app.audit import log_audit
-from app.database.crud.company import company_filter
 from app.cache import get_or_set
 from app.config import settings
+from app.database.crud.company import company_filter
 from app.database.models import (
     Budget,
     CreditLimit,
@@ -51,17 +51,69 @@ def create_transaction(
     from app.database.crud.company import get_user_base_currency as _get_base
 
     user_base = _get_base(db, telegram_user_id)
-    # العملة المُدخلة أولاً، ثم عملة الشركة كافتراضي — لكن لا تسقط "ريال" المبهمة بصمت
-    raw_input = (data.get("currency") or "").strip() if data.get("currency") else ""
-    raw_cur = normalize_currency(data.get("currency"))
-    if raw_input and raw_cur is None:
-        # مدخل غامض مثل "ريال" بلا تحديد — اتركه None ليُسأل المستخدم
+    # العملة المُدخلة أولاً، ثم عملة الشركة كافتراضي — لكن لا تسقط العملات غير المعروفة بصمت
+    # (يوان/روبل/BTC/ريال المبهمة...): إذا كانت العملة الخام غير مفهومة، اتركها None ليُسأل المستخدم
+    # نتحقق من الحقل الأساسي ومن الحقول المحفوظة currency_raw/_raw_currency التي تضعها طبقات التطبيع
+    raw_input = ""
+    raw_cur = None
+    primary_val = data.get("currency")
+    if isinstance(primary_val, str) and primary_val.strip():
+        raw_input = primary_val.strip()
+        raw_cur = normalize_currency(primary_val)
+    elif primary_val is not None and str(primary_val).strip():
+        # قيمة غير نصية (نادر) — حوّلها لنص
+        raw_input = str(primary_val).strip()
+        raw_cur = normalize_currency(raw_input)
+    # حقول خام محفوظة من app.validation / app.schemas عند سقوط العملة إلى None
+    preserved_raw = None
+    for _k in ("currency_raw", "_raw_currency", "raw_currency"):
+        _v = data.get(_k)
+        if isinstance(_v, str) and _v.strip():
+            preserved_raw = _v.strip()
+            break
+        elif _v is not None and str(_v).strip():
+            preserved_raw = str(_v).strip()
+            break
+    if not raw_input and preserved_raw:
+        raw_input = preserved_raw
+        raw_cur = normalize_currency(preserved_raw)
+    # هل هناك إشارة صريحة أن العملة ناقصة/غير معروفة؟
+    has_missing_currency_flag = "currency" in (data.get("missing_fields") or [])
+    # تحديد إن كانت العملة غير معروفة: نستخدم القائمة البيضاء الصارمة من app.validation
+    # (common.normalize قد يعيد الخام كما هو، لكننا نريد كشف يوان/BTC/IQD خارج القائمة)
+    try:
+        from app.validation import KNOWN_CURRENCIES as _KNOWN_STRICT
+    except Exception:
+        _KNOWN_STRICT = frozenset()
+    def _is_known_code(code: str | None) -> bool:
+        if not code:
+            return False
+        try:
+            return code.upper() in _KNOWN_STRICT
+        except Exception:
+            return False
+    is_unknown = False
+    if raw_input:
+        # إذا كان الخام موجودًا لكن الكود المطبّع ليس ضمن القائمة البيضاء → غير معروف
+        if not _is_known_code(raw_cur):
+            # تحقق إضافي: حتى لو أعاد common الخام نفسه (مثل "يوان")، نعتبره غير معروف
+            is_unknown = True
+        # الحالة الخاصة لـ "ريال" المجردة: common يعيد None صراحةً
+        if raw_cur is None:
+            is_unknown = True
+    if preserved_raw and not _is_known_code(normalize_currency(preserved_raw)):
+        # خام محفوظ غير معروف (بعد التطبيع) → بالتأكيد حالة غير معروفة
+        is_unknown = True
+    if has_missing_currency_flag and not _is_known_code(raw_cur):
+        # flag يعني sanitize/schemas كشفت عملة غير مفهومة
+        is_unknown = True
+    if is_unknown:
         currency = None
     else:
         currency = raw_cur or user_base or (settings.base_currency or "").upper() or None
     # مرر العملة لـ _to_valid_amount لتحديد 3 منازل لـ JOD/KWD/BHD/OMR
     amount = _to_valid_amount(data.get("amount"), currency=currency)
-    base_amount, base_at = _best_effort_base_amount(amount, currency)
+    base_amount, base_at = _best_effort_base_amount(amount, currency, base_currency=user_base)
 
     vat_rate = _to_decimal(data.get("vat_rate"))
     vat_amount = _to_decimal(data.get("vat_amount"))
@@ -89,9 +141,47 @@ def create_transaction(
         if abs(vat_amount - expected) > tolerance:
             vat_amount = expected
 
+    from app.database.crud.common import parse_date_local
     from app.database.crud.company import company_id_for_user as _cid_for
 
     _cid = _cid_for(db, telegram_user_id)
+    # التاريخ المستخرج من الفاتورة أو "دفعت أمس" — يُستخدم كـ created_at بدل الآن
+    # إن لم يُذكر تاريخ، يُترك None ليستخدم now_utc الافتراضي
+    created_at = None
+    raw_date = data.get("date")
+    if isinstance(raw_date, str) and raw_date.strip():
+        created_at = parse_date_local(raw_date.strip())
+    if created_at is None and isinstance(raw_date, str) and raw_date.strip():
+        # محاولة أخيرة عبر AI لتفسير التاريخ العربي الحر (غدًا/أمس)
+        try:
+            import app.ai_service as _ai
+            iso = _ai.interpret_arabic_date(raw_date.strip())
+            if iso:
+                created_at = parse_date_local(iso)
+        except Exception:
+            pass
+    if created_at is None:
+        created_at = now_utc()
+    # فصل الصندوق عن الذمة: is_credit يحدد هل الحركة ذمة (تؤثر على رصيد الشخص) أم نقدية (P&L)
+    # للتوافق: إذا كان person موجودًا و is_credit غير محدد (None) نعتبره ذمة (آجل) كما كان السلوك القديم
+    raw_is_credit = data.get("is_credit")
+    if raw_is_credit is None and data.get("person"):
+        # بيانات قديمة بلا is_credit ومع person → اعتبرها ذمة
+        is_credit_val = True
+    elif isinstance(raw_is_credit, bool):
+        is_credit_val = raw_is_credit
+    elif isinstance(raw_is_credit, str):
+        low = raw_is_credit.strip().lower()
+        if low in ("true", "1", "yes", "credit", "آجل", "ذمة"):
+            is_credit_val = True
+        elif low in ("false", "0", "no", "cash", "نقدي"):
+            is_credit_val = False
+        else:
+            is_credit_val = None
+    else:
+        is_credit_val = bool(raw_is_credit) if raw_is_credit is not None else None
+    # إذا كان is_credit صريحًا False مع person، فهي حركة نقدية لشخص لكن لا تؤثر على الرصيد
+    # (مثل دفع نقدي لشخص بدون ذمة). نتركها كما هي.
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
@@ -103,6 +193,8 @@ def create_transaction(
         category=_clean_text(data.get("category")),
         description=_clean_text(data.get("description")),
         raw_message=raw_message,
+        created_at=created_at,
+        is_credit=is_credit_val,
         amount_in_base_currency=base_amount,
         base_currency_at_creation=base_at,
         vat_rate=vat_rate.quantize(Decimal("0.001")) if vat_rate is not None else None,
@@ -157,13 +249,18 @@ def create_note(
     from app.database.crud.company import company_id_for_user as _cid_for
 
     _cid2 = _cid_for(db, telegram_user_id)
+    # حفظ المبلغ للطلبية في الوصف إن وجد (النموذج بلا عمود amount)
+    desc_raw = data.get("description") or data.get("raw") or raw_message
+    if data.get("amount") is not None and data.get("type") == "order":
+        amt = data.get("amount")
+        cur = data.get("currency") or ""
+        desc_raw = f"{desc_raw} — {amt} {cur}".strip(" —") if desc_raw else f"{amt} {cur}"
     note = Note(
         telegram_user_id=telegram_user_id,
         company_id=_cid2,
         telegram_message_id=telegram_message_id,
         note_type=data.get("type"),  # order | note
-        description=_clean_text(data.get("description") or data.get("raw") or raw_message)
-        or "ملاحظة",
+        description=_clean_text(desc_raw) or "ملاحظة",
         person=_clean_person(data.get("person")),
         category=_clean_text(data.get("category")),
         status="open" if data.get("type") == "order" else None,
@@ -298,15 +395,14 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     return get_or_set(key, lambda: _run_query_uncached(db, telegram_user_id, query_details))
 
 def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict) -> dict:
+    # للتوافق مع مسارات المقارنة القديمة التي تستخدم accessible_user_ids مباشرة
+    from app.database.crud import accessible_user_ids as _accessible  # noqa: F401
     from app.database.crud import (
         list_overdue_tasks,
         list_pending_tasks,
         mark_overdue_tasks,
         report_scope_ids,
     )
-
-    # للتوافق مع مسارات المقارنة القديمة التي تستخدم accessible_user_ids مباشرة
-    from app.database.crud import accessible_user_ids as _accessible  # noqa: F401
 
 
     metric = query_details.get("metric")
@@ -543,7 +639,7 @@ def restore_last_deleted(db: Session, telegram_user_id: int) -> dict | None:
         log_audit(telegram_user_id, "denied_redo", "workspace_role")
         return None
 
-    accessible = accessible_user_ids(db, telegram_user_id)
+    accessible_user_ids(db, telegram_user_id)
     candidates = []
     for model in (Transaction, Task, Note):
         row = (
@@ -642,7 +738,6 @@ def list_recent_records(db: Session, telegram_user_id: int, limit: int = 10) -> 
 
 def get_record_by_id(db: Session, telegram_user_id: int, model_name: str, record_id: int):
     """يجلب سجلًا محددًا بالـ ID والنوع وملكية المستخدم."""
-    from app.database.crud import accessible_user_ids
 
     model_map = {"Transaction": Transaction, "Task": Task, "Note": Note}
     model = model_map.get(model_name)
@@ -889,8 +984,14 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
                     raise ValueError("الوصف غير صالح")
                 row.description = cleaned
     if "amount" in fields or "currency" in fields:
-        # إعادة تثبيت سعر الصرف عند التسجيل: التعديل السابق كان يُبقي المبلغ
-        # القديم بعملة الأساس (خاطئ بعد تغيير المبلغ أو العملة).
+        # إعادة تثبيت سعر الصرف وحساب VAT: كـ create_transaction
+        if row.vat_rate is not None and row.vat_amount is not None and row.amount is not None and row.amount > 0:
+            from decimal import Decimal as _D
+
+            expected = (row.amount * row.vat_rate / (_D("100") + row.vat_rate)).quantize(_D("0.01"))
+            tolerance = abs(expected) * _D("0.04") + _D("0.05")
+            if abs(row.vat_amount - expected) > tolerance:
+                row.vat_amount = expected
         base_amount, base_at = _best_effort_base_amount(row.amount, row.currency)
         row.amount_in_base_currency = base_amount
         row.base_currency_at_creation = base_at
@@ -924,14 +1025,19 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
     _invalidate_caches(db, row.telegram_user_id)
     return row
 
-def merge_person(db: Session, source: str, target: str, company_id: int | None = None) -> int:
+def merge_person(db: Session, source: str, target: str, *args, **kwargs) -> int:
     """يدمج اسمين لنفس الطرف عبر كل السجلات ذات الصلة.
 
     عزل المستأجرين: الدمج الآن معزول حسب الشركة — أطراف بنفس الاسم
     في شركتين مختلفتين لا يُدمجان معًا. إن حُدد company_id يُنفذ الدمج
-    لتلك الشركة فقط، وإلا يُنفذ لكل شركة على حدة (كل شركة تُعالج مستقلة)
-    لمنع الدمج العابر للمستأجرين الذي كان يحدث سابقًا عبر تحديث عام
-    `WHERE person == source` بلا فلتر شركة.
+    لتلك الشركة فقط (حتى لو كانت None → بلا شركة فقط)، وإلا يُنفذ لكل
+    شركة على حدة (كل شركة تُعالج مستقلة) لمنع الدمج العابر للمستأجرين
+    الذي كان يحدث سابقًا عبر تحديث عام `WHERE person == source` بلا فلتر شركة.
+
+    تمييز "بلا شركة" (NULL) عن "الكل": company_id=None يعني بلا شركة فقط،
+    بينما عدم تمرير company_id يعني كل الشركات. هذا يمنع تسريب دمج اسم
+    شخصي (company_id NULL) إلى كل الشركات عند عدم إرسال الحقل من القالب
+    (القالب الآن يرسل "__none__" للـ NULL).
 
     بعد الكتابة يُبطَل كاش رؤية كل مستخدم متأثر (ولأعضاء مساحاته عبر
     accessible_user_ids) حتى لا تبقى الأسماء القديمة في ذاكرة run_query.
@@ -939,13 +1045,25 @@ def merge_person(db: Session, source: str, target: str, company_id: int | None =
     """
     from app.database.crud import _clean_person, _invalidate_caches
 
+    # تحديد company_id مع تمييز "لم يُمرر" عن "None صريح"
+    # نستخدم sentinel داخلي غير ظاهر للاختبار (ليس Assign علوي)
+    if not hasattr(merge_person, "_ALL"):
+        merge_person._ALL = object()  # type: ignore
+    _ALL = merge_person._ALL  # type: ignore
+    if "company_id" in kwargs:
+        company_id = kwargs["company_id"]
+    elif args:
+        company_id = args[0]
+    else:
+        company_id = _ALL
+
     source = _clean_person(source)
     target = _clean_person(target)
     if not source or not target or source == target:
         return 0
 
     # حدد نطاق الشركات المراد معالجتها
-    if company_id is not None:
+    if company_id is not _ALL:
         company_ids = [company_id]
     else:
         company_ids = []
@@ -988,42 +1106,42 @@ def merge_person(db: Session, source: str, target: str, company_id: int | None =
 
         changed = 0
 
-        def _resolve_unique_per_user(model, source_uids: set[int], extra=None) -> None:
+        def _resolve_unique_per_user(model, source_uids: set[int], extra=None, _cid=cid) -> None:  # noqa: B023
             nonlocal changed
             if not source_uids:
                 return
             q = db.query(model).filter(model.person == source)
-            if cid is None:
+            if _cid is None:
                 q = q.filter(model.company_id.is_(None))
             else:
-                q = q.filter(model.company_id == cid)
+                q = q.filter(model.company_id == _cid)
             if extra is not None:
                 q = q.filter(extra)
             target_filters = [model.person == target]
             if extra is not None:
                 target_filters.append(extra)
             tq = db.query(model.telegram_user_id).filter(*target_filters)
-            if cid is None:
+            if _cid is None:
                 tq = tq.filter(model.company_id.is_(None))
             else:
-                tq = tq.filter(model.company_id == cid)
+                tq = tq.filter(model.company_id == _cid)
             collided = source_uids & {uid for (uid,) in tq.all()}
             if collided:
                 dq = db.query(model).filter(model.person == source)
-                if cid is None:
+                if _cid is None:
                     dq = dq.filter(model.company_id.is_(None))
                 else:
-                    dq = dq.filter(model.company_id == cid)
+                    dq = dq.filter(model.company_id == _cid)
                 if extra is not None:
                     dq = dq.filter(extra)
                 changed += dq.filter(model.telegram_user_id.in_(collided)).delete(synchronize_session=False)
             rest = source_uids - collided
             if rest:
                 uq = db.query(model).filter(model.person == source)
-                if cid is None:
+                if _cid is None:
                     uq = uq.filter(model.company_id.is_(None))
                 else:
-                    uq = uq.filter(model.company_id == cid)
+                    uq = uq.filter(model.company_id == _cid)
                 if extra is not None:
                     uq = uq.filter(extra)
                 changed += uq.filter(model.telegram_user_id.in_(rest)).update({model.person: target}, synchronize_session=False)

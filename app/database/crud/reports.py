@@ -8,7 +8,6 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database.db import DATABASE_URL
 from app.database.models import (
     Budget,
@@ -62,7 +61,7 @@ def monthly_totals(
     db: Session, telegram_user_id: int, months: int = 6, include_stored: bool = False
 ) -> list[dict]:
     """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي)."""
-    from app.database.crud.company import report_company_filter, report_scope_ids
+    from app.database.crud.company import report_company_filter
 
 
     months = max(1, int(months))
@@ -199,7 +198,6 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
 
 
     uids = report_scope_ids(db, telegram_user_id)
-    empty_uids = uids if uids else {-1}
 
     def _counts(model, **filters) -> int:
         q = db.query(model).filter(report_company_filter(db, telegram_user_id, model))
@@ -303,9 +301,8 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
         budget_usage,
         list_budgets,
         person_debts,
-        report_company_filter, report_scope_ids,
+        report_scope_ids,
     )
-
     from app.database.crud.company import get_user_base_currency as _get_base2
 
     base = _get_base2(db, telegram_user_id)

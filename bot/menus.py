@@ -139,23 +139,16 @@ SETTINGS_DOCS = {
 }
 
 TOOLS_MENU = [
-    [("✏️ تعديل آخر سجل", "el:last")],
-    [("🕘 آخر العمليات", "his:p:1")],
-    [("🔍 بحث", "sb:start")],
-    [(f"{EXPENSE} الميزانيات", "bg:list")],
-    [("💳 بطاقة الذمم الموحّدة", "tool:finance")],
-    [("💳 الديون والأرصدة", "tool:debts")],
-    [("🧾 الفواتير الآجلة", "tool:invoices")],
-    [("🛒 طلبياتي", "tool:orders")],
-    [(f"{WARNING} الحدود الائتمانية", "tool:credit")],
-    [("🧭 لوحة مؤشرات الأداء", "tool:kpi")],
-    [("📈 الرسم البياني", "tool:chart")],
-    [("🧾 تقرير شامل", "tool:summary")],
-    [("📄 تصدير PDF", "tool:pdf")],
-    [("📦 تصدير Excel", "ex:menu")],
-    [("💱 تحويل عملة", "tool:convert")],
-    [("🏢 المساحة المشتركة", "ws:status")],
-    [(f"{BACK} رجوع", "menu:main")],
+    # صفّان في كل سطر — أسلس بصريًا ويختصر التمرير بنصف طول العمود الواحد
+    [("✏️ تعديل آخر سجل", "el:last"), ("🕘 آخر العمليات", "his:p:1")],
+    [("🔍 بحث", "sb:start"), (f"{EXPENSE} الميزانيات", "bg:list")],
+    [("💳 الذمم الموحّدة", "tool:finance"), ("💳 الديون", "tool:debts")],
+    [("🧾 الفواتير", "tool:invoices"), ("🛒 طلبياتي", "tool:orders")],
+    [(f"{WARNING} الحدود", "tool:credit"), ("🧭 المؤشرات", "tool:kpi")],
+    [("📈 الرسم", "tool:chart"), ("🧾 تقرير شامل", "tool:summary")],
+    [("📄 تصدير PDF", "tool:pdf"), ("📦 تصدير Excel", "ex:menu")],
+    [("💱 تحويل عملة", "tool:convert"), ("🏢 مساحتي", "ws:status")],
+    [("🎁 البونس والنقاط", "bn:overview"), (f"{BACK} رجوع", "menu:main")],
 ]
 
 EXPORT_MENU = [
@@ -224,26 +217,17 @@ def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
 
 
 def _tools_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardMarkup:
+    # تصميم شبكي 2×N — أسلس وممتع، يقلّل طول القائمة من 17 سطرًا عموديًا إلى 9 صفوف
     base = [
-        [("el:last", t("btn_edit_last", lang))],
-        [("his:p:1", t("btn_history", lang))],
-        [("sb:start", t("btn_search", lang))],
-        [("bg:list", t("btn_budget", lang))],
-        [("bn:overview", t("btn_bonus", lang))],
-        # أزرار كانت مفقودة سابقًا (TOOLS_MENU يضمها لكن _tools_keyboard لا)
-        [("tool:debts", "💳 الديون والأرصدة")],
-        [("tool:invoices", "🧾 الفواتير الآجلة")],
-        [("tool:orders", "🛒 طلبياتي")],
-        [("tool:credit", f"{WARNING} الحدود الائتمانية")],
-        [("tool:kpi", t("btn_kpi", lang))],
-        [("tool:finance", t("btn_finance", lang))],
-        [("tool:chart", t("btn_chart", lang))],
-        [("tool:summary", t("btn_summary", lang))],
-        [("tool:pdf", t("btn_export_pdf", lang))],
-        [("ex:menu", t("btn_export", lang))],
-        [("tool:convert", t("btn_convert", lang))],
-        [("ws:status", t("btn_workspace", lang))],
-        [("menu:main", t("btn_back", lang))],
+        [("el:last", t("btn_edit_last", lang)), ("his:p:1", t("btn_history", lang))],
+        [("sb:start", t("btn_search", lang)), ("bg:list", t("btn_budget", lang))],
+        [("tool:finance", t("btn_finance", lang)), ("tool:debts", t("btn_debts", lang))],
+        [("tool:invoices", t("btn_invoices", lang)), ("tool:orders", t("btn_orders", lang))],
+        [("tool:credit", t("btn_credit", lang)), ("tool:kpi", t("btn_kpi", lang))],
+        [("tool:chart", t("btn_chart", lang)), ("tool:summary", t("btn_summary", lang))],
+        [("tool:pdf", t("btn_export_pdf", lang)), ("ex:menu", t("btn_export", lang))],
+        [("tool:convert", t("btn_convert", lang)), ("ws:status", t("btn_workspace", lang))],
+        [("bn:overview", t("btn_bonus", lang)), ("menu:main", t("btn_back", lang))],
     ]
     # زر الفريق — يظهر فقط لمن عنده members.manage
     if uid is not None:
@@ -316,7 +300,7 @@ PAGES = {
     "record": ("تسجيل عملية — ماذا تريد أن تسجّل؟", RECORD_MENU),
     "reports": ("التقارير — اختر الفترة:", REPORT_PERIODS),
     "tasks": ("مهامي — اختر الحالة:", TASK_STATUS_MENU),
-    "tools": ("🧰 أدوات — اختر:", TOOLS_MENU),
+    "tools": ("🧰 صندوق الأدوات ✨ — كل شيء بضغطتين", TOOLS_MENU),
     "settings": ("الإعدادات:", SETTINGS_MENU),
 }
 
@@ -334,7 +318,9 @@ async def _handle_menu(
         return
     if target == "tools":
         title = t("tools_title", lang)
-        await query.edit_message_text(title, reply_markup=_tools_keyboard(lang, uid=query.from_user.id))
+        # لمسة ممتعة: تلميح صغير يوضّح الشبكة الجديدة
+        tip = "💡 شبكة سريعة ٢×٢ — كل أدواتك في صفحة واحدة!" if lang == "ar" else "💡 2×2 grid — all tools in one view!"
+        await query.edit_message_text(f"{title}\n{tip}", reply_markup=_tools_keyboard(lang, uid=query.from_user.id))
         return
     title, rows = PAGES.get(target, ("القائمة الرئيسية", MAIN_MENU))
     await query.edit_message_text(title, reply_markup=build_menu(rows))
@@ -1022,28 +1008,35 @@ async def _handle_tool_summary(
     from sqlalchemy import func
 
     from app.config import settings
-    from app.database.crud import accessible_user_ids
     from app.exchange import convert_totals_to_base
     from app.timeutil import now_local, to_utc_naive
 
     uid = query.from_user.id
     db = SessionLocal()
     try:
-        ids = accessible_user_ids(db, uid)
+        from app.database.crud.company import report_company_filter, report_scope_ids
+
+        # يحترم report.view_all: staff يرى نفسه فقط، manager يرى الشركة
+        report_scope_ids(db, uid)
+        # استخدم فلتر الشركة/النطاق بدل accessible_user_ids العام
+        # للعدّ استخدم company_filter المتوافق مع report
+        # لكن للاختصار نحافظ على in_(ids) حيث ids هو نطاق التقرير الصحيح
         filters_tx = (
-            Transaction.telegram_user_id.in_(ids),
+            report_company_filter(db, uid, Transaction),
             Transaction.deleted_at.is_(None),
         )
+        # العدّ عبر report_company_filter مباشرة لضمان العزل
+        # نحتاج base count بنفس الفلتر؛ in_(ids) كان يتجاوز view_all
         tx_count = db.query(func.count(Transaction.id)).filter(*filters_tx).scalar()
         task_count = (
             db.query(func.count(Task.id))
-            .filter(Task.telegram_user_id.in_(ids), Task.deleted_at.is_(None))
+            .filter(report_company_filter(db, uid, Task), Task.deleted_at.is_(None))
             .scalar()
         )
         overdue = (
             db.query(func.count(Task.id))
             .filter(
-                Task.telegram_user_id.in_(ids),
+                report_company_filter(db, uid, Task),
                 Task.deleted_at.is_(None),
                 Task.status == "overdue",
             )
@@ -1052,7 +1045,7 @@ async def _handle_tool_summary(
         order_count = (
             db.query(func.count(Note.id))
             .filter(
-                Note.telegram_user_id.in_(ids),
+                report_company_filter(db, uid, Note),
                 Note.deleted_at.is_(None),
                 Note.note_type == "order",
             )
@@ -1640,7 +1633,7 @@ async def _team_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -
         if not has_permission(db, uid, "members.manage"):
             await query.edit_message_text("عذرًا، ليس لديك صلاحية إدارة الفريق.", reply_markup=_home_keyboard())
             return
-        m = get_company_member(db, uid)
+        get_company_member(db, uid)
         company = db.query(__import__("app.database.models", fromlist=["Company"]).Company).filter_by(id=cid).first()
         cname = company.name if company else f"#{cid}"
         text = f"👥 فريق {cname} — اختر إجراءً:"
@@ -1682,15 +1675,14 @@ async def _team_create_invite(query: CallbackQuery, context: ContextTypes.DEFAUL
             await query.edit_message_text("تعذر إنشاء الدعوة. تأكد من صلاحياتك والدور المطلوب.", reply_markup=_home_keyboard([(f"{BACK} رجوع", "team:menu")]))
             return
         bot_username = (getattr(context.bot, "username", None) or getattr(query, "_bot_username", None) or "bot").lstrip("@")
-        # bot_username قد يكون None في الاختبارات — نستخدم قيمة افتراضية
         if kind == "link":
             link = f"https://t.me/{bot_username}/?start=inv_{inv.token}"
-            text = f"🔗 رابط الدعوة ({role}):\n{link}\n\nصالح حتى {inv.expires_at or 'غير محدد'} — استخدامات: {inv.max_uses}"
+            # لا Markdown — الرابط يحوي _ و =
+            text = f"رابط الدعوة ({role}):\n{link}\n\nصالح حتى {inv.expires_at or 'غير محدد'} — استخدامات: {inv.max_uses}"
         else:
-            text = f"🔢 كود الدعوة ({role}):\n`{inv.token}`\n\nأرسل للموظف: /join {inv.token}\nصالح لساعة واحدة."
+            text = f"كود الدعوة ({role}):\n{inv.token}\n\nأرسل للموظف: /join {inv.token}\nصالح لساعة واحدة."
         rows = [[("🚫 إلغاء الدعوة", f"team:revoke:{inv.id}")], [(f"{BACK} رجوع", "team:menu")]]
-        # للكود نعرض كنص قابل للنسخ؛ للرابط نعرضه أيضًا
-        await query.edit_message_text(text, reply_markup=build_menu(rows), parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
     finally:
         db.close()
 
@@ -1699,7 +1691,7 @@ async def _team_members(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
     uid = query.from_user.id
     db = SessionLocal()
     try:
-        from app.database.crud import company_id_for_user, company_member_ids, get_company_member
+        from app.database.crud import company_id_for_user
         from app.database.models import CompanyMember
         from app.permissions import ROLE_LABELS
 
@@ -1739,7 +1731,6 @@ async def _team_member_detail(query: CallbackQuery, context: ContextTypes.DEFAUL
         label = ROLE_LABELS.get(target.role, target.role)
         text = f"👤 العضو {target.telegram_user_id}\nالدور الحالي: {label}"
         # أزرار تغيير الدور
-        from app.permissions import ROLE_PERMISSIONS
 
         actor = get_company_member(db, uid)
         assignable = _team_assignable_roles(actor.role if actor else "")
@@ -1747,7 +1738,7 @@ async def _team_member_detail(query: CallbackQuery, context: ContextTypes.DEFAUL
         for r in assignable:
             if r != target.role:
                 rows.append([(f"→ {ROLE_LABELS.get(r, r)}", f"team:setrole:{target.telegram_user_id}:{r}")])
-        rows.append([(f"🗑️ إزالة من الشركة", f"team:remove:{target.telegram_user_id}")])
+        rows.append([("🗑️ إزالة من الشركة", f"team:remove:{target.telegram_user_id}")])
         rows.append([(f"{BACK} رجوع", "team:members")])
         await query.edit_message_text(text, reply_markup=build_menu(rows))
     finally:
@@ -1860,7 +1851,12 @@ async def _company_info(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
     uid = query.from_user.id
     db = SessionLocal()
     try:
-        from app.database.crud.company import company_id_for_user, company_member_ids, get_company, get_company_member
+        from app.database.crud.company import (
+            company_id_for_user,
+            company_member_ids,
+            get_company,
+            get_company_member,
+        )
         from app.permissions import ROLE_LABELS
 
         cid = company_id_for_user(db, uid)

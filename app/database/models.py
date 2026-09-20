@@ -62,6 +62,11 @@ class Transaction(Base):
     currency = Column(String(16), nullable=True)
     person = Column(String(255), nullable=True)  # المورد أو العميل
     category = Column(String(64), nullable=True)  # تصنيف اختياري (إيجار، رواتب...)
+    # فصل حركة الصندوق (نقدي) عن قيد الذمة (آجل/تسديد) — يمنع خلط دفتر الديون بـ P&L
+    # is_credit=True → قيد ذمة (آجل/تسديد) يؤثر على رصيد الشخص، لا على إجمالي المصاريف/الإيرادات
+    # is_credit=False/None → حركة نقدية (P&L) تؤثر على الإجماليات
+    # للتوافق مع البيانات القديمة: person IS NOT NULL و is_credit IS NULL يُعتبر ذمة (آجل)
+    is_credit = Column(Boolean, nullable=True, default=None)
     description = Column(EncryptedString(), nullable=True)  # مشفر
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 

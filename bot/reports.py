@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.database.crud import accessible_user_ids, mark_overdue_tasks
+from app.database.crud import mark_overdue_tasks
 from app.database.models import Task, Transaction
 from app.formatting import FREQUENCY_NAMES
 from app.formatting import fmt_amount as _fmt_amount

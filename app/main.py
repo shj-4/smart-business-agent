@@ -5,6 +5,14 @@ FastAPI تطبيق منفصل عن البوت (bot.py).
 يُشغَّل كخدمة مستقلة (SmartBotAPI) على المنفذ 8000 عبر start_api.cmd /
 setup_services.ps1. لوحة التحكم محتاجة ملفات قوالب في templates/.
 
+⚠️ تحذير عزل المستأجرين: لوحة التحكم أداة مشغّل فقط (operator-only).
+صفحات المعاملات/المهام/الملاحظات/الميزانيات و /api/* كانت تعرض بيانات كل الشركات
+معًا — الفلتر company_id موجود فقط في الرئيسية والأطراف. لا تعرّض اللوحة
+لأصحاب الشركات كمستأجرين منفصلين حتى يُطبَّق عزل كامل. تمت إضافة فلتر
+اختياري company_id لبقية الصفحات، لكن العرض الافتراضي (بدون فلتر) يبقى
+عرضًا تشغيليًا شاملاً. للحماية الإضافية: مصادقة Basic مع حدّ محاولات، ويُنصح
+بتشغيلها خلف HTTPS (HSTS) وعدم كشف المنفذ 8000 مباشرة للإنترنت.
+
 لا علاقة له بمنطق البوت (polling عبر bot.py) ولا يستقبل Updates من Telegram.
 """
 
@@ -31,7 +39,16 @@ from app.cache import start_sweeper
 from app.charts import _convert_month_currency_groups, generate_global_monthly_chart
 from app.config import TELEGRAM_BOT_TOKEN, settings
 from app.database.db import engine, get_db
-from app.database.models import Budget, Company, CompanyMember, InviteLink, Note, Task, Transaction, WorkspaceMember
+from app.database.models import (
+    Budget,
+    Company,
+    CompanyMember,
+    InviteLink,
+    Note,
+    Task,
+    Transaction,
+    WorkspaceMember,
+)
 from app.exchange import convert_totals_to_base
 from app.sentry import install_sentry
 from app.timeutil import now_local, to_local_naive
@@ -114,8 +131,7 @@ def _restrict_file_windows(path: str) -> None:
         subprocess.run(
             ["icacls", path, "/grant:r", f"{username}:(F)"],
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
         # امنح SYSTEM أيضًا لخدمات nssm (LocalSystem)
@@ -128,8 +144,7 @@ def _restrict_file_windows(path: str) -> None:
         result = subprocess.run(
             ["icacls", path, "/grant:r", f"{username}:(F)"],
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
         if result.returncode != 0:
@@ -576,14 +591,14 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
                 c, {"expense": Decimal("0"), "income": Decimal("0")}
             )
             live_entry[kind] += amount or Decimal("0")
-    for (cid, person), cnt in notes_count.items():
+    for (cid, person), _cnt in notes_count.items():
         key = (cid, person)
         if key not in agg:
             agg[key] = {"company_id": cid, "person": person, "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
         else:
             # حدّث العدّ إن وجد مسبقًا من المعاملات
             pass
-    for (cid, person), cnt in tasks_count.items():
+    for (cid, person), _cnt in tasks_count.items():
         key = (cid, person)
         if key not in agg:
             agg[key] = {"company_id": cid, "person": person, "by_currency": {}, "live_by_currency": {}, "stored": {}, "records": 0, "last_seen": None}
@@ -632,8 +647,12 @@ async def root():
 
 
 @app.get("/health")
-def health(db: Session = Depends(get_db)):
-    """فحص حقيقي: اتصال قاعدة البيانات + صحة الجداول الأساسية (خفيف وسريع)."""
+def health(db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)):
+    """فحص حقيقي: اتصال قاعدة البيانات + صحة الجداول الأساسية (خفيف وسريع).
+
+    محمي بمصادقة لوحة التحكم: يكشف حالة ENCRYPTION_KEY والهجرات والإصدارات
+    وحجم قاعدة البيانات — لا يجب أن يكون عامًا.
+    """
     db_ok = False
     try:
         db.query(func.count(Transaction.id)).scalar()
@@ -648,7 +667,7 @@ def health(db: Session = Depends(get_db)):
 
 
 @app.get("/status")
-def status(db: Session = Depends(get_db)):
+def status(db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)):
     """تقرير تشغيلي: فحص اتصال قاعدة البيانات ومؤشرات أساسية سليمة."""
     db_ok = True
     try:
@@ -891,7 +910,11 @@ def _transactions_export_bytes(rows: list[Transaction]) -> bytes:
         cell.font = header_font
         cell.fill = header_fill
         cell.border = border
-        cell.alignment = Alignment(horizontal="center")
+        cell.alignment = Alignment(horizontal="center", readingOrder=2)
+    try:
+        ws.sheet_view.rightToLeft = True
+    except Exception:
+        pass
     for r in rows:
         local_dt = to_local_naive(r.created_at)
         ws.append(
@@ -933,10 +956,24 @@ def dashboard_transactions(
     page: int = 1,
     page_size: int = 50,
     export: str = "",
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
-    """جدول المعاملات: فلاتر (فترة/بحث/نوع) + ترقيم صفحات + تصدير Excel."""
+    """جدول المعاملات: فلاتر (فترة/بحث/نوع) + ترقيم صفحات + تصدير Excel.
+
+    عزل المستأجرين: إن حُدد company_id يُفلتر عليه؛ اللوحة أداة مشغّل فقط.
+    """
+    # دعم company_id عبر query param (قد يأتي كـ string)
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            if str(q_cid).strip() == "__none__":
+                company_id = None
+            else:
+                company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
     base_path = "/dashboard/transactions"
     params: dict = {}
     if period != "all_time":
@@ -945,8 +982,12 @@ def dashboard_transactions(
         params["q"] = q
     if ttype:
         params["ttype"] = ttype
+    if company_id is not None:
+        params["company_id"] = str(company_id)
 
     filters = [Transaction.deleted_at.is_(None)]
+    if company_id is not None:
+        filters.append(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
         filters.append(Transaction.created_at >= start)
@@ -1042,6 +1083,7 @@ def dashboard_tasks(
     q: str = "",
     page: int = 1,
     page_size: int = 50,
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
@@ -1074,14 +1116,25 @@ def dashboard_tasks(
     except Exception:
         logger.exception("فشل تحديث المهام المتأخرة في لوحة المهام — حالات التأخر لن تنعكس")
 
+    # company_id filter
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
     base_path = "/dashboard/tasks"
     params: dict = {}
     if status:
         params["status"] = status
     if q:
         params["q"] = q
+    if company_id is not None:
+        params["company_id"] = str(company_id)
 
     filters = [Task.deleted_at.is_(None)]
+    if company_id is not None:
+        filters.append(Task.company_id == company_id)
     if status in ("pending", "overdue", "done"):
         filters.append(Task.status == status)
     term = q.strip()
@@ -1162,18 +1215,29 @@ def dashboard_notes(
     q: str = "",
     page: int = 1,
     page_size: int = 50,
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
     """جدول الطلبيات والملاحظات: تصفية بالنوع وبالشخص + ترقيم صفحات."""
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
     base_path = "/dashboard/notes"
     params: dict = {}
     if ntype:
         params["ntype"] = ntype
     if q:
         params["q"] = q
+    if company_id is not None:
+        params["company_id"] = str(company_id)
 
     filters = [Note.deleted_at.is_(None)]
+    if company_id is not None:
+        filters.append(Note.company_id == company_id)
     if ntype in ("order", "note"):
         filters.append(Note.note_type == ntype)
     term = q.strip()
@@ -1325,18 +1389,37 @@ async def dashboard_customers_merge(
     parsed = urllib.parse.parse_qs(raw)
     source = (parsed.get("source") or [""])[0].strip()
     target = (parsed.get("target") or [""])[0].strip()
+    # تمييز "بلا شركة" (__none__) عن "الكل" (عدم إرسال الحقل)
+    # القالب الآن يرسل دائمًا company_id: رقم أو "__none__" للـ NULL
+    has_company_field = "company_id" in parsed
     company_id_raw = (parsed.get("company_id") or [""])[0].strip()
     company_id = None
-    if company_id_raw:
+    # sentinel للـ "الكل" — نستخدمه عند عدم وجود الحقل أصلاً (طلبات قديمة/خارجية)
+    _ALL_SENTINEL = object()
+    if not has_company_field:
+        company_id = _ALL_SENTINEL  # كل الشركات (سلوك قديم)
+    elif company_id_raw == "__none__":
+        company_id = None  # بلا شركة فقط (NULL)
+    elif company_id_raw == "__all__" or company_id_raw == "":
+        company_id = _ALL_SENTINEL
+    elif company_id_raw:
         try:
             company_id = int(company_id_raw)
         except ValueError:
-            company_id = None
+            company_id = _ALL_SENTINEL
+    else:
+        company_id = _ALL_SENTINEL
     if source and target:
-        await asyncio.to_thread(merge_person, db, source, target, company_id=company_id)
+        # مرر company_id كما هو: None يعني بلا شركة، _ALL_SENTINEL يعني الكل
+        if company_id is _ALL_SENTINEL:
+            await asyncio.to_thread(merge_person, db, source, target)
+        else:
+            await asyncio.to_thread(merge_person, db, source, target, company_id=company_id)
     redirect_url = "/dashboard/customers?merged=1"
-    if company_id is not None:
+    if company_id is not None and company_id is not _ALL_SENTINEL:
         redirect_url += f"&company_id={company_id}"
+    elif company_id is None and has_company_field:
+        redirect_url += "&company_id=__none__"
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
@@ -1371,12 +1454,15 @@ def dashboard_export(
 # ---------- الميزانيات (لوحة التحكم + JSON) ----------
 
 
-def _budget_rows(db: Session) -> list[dict]:
+def _budget_rows(db: Session, company_id: int | None = None) -> list[dict]:
     from app.database.crud import budget_monthly_reset, budget_usage
     from app.exchange import CURRENCY_NAMES
 
     rows = []
-    budgets = db.query(Budget).order_by(Budget.created_at.asc()).all()
+    q = db.query(Budget).order_by(Budget.created_at.asc())
+    if company_id is not None:
+        q = q.filter(Budget.company_id == company_id)
+    budgets = q.all()
     for b in budgets:
         budget_monthly_reset(db, b)
         usage = budget_usage(db, b)
@@ -1401,11 +1487,18 @@ def _budget_rows(db: Session) -> list[dict]:
 @app.get("/dashboard/budgets", response_class=HTMLResponse)
 def dashboard_budgets(
     request: Request,
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
     """عرض الميزانيات الشهرية وحالة كل منها."""
-    budgets = _budget_rows(db)
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
+    budgets = _budget_rows(db, company_id=company_id)
     return templates.TemplateResponse(
         request,
         "budgets.html",
@@ -1516,10 +1609,18 @@ async def dashboard_company_delete(
 
 @app.get("/api/budgets")
 def api_budgets(
+    request: Request,
+    company_id: int | None = None,
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """الميزانيات الشهرية بصيغة JSON."""
-    return _budget_rows(db)
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
+    return _budget_rows(db, company_id=company_id)
 
 
 # ---------- APIs للبيانات (JSON) ----------
@@ -1527,12 +1628,22 @@ def api_budgets(
 
 @app.get("/api/transactions")
 def api_transactions(
+    request: Request,
     period: str = "all_time",
+    company_id: int | None = None,
     db: Session = Depends(get_db),
     _auth: None = Depends(require_dashboard_auth),
 ):
     """معاملات مالية بصيغة JSON (أحدث 500)."""
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
     q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    if company_id is not None:
+        q = q.filter(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
         q = q.filter(Transaction.created_at >= start)
@@ -1556,8 +1667,24 @@ def api_transactions(
 
 @app.get("/api/tasks")
 def api_tasks(
+    request: Request,
+    company_id: int | None = None,
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """المهام بصيغة JSON."""
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            company_id = int(str(q_cid).strip())
+    except Exception:
+        pass
+    # إن حُدد company_id فلتره؛ وإلا نفس السلوك
+    if company_id is not None:
+        rows = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id == company_id).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(500).all()
+        out = []
+        for r in rows:
+            due_str = to_local_naive(r.due_date).strftime("%Y-%m-%d %H:%M") if r.due_date else ""
+            out.append({"id": r.id, "description": r.description or "", "person": r.person or "", "due_date": due_str, "status": r.status})
+        return out
     rows = _recent_tasks(db, limit=500)
     return rows
