@@ -583,19 +583,19 @@ class TestBonusPlanCommandPath:
         return sent
 
     def test_plan_add_sets_initial_next_due_at(self, db_session):
-        """الخطة المنشأة عبر /bonus plan إضافة يجب أن تُستحق فورًا (next_due_at حاضر)."""
+        """الخطة الدورية عبر /bonus plan إضافة لا تُستحق فورًا بل بعد دورة كاملة (تجنب منح تلقائي دون تأكيد)."""
         self._run_cmd_plan(db_session, ["add", "محمد", "1000", "monthly"])
         plans = list_employee_bonus_plans(db_session, USER_A)
         assert len(plans) == 1
         assert plans[0].person == "محمد"
         assert plans[0].next_due_at is not None
-        assert plans[0].next_due_at <= now_utc()
+        assert plans[0].next_due_at > now_utc()
 
     def test_plan_add_appears_in_due_plans(self, db_session):
-        """بعد إنشاء الخطة عبر الأمر لا بد أن تُلتقط بالفحص التلقائي وتُمنح."""
+        """الخطة الدورية لا تُمنح فورًا — تُستحق بعد دورة (لا تُلتقط مباشرة)."""
         self._run_cmd_plan(db_session, ["add", "سامر", "500", "monthly"])
         due = due_employee_bonus_plans(db_session)
-        assert any(p.person == "سامر" for p in due)
+        assert not any(p.person == "سامر" for p in due)
 
     def test_plan_add_one_off_is_due_immediately(self, db_session):
         self._run_cmd_plan(db_session, ["add", "خالد", "300", "مرة واحدة"])
@@ -603,9 +603,10 @@ class TestBonusPlanCommandPath:
         assert any(p.person == "خالد" for p in due)
 
     def test_plan_add_quarterly_is_due_immediately(self, db_session):
+        # الربع سنوي كالشهري: أول استحقاق بعد 3 أشهر، لا فور الإنشاء
         self._run_cmd_plan(db_session, ["add", "أحمد", "900", "ربع سنوي"])
         due = due_employee_bonus_plans(db_session)
-        assert any(p.person == "أحمد" for p in due)
+        assert not any(p.person == "أحمد" for p in due)
 
     def test_plan_add_multi_word_person(self, db_session):
         """الشخص المكوّن من كلمتين (أبو محمد) يُلتقط كاملاً لا الكلمة الأولى فقط."""

@@ -383,6 +383,23 @@ def _respawn_recurring_task(db: Session, telegram_user_id: int, done_task: Task)
                 )
             else:
                 return
+            # إن كان الموعد المحسوب لا يزال في الماضي (مهمة متأخرة أسابيع)،
+            # قدّم حتى يتجاوز الآن — وإلا يبقى متأخرًا ويتكرر إزعاج التذكير فورًا
+            _now_local = to_local_naive(now_utc())
+            _iter = 0
+            while next_due <= _now_local and _iter < 120:
+                _iter += 1
+                if rule == "daily":
+                    next_due = next_due + timedelta(days=1)
+                elif rule == "weekly":
+                    next_due = next_due + timedelta(days=7)
+                elif rule == "monthly":
+                    year = next_due.year + (1 if next_due.month == 12 else 0)
+                    month = 1 if next_due.month == 12 else next_due.month + 1
+                    last_day = calendar.monthrange(year, month)[1]
+                    next_due = next_due.replace(year=year, month=month, day=min(next_due.day, last_day))
+                else:
+                    break
         except ValueError:
             return
 

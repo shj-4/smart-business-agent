@@ -48,9 +48,22 @@ def create_transaction(
         return None
 
     # العملة الأساسية للشركة (إن وجدت) وإلا العامة
+    # لا نحتجز اتصال DB أثناء استدعاء الشبكة (10ث): اقرأ الأساس في جلسة قصيرة منفصلة
+    # ثم أغلقها قبل convert (التي قد تضرب الشبكة). هذا يمنع نفاد QueuePool تحت ضغط.
     from app.database.crud.company import get_user_base_currency as _get_base
 
-    user_base = _get_base(db, telegram_user_id)
+    try:
+        from app.database.db import SessionLocal as _SL
+        _tmp = _SL()
+        try:
+            user_base = _get_base(_tmp, telegram_user_id)
+        finally:
+            try:
+                _tmp.close()
+            except Exception:
+                pass
+    except Exception:
+        user_base = _get_base(db, telegram_user_id)
     # العملة المُدخلة أولاً، ثم عملة الشركة كافتراضي — لكن لا تسقط العملات غير المعروفة بصمت
     # (يوان/روبل/BTC/ريال المبهمة...): إذا كانت العملة الخام غير مفهومة، اتركها None ليُسأل المستخدم
     # نتحقق من الحقل الأساسي ومن الحقول المحفوظة currency_raw/_raw_currency التي تضعها طبقات التطبيع

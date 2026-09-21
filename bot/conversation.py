@@ -925,6 +925,33 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     company_dict = _company_dict_for_user(telegram_user_id)
 
     def _safe_analyze(text, comp):
+        # احترام موافقة الخصوصية — إن عطّل المستخدم Gemini لا نرسل شيئًا
+        try:
+            from app.database.crud.common import has_ai_consent
+            from app.database.db import SessionLocal as _SL2
+            _db2 = _SL2()
+            try:
+                if not has_ai_consent(_db2, telegram_user_id):
+                    # تحليل محلي بلا شبكة: قواعد بسيطة تكفي للتسجيل اليدوي
+                    # محاولة تقسيم محلي بسيط (مبلغ+عملة) بدل Gemini
+                    import re as _re_loc
+
+                    from app.schemas import normalize_analysis as _norm
+                    m = _re_loc.search(r"\d+(?:[.,]\d+)?", text)
+                    amt = None
+                    if m:
+                        try:
+                            amt = float(m.group(0).replace(",", "."))
+                        except Exception:
+                            amt = None
+                    return _norm({"intent": "record", "type": "expense", "amount": amt, "raw": text})
+            finally:
+                try:
+                    _db2.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             return analyze_message(text, comp)
         except TypeError:
@@ -1075,7 +1102,8 @@ def _record_feedback(
     """يسجّل رسالةً قرر المستخدم أنها خاطئة (إلغاء أو رفض تأكيد).
 
     تُخزَّن النص الأصلي (مشفّر في قاعدة البيانات) في جدول correction_feedback
-    لمراجعتها يدويًا وتحسين الـ prompt. لا يحجب تدفق المحادثة أبدًا.
+    لمراجعتها يدويًا وتحسين الـ prompt — مع احترام feedback_consent وحد 500 حرف.
+    لا يحجب تدفق المحادثة أبدًا.
     """
     raw = context.user_data.get("pending_raw") or context.user_data.get("confirm_raw") or ""
     data_type = (
@@ -1087,7 +1115,10 @@ def _record_feedback(
         return
     db = SessionLocal()
     try:
-        record_correction_feedback(db, telegram_user_id, raw[:2000], source, data_type)
+        from app.database.crud.common import has_feedback_consent
+        if not has_feedback_consent(db, telegram_user_id):
+            return
+        record_correction_feedback(db, telegram_user_id, raw[:500], source, data_type)
     except Exception:
         logger.exception("فشل تسجيل التحليل الخاطئ (التدفق يستمر)")
     finally:

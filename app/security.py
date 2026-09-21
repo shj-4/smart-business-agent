@@ -25,10 +25,13 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _ENCRYPTED_PREFIX = "v1$"
+_ENCRYPTED_PREFIX_V2 = "v2$"
 UNREADABLE_VALUE = "غير قابلة للقراءة"
 _VALID_AES_KEY_LENGTHS = (16, 24, 32)
 _warned_unset = False
 _warned_invalid = False
+# AAD ثابت للإصدار v2 — يمنع نقل نص مشفّر بين أعمدة/جداول مختلفة دون كشف
+_V2_AAD = b"BizMate:v2"
 
 
 def _decode_key_bytes(raw: str) -> bytes | None:
@@ -155,6 +158,8 @@ def _warn_invalid_key() -> None:
 def encrypt_text(plain: str) -> str | None:
     """يشفّر نصًا ويعيد التوكن المخزن، أو None في الوضع الواضح.
 
+    الإصدار v2 يستخدم AAD (b"BizMate:v2") لمنع نقل النص المشفّر بين
+    صفوف/أعمدة مختلفة دون كشف — القيم القديمة v1 تُقرأ fallback بلا AAD.
     لا يرمي أي استثناء نحو الطبقة العليا: مفتاح غير صالح أو خطأ داخلي يسقط
     آمنًا للوضع الواضح مع تسجيل خطأ — بدل انهيار أول كتابة (create_transaction/
     create_note/create_task) كما كان يحصل مع مفتاح يُفك لطول غير صالح.
@@ -169,38 +174,61 @@ def encrypt_text(plain: str) -> str | None:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         nonce = __import__("os").urandom(12)
-        token = AESGCM(key).encrypt(nonce, str(plain).encode("utf-8"), None)
+        # v2 مع AAD — يمنع swapping بين الأعمدة/الجداول
+        try:
+            token = AESGCM(key).encrypt(nonce, str(plain).encode("utf-8"), _V2_AAD)
+            return "{}{}.{}".format(
+                _ENCRYPTED_PREFIX_V2,
+                base64.b64encode(nonce).decode("ascii"),
+                base64.b64encode(token).decode("ascii"),
+            )
+        except Exception:
+            # fallback لـ v1 بلا AAD (مفاتيح قديمة/مكتبة قديمة)
+            token = AESGCM(key).encrypt(nonce, str(plain).encode("utf-8"), None)
+            return "{}{}.{}".format(
+                _ENCRYPTED_PREFIX,
+                base64.b64encode(nonce).decode("ascii"),
+                base64.b64encode(token).decode("ascii"),
+            )
     except Exception:
         logger.exception("فشل تشفير قيمة حساسة — سقطت للوضع الواضح")
         return None
-    return "{}{}.{}".format(
-        _ENCRYPTED_PREFIX,
-        base64.b64encode(nonce).decode("ascii"),
-        base64.b64encode(token).decode("ascii"),
-    )
 
 
 def decrypt_text(token: str) -> str | None:
     """يفك تشفير توكن مخزّن ويعيد النص، أو None (كلمة غير مشفرة/فشل)."""
-    if not token or not str(token).startswith(_ENCRYPTED_PREFIX):
+    if not token:
         return None
+    s = str(token)
     key = _key_bytes()
     if key is None:
         return None
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    # حاول v2 أولًا (مع AAD) ثم v1 legacy
+    for prefix, aad in ((_ENCRYPTED_PREFIX_V2, _V2_AAD), (_ENCRYPTED_PREFIX, None)):
+        if s.startswith(prefix):
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                _, payload = s.split("$", 1)
+                nonce_b64, ct_b64 = payload.split(".", 1)
+                plain = AESGCM(key).decrypt(base64.b64decode(nonce_b64), base64.b64decode(ct_b64), aad)
+                return plain.decode("utf-8")
+            except Exception:
+                # جرّب البادئة التالية
+                continue
+    # لا بادئة معروفة أو فشل v2 — قد تكون legacy plaintext
+    if is_encrypted(s):
+        logger.warning("فشل فك تشفير قيمة مشفّرة (مفتاح غير مطابق أو AAD)")
+    return None
 
-        _, payload = str(token).split("$", 1)
-        nonce_b64, ct_b64 = payload.split(".", 1)
-        plain = AESGCM(key).decrypt(base64.b64decode(nonce_b64), base64.b64decode(ct_b64), None)
-        return plain.decode("utf-8")
-    except Exception:
-        logger.exception("فشل فك تشفير قيمة مخزنة (قد تكون legacy plaintext)")
-        return None
+
+def hash_token(token: str) -> str:
+    """هاش SHA256 لرمز دعوة — لا يُخزن الرمز الخام (يُعرض مرة واحدة فقط)."""
+    import hashlib
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def is_encrypted(value) -> bool:
-    return bool(value) and str(value).startswith(_ENCRYPTED_PREFIX)
+    return bool(value) and (str(value).startswith(_ENCRYPTED_PREFIX) or str(value).startswith(_ENCRYPTED_PREFIX_V2))
 
 
 class EncryptedString(TypeDecorator):

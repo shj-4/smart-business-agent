@@ -557,13 +557,19 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
             except InvalidOperation:
                 pass
         from app.database.crud import create_employee_bonus_plan
-        from app.timeutil import now_utc
 
+        # أول استحقاق بعد دورة كاملة، لا فور الإنشاء (كان now_utc() → يُمنح خلال 30د بلا تأكيد)
+        from app.database.crud.bonus import _next_due as _calc_next
+        from app.timeutil import now_utc
+        _initial_due = _calc_next(now_utc(), 3 if freq == "quarterly" else (0 if freq == "one_off" else 1)) if freq != "one_off" else now_utc()
+        # one_off يبقى now (مرة واحدة عند الطلب)، الدوري يبدأ بعد دورته
+        if freq == "one_off":
+            _initial_due = now_utc()
         plan = await asyncio.to_thread(
             lambda: _db_call(
                 lambda db: create_employee_bonus_plan(
                     db, uid, person, amount,
-                    frequency=freq, monthly_cap=cap, next_due_at=now_utc(),
+                    frequency=freq, monthly_cap=cap, next_due_at=_initial_due,
                 )
             )
         )

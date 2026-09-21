@@ -65,13 +65,19 @@ def _unified_totals_for_rows(rows, base_currency: str) -> dict:
 
 
 def _best_effort_base_amount(amount, currency: str | None, base_currency: str | None = None):
-    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None)."""
+    """يحوّل مبلغًا لعملة الأساس وقت التسجيل (best-effort) — يعيد (المبلغ، العملة) أو (None, None).
+
+    ملاحظة: لا يُحجز اتصال DB أثناء الشبكة — المتصل (create_transaction) يقرأ
+    الأساس في جلسة منفصلة قبل هذا الاستدعاء.
+    """
     if base_currency is None:
         base = (settings.base_currency or "").upper().strip()
     else:
         base = (base_currency or "").upper().strip()
     if amount is None or not currency or not base or currency.upper() == base:
         return None, None
+    # إن كان السعر في الذاكرة (60د) نستخدمه فورًا بلا شبكة؛ وإلا نحاول الشبكة
+    # مع قاطع الدائرة (120ث) لمنع حجز 10ث متكرر عند تعطّل الخدمة.
     try:
         conv = exchange.convert(amount, currency, base)
     except Exception:

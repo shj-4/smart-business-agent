@@ -46,7 +46,7 @@ class TestFieldEncryption:
         ).one()
         for stored in (raw.description, raw.amount, raw.raw_message):
             assert stored is not None
-            assert str(stored).startswith("v1$")
+            assert str(stored).startswith(("v1$", "v2$"))
             assert str(stored) != "دفعة سرية"
 
     def test_legacy_plaintext_still_readable(self, db_session, monkeypatch):
@@ -83,7 +83,7 @@ class TestFieldEncryption:
         raw = db_session.execute(
             sa_text("SELECT description FROM transactions WHERE id=:i"), {"i": tx.id}
         ).scalar_one()
-        assert str(raw).startswith("v1$")
+        assert str(raw).startswith(("v1$", "v2$"))
 
     def test_roundtrip_after_key_change_reads_old_with_fallback(self, db_session, monkeypatch):
         _enable_encryption(monkeypatch)
@@ -114,7 +114,7 @@ class TestFieldEncryption:
             sa_text("SELECT description, amount, raw_message FROM transactions WHERE id=:i"),
             {"i": tx.id},
         ).one()
-        assert str(raw.description).startswith("v1$")
+        assert str(raw.description).startswith(("v1$", "v2$"))
 
         # تبديل المفتاح (محاكاة تدوير) → القيم القديمة تصبح غير قابلة للقراءة
         OTHER_KEY = base64.b64encode(b"7" * 32).decode("ascii")
@@ -124,6 +124,7 @@ class TestFieldEncryption:
         loaded = db_session.get(type(tx), tx.id)
         assert loaded.description == "غير قابلة للقراءة"
         assert "v1$" not in str(loaded.description)
+        assert "v2$" not in str(loaded.description)
         assert loaded.raw_message == "غير قابلة للقراءة"
         assert loaded.amount is None  # المبالغ رقمية: لا تسريب ولا كسر من النوع
 

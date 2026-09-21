@@ -263,9 +263,12 @@ def _invalidate_caches(db: Session, telegram_user_id: int) -> None:
     قديمة حتى انتهاء TTL.
     """
     from app.database.crud import accessible_user_ids
+    from app.database.crud.company import invalidate_company_cache
 
     for uid in accessible_user_ids(db, telegram_user_id):
         clear_cache(f"run_query:{uid}")
+        invalidate_company_cache(uid)
+    invalidate_company_cache(telegram_user_id)
     emit("data_written")  # admin يستمع لهذا الحدث لمسح كاش الإحصائيات
 
 
@@ -292,6 +295,43 @@ def get_or_create_user_pref(db: Session, telegram_user_id: int):
     else:
         db.refresh(pref)
     return pref
+
+
+def has_ai_consent(db: Session, telegram_user_id: int) -> bool:
+    """هل وافق المستخدم على إرسال بياناته لـ Gemini (الافتراضي True)؟"""
+    try:
+        pref = get_or_create_user_pref(db, telegram_user_id)
+        return bool(getattr(pref, "ai_consent", True))
+    except Exception:
+        return True
+
+
+def set_ai_consent(db: Session, telegram_user_id: int, enabled: bool) -> bool:
+    pref = get_or_create_user_pref(db, telegram_user_id)
+    pref.ai_consent = bool(enabled)
+    from app.timeutil import now_utc
+    pref.updated_at = now_utc()
+    db.commit()
+    db.refresh(pref)
+    return bool(enabled)
+
+
+def has_feedback_consent(db: Session, telegram_user_id: int) -> bool:
+    try:
+        pref = get_or_create_user_pref(db, telegram_user_id)
+        return bool(getattr(pref, "feedback_consent", True))
+    except Exception:
+        return True
+
+
+def set_feedback_consent(db: Session, telegram_user_id: int, enabled: bool) -> bool:
+    pref = get_or_create_user_pref(db, telegram_user_id)
+    pref.feedback_consent = bool(enabled)
+    from app.timeutil import now_utc
+    pref.updated_at = now_utc()
+    db.commit()
+    db.refresh(pref)
+    return bool(enabled)
 
 
 def toggle_notification_pref(db: Session, telegram_user_id: int, field: str, enabled: bool) -> str:

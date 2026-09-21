@@ -183,6 +183,67 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("❌ رمز التسجيل غير صحيح. تأكد من الرمز وحاول مجددًا.")
 
 
+async def privacy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """أمر /privacy — الخصوصية: إفصاح وإلغاء/تفعيل إرسال البيانات لـ Gemini وحفظ الملغاة."""
+    from app.database.crud.common import (
+        get_or_create_user_pref,
+        set_ai_consent,
+        set_feedback_consent,
+    )
+    from app.database.crud.feedback import delete_user_feedback
+
+    uid = update.effective_user.id
+    args = (context.args or [])
+    db = SessionLocal()
+    try:
+        pref = get_or_create_user_pref(db, uid)
+        if not args:
+            lines = [
+                "🔐 الخصوصية — BizMate",
+                "",
+                "• نصوصك وصور الفواتير تُرسل إلى Google Gemini لتحليلها وتحويلها لعملية/مهمة.",
+                "• التشفير at-rest لا يغطي هذا الإرسال (يُفك قبل الإرسال).",
+                "• الرسائل الملغاة (/cancel) قد تُحفظ مشفّرة للتحسين فقط إن وافقت.",
+                "",
+                f"🤖 إرسال لـ Gemini: {'✅ مفعل' if pref.ai_consent else '❌ معطل'}",
+                f"🧾 حفظ الملغاة: {'✅ مفعل' if pref.feedback_consent else '❌ معطل'}",
+                "",
+                "الأوامر:",
+                "/privacy ai off — تعطيل الإرسال لـ Gemini (تحليل محلي فقط)",
+                "/privacy ai on — تفعيل الإرسال",
+                "/privacy feedback off — عدم حفظ الملغاة",
+                "/privacy feedback on — السماح بحفظها",
+                "/privacy forget — حذف كل ملغاة تخصك نهائيًا",
+                "/privacy purge — (أدمن) حذف القديم >30يوم",
+            ]
+            await update.message.reply_text("\n".join(lines))
+            return
+        if args[0] == "ai" and len(args) >= 2 and args[1] in ("on","off","ON","OFF"):
+            enabled = args[1].lower() == "on"
+            set_ai_consent(db, uid, enabled)
+            await update.message.reply_text(f"🤖 إرسال Gemini الآن: {'✅ مفعل' if enabled else '❌ معطل'}")
+            return
+        if args[0] == "feedback" and len(args) >= 2 and args[1] in ("on","off"):
+            enabled = args[1].lower() == "on"
+            set_feedback_consent(db, uid, enabled)
+            await update.message.reply_text(f"🧾 حفظ الملغاة الآن: {'✅ مفعل' if enabled else '❌ معطل'}")
+            return
+        if args[0] == "forget":
+            count = delete_user_feedback(db, uid)
+            await update.message.reply_text(f"🗑️ حُذفت {count} رسالة ملغاة تخصك نهائيًا.")
+            return
+        if args[0] == "purge":
+            if not await _require_admin(update, "privacy_purge", context):
+                return
+            from app.database.crud.feedback import purge_old_feedback
+            count = purge_old_feedback(db, days=30)
+            await update.message.reply_text(f"🧹 حُذف {count} سجل قديم/مراجع (>30يوم).")
+            return
+        await update.message.reply_text("استخدم: /privacy أو /privacy ai on|off | feedback on|off | forget")
+    finally:
+        db.close()
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /help — دليل شامل للأوامر والأزرار بدون أي تحليل AI."""
     from bot.menus import send_main_menu
@@ -198,8 +259,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• 📊 التقارير — ملخصات، رسوم بيانية، مقارنة فترات\n"
         f"• {TASK} مهامي — قوائم المهام وإنجازها وحذفها\n"
         "• 🧰 أدوات — آخر سجل، ميزانيات، رسم بياني، تصدير، تحويل، بحث، مساحة مشتركة\n\n"
+        "⚠️ الخصوصية: نصوصك/صورك تُرسل لـ Gemini (انظر /privacy). التشفير لا يغطي الإرسال.\n\n"
         "⌨️ الأوامر السريعة:\n"
         "/menu — القائمة الرئيسية\n"
+        "/privacy — إعدادات الخصوصية وحذف الملغاة\n"
         "/done وصف — إنجاز مهمة\n"
         "/undo — تراجع عن آخر سجل\n"
         "/redo — استعادة آخر سجل تم التراجع عنه\n"
@@ -211,6 +274,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report_on — تقرير دوري تلقائي\n"
         "/report_off — إيقاف التقرير الدوري\n"
         "/work — إدارة المساحة المشتركة\n"
+        "/company — شركتك وعضويتها\n"
+        "/join — الانضمام برمز دعوة\n"
         "/debts — من يدين لك ومن تدين له\n"
         "/finance — بطاقة ذمم موحّدة (ديون/فواتير/ائتمان)\n"
         "/invoices — الفواتير الآجلة\n"
@@ -1643,6 +1708,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("join", join_command))
     app.add_handler(CommandHandler("company", company_command))
     app.add_handler(CommandHandler("work", work_command))
+    app.add_handler(CommandHandler("privacy", privacy_command))
     app.add_handler(CommandHandler("debts", debts_command))
     app.add_handler(CommandHandler("finance", finance_command))
     app.add_handler(CommandHandler("invoices", invoices_command))

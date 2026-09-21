@@ -76,13 +76,19 @@ def is_workspace_owner(db: Session, telegram_user_id: int) -> bool:
     wid = workspace_for_user(db, telegram_user_id)
     return wid is not None and wid == telegram_user_id
 
-def create_workspace(db: Session, owner_telegram_user_id: int) -> WorkspaceMember:
+def create_workspace(db: Session, owner_telegram_user_id: int) -> WorkspaceMember | None:
     """ينشئ مساحة عمل للمستخدم (مرتكزها معرّفه) — idempotent.
 
-    يُستدعى تلقائيًا عند أول طلب إنشاء مشاركة؛ القيم الفردية لا تحتاج أي
+    مهجور لصالح الشركات: إن كان المستخدم في شركة، لا تُنشأ مساحة قديمة
+    (الشركة تتفوق). يُستدعى تلقائيًا عند أول طلب إنشاء مشاركة؛ القيم الفردية لا تحتاج أي
     إنشاء (سلوك اليوم بلا مساحات). لو وُجدت دعوة معلّقة عند المستخدم تُلغى
     (إنشاء مساحته الخاصة يعادل رفضها).
     """
+    from app.database.crud.company import company_id_for_user
+    if company_id_for_user(db, owner_telegram_user_id) is not None:
+        import logging
+        logging.getLogger(__name__).warning("create_workspace مرفوض: المستخدم %s في شركة — استخدم الشركات", owner_telegram_user_id)
+        return None
     row = (
         db.query(WorkspaceMember)
         .filter(
@@ -110,8 +116,8 @@ def invite_to_workspace(
     """يدعو المالك معرّفًا إلى مساحته (دعوة معلّقة — لا وصول حتى القبول).
 
     لا يمنح الصف المعلّق أي رؤية للبيانات؛ القبول يتم عبر accept_workspace_invite.
-    يرفض دعوة مستخدم هو عضو نشط في مساحة أخرى (لا سحب دون موافقة). يعيد
-    False لغير المالك/ذاتي/العضو في مساحة أخرى.
+    يرفض دعوة مستخدم هو عضو نشط في مساحة أخرى (لا سحب دون موافقة) ولا يسمح
+    بسرقة دعوة معلّقة من مالك آخر قبل رفضها. يعيد False لغير المالك/ذاتي/عضو.
     """
     from app.database.crud import workspace_for_user
     wid = workspace_for_user(db, owner_telegram_user_id)
@@ -125,14 +131,27 @@ def invite_to_workspace(
         .filter(WorkspaceMember.telegram_user_id == new_telegram_user_id)
         .first()
     )
+    # لا تسرق دعوة معلّقة من مالك آخر — يجب على المدعو رفضها أولًا
+    if row is not None and row.status == STATUS_PENDING and row.workspace_id != wid:
+        return False
+    # لا تدعو من لديه دعوة معلّقة لمساحة أخرى (workspace_for_user يتجاهل pending)
     if row is None:
+        # تحقق إضافي: هل لديه pending لمساحة أخرى؟
+        pending = pending_workspace_invite(db, new_telegram_user_id)
+        if pending is not None and pending != wid:
+            return False
         row = WorkspaceMember(
             telegram_user_id=new_telegram_user_id,
             workspace_id=wid,
             status=STATUS_PENDING,
         )
         db.add(row)
+    elif row.status == STATUS_PENDING and row.workspace_id == wid:
+        # دعوة موجودة لنفس المساحة — لا داعي لإعادة الإنشاء
+        db.commit()
+        return True
     elif row.status == STATUS_PENDING or row.workspace_id != wid:
+        # حالة نادرة: صف قديم بلا حالة أو لمساحة أخرى لكن ليس pending لآخر (تمت معالجته أعلاه)
         row.workspace_id = wid
         row.status = STATUS_PENDING
     db.commit()

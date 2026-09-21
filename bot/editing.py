@@ -257,7 +257,8 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             return ConversationHandler.END
     finally:
         db.close()
-    context.user_data["edit_record"] = record
+    # لا نخزن كائن ORM في user_data (يمنع PicklePersistence ويصبح detached بعد إعادة التشغيل)
+    # نخزن فقط المعرّفات — يُعاد الجلب عند الحاجة
     context.user_data["edit_model"] = model_name
     context.user_data["edit_id"] = rec["id"]
 
@@ -296,7 +297,6 @@ async def edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("لم أجد هذا السجل. ربما حُذف.")
         return ConversationHandler.END
 
-    context.user_data["edit_record"] = record
     context.user_data["edit_model"] = model_name
     context.user_data["edit_id"] = record_id
 
@@ -321,7 +321,18 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return EDIT_SELECT
 
     field = query.data.replace("editfield:", "")
-    record = context.user_data.get("edit_record")
+    model_name = context.user_data.get("edit_model")
+    record_id = context.user_data.get("edit_id")
+    if not model_name or not record_id:
+        await query.edit_message_text("انتهت الجلسة. أرسل /edit للبدء مجددًا.")
+        return ConversationHandler.END
+    # أعد جلب السجل لعرض القيمة الحالية (لا نعتمد على ORM مخزن)
+    db_tmp = SessionLocal()
+    try:
+        from app.database.crud import get_record_by_id as _get_rec
+        record, _ = _get_rec(db_tmp, query.from_user.id, model_name, record_id)
+    finally:
+        db_tmp.close()
     if not record:
         await query.edit_message_text("انتهت الجلسة. أرسل /edit للبدء مجددًا.")
         return ConversationHandler.END
@@ -394,7 +405,6 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         db.close()
 
-    context.user_data.pop("edit_record", None)
     context.user_data.pop("edit_model", None)
     context.user_data.pop("edit_id", None)
     context.user_data.pop("edit_field", None)
@@ -403,7 +413,7 @@ async def edit_receive_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     """إلغاء محادثة التعديل."""
-    for key in ("edit_record", "edit_model", "edit_id", "edit_field", "edit_records"):
+    for key in ("edit_model", "edit_id", "edit_field", "edit_records"):
         context.user_data.pop(key, None)
     await update.message.reply_text("تم إلغاء التعديل.")
     return ConversationHandler.END

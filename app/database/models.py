@@ -220,7 +220,11 @@ class CompanyMember(Base):
 
 
 class InviteLink(Base):
-    """دعوة: رابط (token طويل) أو كود يدوي (6 أرقام) بدور محدد مسبقًا."""
+    """دعوة: رابط (token طويل) أو كود يدوي (6 أرقام) بدور محدد مسبقًا.
+
+    token_hash: هاش SHA256 للرمز — لا يُخزن الرمز الخام طويلًا بعد الإنشاء
+                (يُعرض مرة واحدة للمُنشئ). redeem يتحقق عبر الهاش أولًا ثم fallback للخام للتوافق.
+    """
 
     __tablename__ = "invite_links"
 
@@ -229,6 +233,7 @@ class InviteLink(Base):
         Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
     )
     token = Column(String(64), nullable=False, unique=True)
+    token_hash = Column(String(64), nullable=True, index=True)  # SHA256 للرمز
     kind = Column(String(8), nullable=False, default="link")  # link|code
     role = Column(String(16), nullable=False, default="staff")
     max_uses = Column(Integer, nullable=False, default=1)
@@ -365,6 +370,9 @@ class UserPref(Base):
     """تفضيلات واجهة لكل مستخدم (صف واحد لكل معرّف).
 
     lang: لغة الواجهة — "ar" (الافتراضي) أو "en".
+    ai_consent: هل يوافق المستخدم على إرسال نصوصه/صوره لـ Gemini (الافتراضي True).
+                عند False يُستخدم محلل محلي بلا شبكة.
+    feedback_consent: هل يوافق على حفظ رسائله الملغاة للتحسين (الافتراضي True).
     """
 
     __tablename__ = "user_prefs"
@@ -381,6 +389,8 @@ class UserPref(Base):
     notif_deviation = Column(Boolean, default=True, nullable=False)
     notif_periodic_report = Column(Boolean, default=True, nullable=False)
     notif_proactive = Column(Boolean, default=True, nullable=False)
+    ai_consent = Column(Boolean, default=True, nullable=False)  # إرسال لـ Gemini
+    feedback_consent = Column(Boolean, default=True, nullable=False)  # حفظ الملغاة
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 

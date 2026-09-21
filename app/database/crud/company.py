@@ -1,5 +1,6 @@
 """الشركات: إنشاء، عضويات، دعوات، وفحص الصلاحيات."""
 import secrets
+import time as _time_mod
 from datetime import timedelta
 
 from sqlalchemy.orm import Session
@@ -14,17 +15,68 @@ from app.permissions import (
 )
 from app.timeutil import now_utc
 
+# ذاكرة قصيرة لـ company_id لتقليل N+1 (budget_check و credit_check كانا يستعلمان
+# company_id_for_user لكل ميزانية/حد — 1000 استعلام متتالٍ). TTL=60ث ويُبطل عند الكتابة.
+_CID_CACHE: dict[int, tuple[int | None, float]] = {}
+_CID_TTL = 60.0
+_MEMBER_CACHE: dict[int, tuple[CompanyMember | None, float]] = {}
+
+
+def _cid_cache_get(uid: int) -> int | None | object:
+    ent = _CID_CACHE.get(uid)
+    if ent is None:
+        return None  # sentinel للتمييز بين miss و None
+    cid, ts = ent
+    if _time_mod.time() - ts < _CID_TTL:
+        return cid
+    _CID_CACHE.pop(uid, None)
+    return None
+
+
+def _cid_cache_set(uid: int, cid: int | None) -> None:
+    _CID_CACHE[uid] = (cid, _time_mod.time())
+
+
+def invalidate_company_cache(telegram_user_id: int | None = None) -> None:
+    """يبطل ذاكرة الشركة لعضو واحد أو الكل (يُستدعى بعد أي كتابة تغيّر العضوية)."""
+    if telegram_user_id is None:
+        _CID_CACHE.clear()
+        _MEMBER_CACHE.clear()
+    else:
+        _CID_CACHE.pop(telegram_user_id, None)
+        _MEMBER_CACHE.pop(telegram_user_id, None)
+
 
 def get_company_member(db: Session, telegram_user_id: int) -> CompanyMember | None:
-    return (
+    # استخدم ذاكرة قصيرة (نفس TTL) — العضوية لا تتغير كل ثانية
+    ent = _MEMBER_CACHE.get(telegram_user_id)
+    if ent is not None:
+        cached, ts = ent
+        if _time_mod.time() - ts < _CID_TTL:
+            # تحقق أن الكائن لا يزال مرتبطًا بجلسة صالحة؟ نعيد نفس الكائن (قراءة فقط)
+            return cached
+        _MEMBER_CACHE.pop(telegram_user_id, None)
+    res = (
         db.query(CompanyMember)
         .filter(CompanyMember.telegram_user_id == telegram_user_id, CompanyMember.status == "active")
         .first()
     )
+    _MEMBER_CACHE[telegram_user_id] = (res, _time_mod.time())
+    _cid_cache_set(telegram_user_id, res.company_id if res else None)
+    return res
 
 
 def company_id_for_user(db: Session, telegram_user_id: int) -> int | None:
+    # جرّب الذاكرة أولًا دون استعلام
+    if telegram_user_id in _CID_CACHE:
+        ent = _CID_CACHE.get(telegram_user_id)
+        if ent is not None:
+            cid, ts = ent
+            if _time_mod.time() - ts < _CID_TTL:
+                return cid
+            _CID_CACHE.pop(telegram_user_id, None)
     m = get_company_member(db, telegram_user_id)
+    # get_company_member يحدّث الذاكرة بالفعل
     return m.company_id if m else None
 
 
@@ -226,9 +278,15 @@ def create_invite(
             break
     else:
         return None
+    try:
+        from app.security import hash_token
+        token_hash = hash_token(token)
+    except Exception:
+        token_hash = None
     inv = InviteLink(
         company_id=m.company_id,
         token=token,
+        token_hash=token_hash,
         kind=kind,
         role=role,
         max_uses=max(1, int(max_uses)),
@@ -286,7 +344,13 @@ def redeem_invite(
 
     if company_id_for_user(db, telegram_user_id) is not None:
         return False, "أنت عضو في شركة بالفعل."
-    inv = db.query(InviteLink).filter(InviteLink.token == token).first()
+    # تحقق عبر الهاش أولًا (لا يُخزن الخام طويلًا في المستقبل) ثم fallback للخام للتوافق
+    try:
+        from app.security import hash_token
+        h = hash_token(token)
+        inv = db.query(InviteLink).filter((InviteLink.token_hash == h) | (InviteLink.token == token)).first()
+    except Exception:
+        inv = db.query(InviteLink).filter(InviteLink.token == token).first()
     if inv is None or inv.revoked:
         try:
             register_join_denied(telegram_user_id)

@@ -163,8 +163,31 @@ def run_health_checks(db_session: Session | None = None) -> list[dict]:
     return checks
 
 
+def _try_auto_migrate() -> None:
+    """يحاول ترقية الهجرات تلقائيًا عند الإقلاع إن كان AUTO_MIGRATE=1 أو في production.
+
+    لا يوقف التشغيل عند الفشل — يسجل فقط، لكن يمنع أخطاء وقت التشغيل بعد ترقية الكود.
+    """
+    import os
+    auto = os.getenv("AUTO_MIGRATE", "").strip().lower() in ("1", "true", "yes")
+    from app.config import settings
+    if not auto and (settings.app_env or "").lower() != "production":
+        return
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        from app.database.init_db import ALEMBIC_INI
+        cfg = Config(ALEMBIC_INI)
+        command.upgrade(cfg, "head")
+        logger.info("تمت ترقية الهجرات تلقائيًا (auto-migrate)")
+    except Exception:  # noqa: BLE001
+        logger.exception("فشل الترقية التلقائية للهجرات — راجع alembic upgrade head يدويًا")
+
+
 def startup_diagnostics() -> None:
-    """فحص خفيف عند الإقلاع: يسجّل تحذيرات فقط ولا يوقف التشغيل أبدًا."""
+    """فحص خفيف عند الإقلاع: يرقّي الهجرات إن لزم ثم يسجّل تحذيرات فقط ولا يوقف التشغيل أبدًا."""
+    _try_auto_migrate()
     try:
         from app.database.db import SessionLocal
 

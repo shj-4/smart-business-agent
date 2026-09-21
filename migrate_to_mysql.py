@@ -29,7 +29,22 @@ from app.database import models  # noqa: F401  (يسجّل كل الجداول �
 from app.database.db import Base
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SOURCE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'data', 'business.db')}"
+
+def _resolve_source_url() -> str:
+    """يحدد مصدر SQLite: يفضّل business_production.db إن وجد، وإلا business.db."""
+    for fname in ("business_production.db", "business.db"):
+        path = os.path.join(BASE_DIR, "data", fname)
+        if os.path.exists(path):
+            return f"sqlite:///{path}"
+    # استخدم متغير البيئة SOURCE_DB إن حُدد
+    env_src = os.getenv("SOURCE_DB", "").strip()
+    if env_src:
+        if env_src.startswith("sqlite"):
+            return env_src
+        return f"sqlite:///{env_src}"
+    return f"sqlite:///{os.path.join(BASE_DIR, 'data', 'business.db')}"
+
+SOURCE_URL = _resolve_source_url()
 
 # كل النماذج ذات الجداول — لا قائمة يدوية؛ إن أُضيف نموذج في models.py
 # بالطريقة نفسها دخل إلى الترحيل تلقائيًا.
@@ -73,6 +88,8 @@ def _migrate(src, dst, model_list: list) -> dict[str, int]:
 
     عزل: الصفوف التي تحوي حقلًا مشفّرًا لا يمكن فكّه (is_encrypted + UNREADABLE_VALUE)
     تُرفض — لا نكتب العبارة النائبة مشفّرة فوق الأصل فيضيع للأبد.
+    المبالغ التي تصير None بعد فك التشفير (مفتاح غير مطابق أو تلف) تُتخطى أيضًا
+    مع تسجيل تحذير بدل نسخ صف بمبلغ فارغ (فقدان صامت).
     """
     from app.security import UNREADABLE_VALUE
 
@@ -85,22 +102,46 @@ def _migrate(src, dst, model_list: list) -> dict[str, int]:
             # فحص الحقول المشفّرة: إن كانت القيمة هي النائبة، فالمفتاح الحالي لا يفكّ الأصل
             skip = False
             for col in model.__table__.columns:
-                # تحقق إذا كان العمود من نوع مشفّر عبر Python type
-                # (نستخدم القيمة المُفككة: إن كانت UNREADABLE_VALUE فهي مشفّرة فاشلة)
                 val = getattr(row, col.key, None)
                 if val == UNREADABLE_VALUE:
                     skip = True
                     break
+                # حقول EncryptedNumeric: None بعد فك مشفّر يعني فقدان مبلغ — لا ننسخ صفًا بمبلغ فارغ
+                if val is None and col.key in ("amount", "limit_amount", "monthly_limit", "budget", "amount_in_base_currency"):
+                    # تحقق أن القيمة الخام لم تكن NULL أصلًا بل فشل فك
+                    raw = row.__dict__.get(col.key, None)
+                    if raw is not None and isinstance(raw, str) and raw.startswith(("v1$", "v2$")):
+                        skip = True
+                        break
             if skip:
                 skipped[model.__name__] = skipped.get(model.__name__, 0) + 1
                 continue
             values = {col.key: getattr(row, col.key) for col in model.__table__.columns}
-            dst.execute(insert(model.__table__).values(**values))
+            try:
+                dst.execute(insert(model.__table__).values(**values))
+            except Exception as exc:
+                # تعارض مفاتيح مع --force: نحاول upsert (تحديث) بدل تجاهل
+                if "--force" in sys.argv and "Duplicate" in str(exc) or "UNIQUE" in str(exc):
+                    from sqlalchemy import update as _upd
+                    pk_cols = list(model.__table__.primary_key.columns)
+                    if pk_cols:
+                        pk_vals = {c.key: values[c.key] for c in pk_cols}
+                        try:
+                            dst.execute(_upd(model.__table__).where(*(model.__table__.c[k] == v for k, v in pk_vals.items())).values(**{k: v for k, v in values.items() if k not in pk_vals}))
+                        except Exception:
+                            print(f"  {model.__name__}: فشل upsert للمفتاح {pk_vals}: {exc}")
+                            skipped[model.__name__] = skipped.get(model.__name__, 0) + 1
+                            continue
+                    else:
+                        skipped[model.__name__] = skipped.get(model.__name__, 0) + 1
+                        continue
+                else:
+                    raise
             kept += 1
         dst.commit()
         counts[model.__name__] = kept
         if skipped.get(model.__name__):
-            print(f"  {model.__name__}: تخطي {skipped[model.__name__]} صفًا غير قابل للفك (مفتاح غير مطابق)")
+            print(f"  {model.__name__}: تخطي {skipped[model.__name__]} صفًا غير قابل للفك/مكرر")
     return counts
 
 

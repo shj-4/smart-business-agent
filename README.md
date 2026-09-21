@@ -63,12 +63,15 @@ uvicorn app.main:app --port 8000 # (اختياري) واجهة API
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Bot token من @BotFather |
 | `GEMINI_API_KEY` | مفتاح Google AI Studio |
-| `ENCRYPTION_KEY` | مفتاح base64 (32 بايت) لتشفير الحقول |
-| `DATABASE_URL` | اختياري — MySQL بدل SQLite |
+| `ENCRYPTION_KEY` | مفتاح base64 (32 بايت) لتشفير الحقول (v2 مع AAD) |
+| `DATABASE_URL` | اختياري — MySQL بدل SQLite (`%` يُهرب `%%` في alembic) |
 | `ADMIN_USER_IDS` | أرقام أدمن (لفواصل) لأوامر `/admin_stats` |
+| `DASHBOARD_PASSWORD` | إجباري في `production` (لا توليد مؤقت) |
+| `ALLOWED_USER_IDS` / `REGISTRATION_TOKEN` | قائمة سماح وحصة Gemini اليومية |
+| `AUTO_MIGRATE` | `1` لترقية تلقائية عند الإقلاع (وإلا تحذير فقط) |
 | `APP_ENV` | `development` / `staging` / `production` (SQLite منفصل) |
 | `LOG_FORMAT` | `text` أو `json` (سجلات منظمة) |
-| `SENTRY_DSN` | اختياري — يُفعَّل عند تعبئته |
+| `SENTRY_DSN` | اختياري — يُفعَّل عند تعبئته (`include_local_variables=False`) |
 
 ## الأوامر
 
@@ -76,11 +79,14 @@ uvicorn app.main:app --port 8000 # (اختياري) واجهة API
 `/export` `/chart` `/report_on|off` `/budget` `/work` `/undo` `/lang`
 `/admin_stats` `/feedback` `/debts` `/invoices` `/orders` `/credit`
 `/stats` `/health` `/forecast` `/deviation` `/edit` `/bonus`
-`/company` `/join` `/notif` `/brief` `/fix` `/finance` `/kpi`
+`/company` `/join` `/notif` `/brief` `/fix` `/finance` `/kpi` `/privacy`
 
-- **الشركات:** `/start` → إنشاء شركة أو `/join <code>` برمز دعوة، `/company` إدارة الشركة.
-- **التنبيهات:** `/notif` تفضيلات الإشعارات، `/brief` نشرة يومية، `/kpi` لوحة مؤشرات.
-- **المالية:** `/finance` بطاقة ذمم موحدة، `/fix` تعديل سريع لآخر سجل.
+- **الشركات (موثق #9):** `/start` → إنشاء شركة أو `/join <code>` برمز دعوة (RLM مُنظف)، `/company` إدارة الشركة (نقل ملكية/حذف)، `/work` مساحة مشتركة قديمة (مهجورة لصالح الشركات).
+- **التنبيهات:** `/notif` تفضيلات الإشعارات (8 أنواع)، `/brief` نشرة يومية، `/kpi` لوحة مؤشرات، `overdue` بلا Markdown.
+- **المالية:** `/finance` بطاقة ذمم موحدة، `/fix` تعديل سريع لآخر سجل (`/fix المبلغ 600`).
+- **الخصوصية (#40, #41):** `/privacy` يعرض/يطفي إرسال Gemini وحفظ الملغاة، `/privacy forget` حذف نهائي، `/privacy purge` (أدمن) حذف >30يوم.
+
+> **ملاحظة إهمال:** نظام `workspace` قديم ومدعوم للتوافق فقط؛ الجديد هو `company`. لا تستخدمهما معًا.
 
 ## قاعدة البيانات والنسخ الاحتياطي
 
