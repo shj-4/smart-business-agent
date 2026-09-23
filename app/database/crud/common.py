@@ -351,3 +351,30 @@ def toggle_notification_pref(db: Session, telegram_user_id: int, field: str, ena
     db.commit()
     db.refresh(pref)
     return field
+
+
+def _cash_filter(model):
+    """فلتر صندوق (P&L نقدي) — يستثني الذمم.
+
+    نقدي = is_credit == False أو (is_credit IS NULL و person IS NULL) — للتوافق
+    مع البيانات القديمة حيث person NOT NULL و is_credit NULL كان يُعتبر ذمة.
+    """
+    from sqlalchemy import and_, or_
+
+    return or_(
+        model.is_credit == False,  # noqa: E712
+        and_(model.is_credit.is_(None), model.person.is_(None)),
+    )
+
+
+def _debt_filter(model):
+    """فلتر ذمة (آجل/تسديد) — يستثني النقدي.
+
+    ذمة = is_credit == True أو (is_credit IS NULL و person IS NOT NULL) للتوافق.
+    """
+    from sqlalchemy import and_, or_
+
+    return or_(
+        model.is_credit == True,  # noqa: E712
+        and_(model.is_credit.is_(None), model.person.isnot(None)),
+    )

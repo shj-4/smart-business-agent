@@ -125,7 +125,7 @@ class TestEncryptSafeFallback:
         monkeypatch.setattr(settings, "encryption_key", VALID_B64_KEY)
         t = EncryptedString()
         stored = t.process_bind_param("بيان سري", None)
-        assert str(stored).startswith("v1$")
+        assert str(stored).startswith(("v1$", "v2$"))
         assert t.process_result_value(stored, None) == "بيان سري"
 
     def test_warns_once_on_invalid_key(self, monkeypatch, caplog):

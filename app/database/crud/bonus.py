@@ -631,7 +631,25 @@ def _workspace_anchor(db: Session, telegram_user_id: int) -> int:
     في المساحة المشتركة تكون سجلات LoyaltyConfig/Account لكل شخص واحدة
     (قيدا uq_loyalty_user و uq_loyalty_user_person) ويجب أن تُنسب إلى مالك
     واحد حتى لا تتكاثر بإنشاء أكثر من عضو. فرديًّا فهو المستخدم نفسه.
+
+    الأولوية للشركة (النظام الجديد الموصى به) على المساحة القديمة:
+    - إن كان المستخدم عضوًا في شركة، يُستخدم owner_telegram_user_id لتلك
+      الشركة كمرتكز — أسوة بما يفعله company_id_for_user/company_filter
+      لبقية الميزات (ميزانيات/فواتير/حدود).
+    - وإلا يُستخدم workspace_for_user (النظام القديم المهجور) مع fallback
+      إلى telegram_user_id للفرد.
     """
+    # الشركة أولًا — النظام الجديد
+    try:
+        from app.database.crud.company import company_id_for_user, get_company
+
+        cid = company_id_for_user(db, telegram_user_id)
+        if cid is not None:
+            comp = get_company(db, cid)
+            if comp is not None and getattr(comp, "owner_telegram_user_id", None) is not None:
+                return comp.owner_telegram_user_id
+    except Exception:
+        pass
     from app.database.crud import workspace_for_user
 
     return workspace_for_user(db, telegram_user_id) or telegram_user_id
@@ -639,8 +657,6 @@ def _workspace_anchor(db: Session, telegram_user_id: int) -> int:
 
 def loyalty_config_get(db: Session, telegram_user_id: int) -> LoyaltyConfig | None:
     """إعدادات نقاط الولاء عبر مساحة العمل (تفضّل صف المالك إن وُجد)."""
-    from app.database.crud import accessible_user_ids
-
     anchor = _workspace_anchor(db, telegram_user_id)
     cfg = (
         db.query(LoyaltyConfig)
@@ -649,7 +665,6 @@ def loyalty_config_get(db: Session, telegram_user_id: int) -> LoyaltyConfig | No
     )
     if cfg is not None:
         return cfg
-    accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyConfig)
         .filter(company_filter(db, telegram_user_id, LoyaltyConfig))
@@ -745,7 +760,7 @@ def disable_loyalty(db: Session, telegram_user_id: int) -> bool:
 
 
 def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> LoyaltyAccount | None:
-    from app.database.crud import _clean_person, accessible_user_ids
+    from app.database.crud import _clean_person
 
     person = _clean_person(person)
     if not person:
@@ -761,7 +776,6 @@ def loyalty_account_get(db: Session, telegram_user_id: int, person: str) -> Loya
     )
     if account is not None:
         return account
-    accessible_user_ids(db, telegram_user_id)
     return (
         db.query(LoyaltyAccount)
         .filter(

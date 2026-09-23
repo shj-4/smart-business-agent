@@ -408,14 +408,12 @@ def run_query(db: Session, telegram_user_id: int, query_details: dict) -> dict:
     return get_or_set(key, lambda: _run_query_uncached(db, telegram_user_id, query_details))
 
 def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict) -> dict:
-    # للتوافق مع مسارات المقارنة القديمة التي تستخدم accessible_user_ids مباشرة
-    from app.database.crud import accessible_user_ids as _accessible  # noqa: F401
     from app.database.crud import (
         list_overdue_tasks,
         list_pending_tasks,
         mark_overdue_tasks,
-        report_scope_ids,
     )
+    from app.database.crud.company import report_company_filter
 
 
     metric = query_details.get("metric")
@@ -452,9 +450,11 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             "kind": "list",
         }
 
-    scope = report_scope_ids(db, telegram_user_id)
+    from app.database.crud.common import _cash_filter, _debt_filter
+
+    base_filter = report_company_filter(db, telegram_user_id, Transaction)
     q = db.query(Transaction).filter(
-        Transaction.telegram_user_id.in_(scope),
+        base_filter,
         Transaction.deleted_at.is_(None),
     )
 
@@ -464,7 +464,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         q = q.filter(Transaction.person == person)
 
     if metric == "total_expenses":
-        expense_rows = q.filter(Transaction.type == "expense").all()
+        expense_rows = q.filter(Transaction.type == "expense", _cash_filter(Transaction)).all()
         total = _sum_amounts_by_currency(expense_rows)
         from app.database.crud.company import get_user_base_currency as _get_base
 
@@ -478,7 +478,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         }
 
     elif metric == "total_income":
-        income_rows = q.filter(Transaction.type == "income").all()
+        income_rows = q.filter(Transaction.type == "income", _cash_filter(Transaction)).all()
         total = _sum_amounts_by_currency(income_rows)
         from app.database.crud.company import get_user_base_currency as _get_base
 
@@ -498,6 +498,7 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
     elif metric == "person_balance":
         # رصيد مستحق مع شخص معيّن = إجمالي income (قيمة آجلة/ذمة: ما صار لك في ذمّته) - إجمالي expense (تسديد/دفع نقدي)
         # موجب = يدين لك، سالب = تدين له — موحّد مع person_debts و credit_usage
+        # يُحتسب على الذمم فقط (is_credit) — النقدي لشخص لا يُعدّ دينًا
         if not person:
             return {
                 "metric": metric,
@@ -507,16 +508,18 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 "error": "no_person",
             }
         q_income = db.query(Transaction).filter(
-            Transaction.telegram_user_id.in_(scope),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
             Transaction.person == person,
+            _debt_filter(Transaction),
         )
         q_expense = db.query(Transaction).filter(
-            Transaction.telegram_user_id.in_(scope),
+            report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
             Transaction.person == person,
+            _debt_filter(Transaction),
         )
         if start:
             q_income = q_income.filter(Transaction.created_at >= start)
@@ -558,12 +561,14 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
             }
 
         def _totals_by_currency(lo, hi, tx_type):
+            from app.database.crud.common import _cash_filter as _cf2
             from app.database.crud.company import report_company_filter
 
             qq = db.query(Transaction).filter(
                 report_company_filter(db, telegram_user_id, Transaction),
                 Transaction.deleted_at.is_(None),
                 Transaction.type == tx_type,
+                _cf2(Transaction),
                 Transaction.created_at >= lo,
                 Transaction.created_at < hi,
             )

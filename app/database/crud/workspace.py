@@ -116,8 +116,9 @@ def invite_to_workspace(
     """يدعو المالك معرّفًا إلى مساحته (دعوة معلّقة — لا وصول حتى القبول).
 
     لا يمنح الصف المعلّق أي رؤية للبيانات؛ القبول يتم عبر accept_workspace_invite.
-    يرفض دعوة مستخدم هو عضو نشط في مساحة أخرى (لا سحب دون موافقة) ولا يسمح
-    بسرقة دعوة معلّقة من مالك آخر قبل رفضها. يعيد False لغير المالك/ذاتي/عضو.
+    يرفض دعوة مستخدم هو عضو نشط في مساحة أخرى (لا سحب دون موافقة) لكن يسمح
+    بكتابة دعوة معلّقة فوق أخرى أقدم — المستخدم يقبل أحدث دعوة. يعيد False
+    لغير المالك/ذاتي/عضو نشط في مساحة أخرى.
     """
     from app.database.crud import workspace_for_user
     wid = workspace_for_user(db, owner_telegram_user_id)
@@ -131,15 +132,9 @@ def invite_to_workspace(
         .filter(WorkspaceMember.telegram_user_id == new_telegram_user_id)
         .first()
     )
-    # لا تسرق دعوة معلّقة من مالك آخر — يجب على المدعو رفضها أولًا
-    if row is not None and row.status == STATUS_PENDING and row.workspace_id != wid:
-        return False
-    # لا تدعو من لديه دعوة معلّقة لمساحة أخرى (workspace_for_user يتجاهل pending)
+    # المعلّقة يمكن الكتابة فوقها بدعوة أحدث — المستخدم يختار أحدث دعوة ويقبلها؛
+    # فقط العضو النشط محمي (current check أعلاه) ولا يُسحب دون مغادرة/إزالة.
     if row is None:
-        # تحقق إضافي: هل لديه pending لمساحة أخرى؟
-        pending = pending_workspace_invite(db, new_telegram_user_id)
-        if pending is not None and pending != wid:
-            return False
         row = WorkspaceMember(
             telegram_user_id=new_telegram_user_id,
             workspace_id=wid,
@@ -151,7 +146,7 @@ def invite_to_workspace(
         db.commit()
         return True
     elif row.status == STATUS_PENDING or row.workspace_id != wid:
-        # حالة نادرة: صف قديم بلا حالة أو لمساحة أخرى لكن ليس pending لآخر (تمت معالجته أعلاه)
+        # كتابة فوق دعوة معلّقة من مالك آخر أو صف قديم لمساحة أخرى
         row.workspace_id = wid
         row.status = STATUS_PENDING
     db.commit()

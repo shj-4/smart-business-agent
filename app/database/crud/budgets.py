@@ -150,7 +150,12 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     """استهلاك الميزانية هذا الشهر (محليًا) — أو آخر 12 شهرًا إن كانت سنوية.
 
     يعيد: {spent: Decimal, limit: Decimal, percent: float, over: bool}
+
+    فصل الصندوق عن الذمة:
+    - scope=currency/category → نقدي فقط (P&L) — الذمم لا تُحتسب
+    - scope=person → ذمم فقط — النقدي لشخص لا يُحتسب في ميزانية الشخص
     """
+    from app.database.crud.common import _cash_filter, _debt_filter
     from app.database.crud.company import get_user_base_currency
 
 
@@ -166,13 +171,14 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         Transaction.created_at >= start,
     )
     if budget.scope == "currency":
-        q = q.filter(Transaction.currency == budget.currency)
+        q = q.filter(Transaction.currency == budget.currency, _cash_filter(Transaction))
     elif budget.scope == "category":
         # مطابقة تامة — كبقية النطاقات: تصنيف «صيانة» لا يلتقط معاملة
         # تصنيفها «صيانة سيارة» (أرقام إنفاق مضلِّلة في تنبيهات التجاوز).
-        q = q.filter(Transaction.category == budget.category)
+        # + نقدي فقط
+        q = q.filter(Transaction.category == budget.category, _cash_filter(Transaction))
     else:
-        q = q.filter(Transaction.person == budget.person)
+        q = q.filter(Transaction.person == budget.person, _debt_filter(Transaction))
 
     spent_rows = q.all()
 
@@ -229,7 +235,9 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
     balance = income - expense: موجب = يدين لك، سالب = تدين له.
 
     يحترم report.view_all: من لا يملكه يرى سجلاته فقط، لا كل الشركة.
+    يُحتسب على الذمم فقط — النقدي (is_credit=False) لا يظهر في الذمم.
     """
+    from app.database.crud.common import _debt_filter
     from app.database.crud.company import get_user_base_currency, report_company_filter
 
 
@@ -240,6 +248,7 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person.isnot(None),
+            _debt_filter(Transaction),
         )
         .all()
     )

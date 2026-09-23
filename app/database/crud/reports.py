@@ -60,7 +60,11 @@ def mark_report_sent(db: Session, pref: ReportPref) -> None:
 def monthly_totals(
     db: Session, telegram_user_id: int, months: int = 6, include_stored: bool = False
 ) -> list[dict]:
-    """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي)."""
+    """إجمالي المصروفات والإيرادات لكل شهر من آخر N أشهر (بالتوقيت المحلي).
+
+    P&L نقدي فقط — الذمم (is_credit) لا تدخل هذا الرسم.
+    """
+    from app.database.crud.common import _cash_filter
     from app.database.crud.company import report_company_filter
 
 
@@ -102,12 +106,14 @@ def monthly_totals(
         Transaction.base_currency_at_creation,
     ]
     # نجلب الصفوف ونجمّعها في Python بالتوقيت المحلي (لأن SQLite بلا منطقة زمنية)
+    # P&L نقدي فقط — نفلتر SQL بفلتر cash
     rows = (
         db.query(*cols)
         .filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.created_at >= start,
+            _cash_filter(Transaction),
         )
         .all()
     )

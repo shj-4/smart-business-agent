@@ -125,8 +125,9 @@ class TestAnalyzeReceiptImage:
         assert result["intent"] == "record"
         assert result["type"] == "income"
 
+    @patch("app.ai_service.image_text_for_guard", return_value="")
     @patch("app.ai_service.client.models.generate_content")
-    def test_gemini_unavailable_returns_safe_fallback(self, mock_gen):
+    def test_gemini_unavailable_returns_safe_fallback(self, mock_gen, _mock_guard):
         mock_gen.side_effect = ConnectionError("network down")
         result = analyze_receipt_image(b"\x00\xff")
         assert result["type"] == "unknown"

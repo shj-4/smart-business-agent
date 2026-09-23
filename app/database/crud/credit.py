@@ -117,9 +117,12 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
         (أو أسعار اليوم)، فإن تعذّر التحويل (لا شبكة) يُعاد outstanding=None
         و unified_ok=False بدل بناء رقم خاطئ — ويمتنع التنبيه/العرض المضلل.
 
+    يُقاس على صافي الذمم فقط — النقدي (is_credit=False) لا يؤثر على السقف.
+
     يعيد: {outstanding, amount, by_currency, unified_ok, side, limit, percent, over}
     side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced" | "unknown".
     """
+    from app.database.crud.common import _debt_filter
     from app.database.crud.company import report_company_filter
     from app.money import _unified_totals_for_rows
 
@@ -129,6 +132,7 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
             report_company_filter(db, limit_row.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.person == limit_row.person,
+            _debt_filter(Transaction),
         )
         .all()
     )

@@ -1,5 +1,6 @@
 """الشركات: إنشاء، عضويات، دعوات، وفحص الصلاحيات."""
 import secrets
+import threading
 import time as _time_mod
 from datetime import timedelta
 
@@ -17,64 +18,75 @@ from app.timeutil import now_utc
 
 # ذاكرة قصيرة لـ company_id لتقليل N+1 (budget_check و credit_check كانا يستعلمان
 # company_id_for_user لكل ميزانية/حد — 1000 استعلام متتالٍ). TTL=60ث ويُبطل عند الكتابة.
+# محمية بقفل مثل app/cache.py — تُقرأ/تُكتب من asyncio.to_thread (threadpool)
+# لذا أي وصول بلا قفل قد يرفع RuntimeError: dictionary changed size during iteration
+_lock = threading.RLock()
 _CID_CACHE: dict[int, tuple[int | None, float]] = {}
 _CID_TTL = 60.0
 _MEMBER_CACHE: dict[int, tuple[CompanyMember | None, float]] = {}
 
 
 def _cid_cache_get(uid: int) -> int | None | object:
-    ent = _CID_CACHE.get(uid)
-    if ent is None:
-        return None  # sentinel للتمييز بين miss و None
-    cid, ts = ent
-    if _time_mod.time() - ts < _CID_TTL:
-        return cid
-    _CID_CACHE.pop(uid, None)
-    return None
+    with _lock:
+        ent = _CID_CACHE.get(uid)
+        if ent is None:
+            return None  # sentinel للتمييز بين miss و None
+        cid, ts = ent
+        if _time_mod.time() - ts < _CID_TTL:
+            return cid
+        _CID_CACHE.pop(uid, None)
+        return None
 
 
 def _cid_cache_set(uid: int, cid: int | None) -> None:
-    _CID_CACHE[uid] = (cid, _time_mod.time())
+    with _lock:
+        _CID_CACHE[uid] = (cid, _time_mod.time())
 
 
 def invalidate_company_cache(telegram_user_id: int | None = None) -> None:
     """يبطل ذاكرة الشركة لعضو واحد أو الكل (يُستدعى بعد أي كتابة تغيّر العضوية)."""
-    if telegram_user_id is None:
-        _CID_CACHE.clear()
-        _MEMBER_CACHE.clear()
-    else:
-        _CID_CACHE.pop(telegram_user_id, None)
-        _MEMBER_CACHE.pop(telegram_user_id, None)
+    with _lock:
+        if telegram_user_id is None:
+            _CID_CACHE.clear()
+            _MEMBER_CACHE.clear()
+        else:
+            _CID_CACHE.pop(telegram_user_id, None)
+            _MEMBER_CACHE.pop(telegram_user_id, None)
 
 
 def get_company_member(db: Session, telegram_user_id: int) -> CompanyMember | None:
     # استخدم ذاكرة قصيرة (نفس TTL) — العضوية لا تتغير كل ثانية
-    ent = _MEMBER_CACHE.get(telegram_user_id)
-    if ent is not None:
-        cached, ts = ent
-        if _time_mod.time() - ts < _CID_TTL:
-            # تحقق أن الكائن لا يزال مرتبطًا بجلسة صالحة؟ نعيد نفس الكائن (قراءة فقط)
-            return cached
-        _MEMBER_CACHE.pop(telegram_user_id, None)
+    # محمية بقفل مثل app/cache.py
+    with _lock:
+        ent = _MEMBER_CACHE.get(telegram_user_id)
+        if ent is not None:
+            cached, ts = ent
+            if _time_mod.time() - ts < _CID_TTL:
+                # تحقق أن الكائن لا يزال مرتبطًا بجلسة صالحة؟ نعيد نفس الكائن (قراءة فقط)
+                return cached
+            _MEMBER_CACHE.pop(telegram_user_id, None)
     res = (
         db.query(CompanyMember)
         .filter(CompanyMember.telegram_user_id == telegram_user_id, CompanyMember.status == "active")
         .first()
     )
-    _MEMBER_CACHE[telegram_user_id] = (res, _time_mod.time())
-    _cid_cache_set(telegram_user_id, res.company_id if res else None)
+    with _lock:
+        _MEMBER_CACHE[telegram_user_id] = (res, _time_mod.time())
+        # _cid_cache_set يجلب القفل داخليًا (RLock يسمح بالتداخل)
+        _cid_cache_set(telegram_user_id, res.company_id if res else None)
     return res
 
 
 def company_id_for_user(db: Session, telegram_user_id: int) -> int | None:
-    # جرّب الذاكرة أولًا دون استعلام
-    if telegram_user_id in _CID_CACHE:
-        ent = _CID_CACHE.get(telegram_user_id)
-        if ent is not None:
-            cid, ts = ent
-            if _time_mod.time() - ts < _CID_TTL:
-                return cid
-            _CID_CACHE.pop(telegram_user_id, None)
+    # جرّب الذاكرة أولًا دون استعلام — محمية بقفل
+    with _lock:
+        if telegram_user_id in _CID_CACHE:
+            ent = _CID_CACHE.get(telegram_user_id)
+            if ent is not None:
+                cid, ts = ent
+                if _time_mod.time() - ts < _CID_TTL:
+                    return cid
+                _CID_CACHE.pop(telegram_user_id, None)
     m = get_company_member(db, telegram_user_id)
     # get_company_member يحدّث الذاكرة بالفعل
     return m.company_id if m else None

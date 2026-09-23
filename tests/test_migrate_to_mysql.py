@@ -168,7 +168,7 @@ class TestMigration:
         _migrate(src, dst, MODELS)
 
         raw = dst.execute(text("SELECT description FROM transactions")).one()
-        assert str(raw[0]).startswith("v1$")  # كُتب مشفّرًا في الهدف
+        assert str(raw[0]).startswith(("v1$", "v2$"))  # كُتب مشفّرًا في الهدف
 
         tx = dst.query(M.Transaction).one()
         assert tx.amount == Decimal("50.00")

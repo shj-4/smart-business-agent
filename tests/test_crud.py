@@ -207,6 +207,7 @@ def _add_transaction(
     description=None,
     msg_id=None,
     created_at=None,
+    is_credit=None,
 ):
     tx = Transaction(
         telegram_user_id=user_id,
@@ -218,6 +219,7 @@ def _add_transaction(
         description=description,
         raw_message="raw",
         created_at=created_at or now_utc(),
+        is_credit=is_credit,
     )
     db.add(tx)
     db.commit()
@@ -253,10 +255,10 @@ class TestRunQuery:
 
     def test_total_respects_person_filter(self, db_session):
         _add_transaction(
-            db_session, USER_A, type="expense", amount=100, currency="ILS", person="محمد", msg_id=1
+            db_session, USER_A, type="expense", amount=100, currency="ILS", person="محمد", msg_id=1, is_credit=False
         )
         _add_transaction(
-            db_session, USER_A, type="expense", amount=200, currency="ILS", person="أحمد", msg_id=2
+            db_session, USER_A, type="expense", amount=200, currency="ILS", person="أحمد", msg_id=2, is_credit=False
         )
 
         result = run_query(
@@ -1375,11 +1377,12 @@ class TestPersonMatchPrecision:
             "app.exchange.convert",
             lambda amount, frm, to: {"result": Decimal(str(amount))},
         )
+        # ذمم (is_credit=True) للائتمان والميزانية — P&L لا يحتسبها
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "علي"}, "و"
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "علي", "is_credit": True}, "و"
         )
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "عبدالعلي"}, "ع"
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "عبدالعلي", "is_credit": True}, "ع"
         )
         row = set_credit_limit(db_session, USER_A, "علي", "500")
         assert credit_usage(db_session, row)["outstanding"] == Decimal("-100.00")
@@ -1389,11 +1392,20 @@ class TestPersonMatchPrecision:
         budget = create_budget(db_session, USER_A, "person", "علي", "1000")
         assert budget_usage(db_session, budget)["spent"] == Decimal("100.00")
 
+        # P&L نقدي فقط — نضيف حركات نقدية لنفس الأشخاص
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "علي", "is_credit": False}, "نقدي علي"
+        )
+        create_transaction(
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "عبدالعلي", "is_credit": False}, "نقدي عبدالعلي"
+        )
         metric = run_query(
             db_session,
             USER_A,
             {"metric": "total_expenses", "period": "all_time", "person": "علي"},
         )
+        # P&L مع person يستخدم فلتر نقدي — عبدالعلي لا يطابق علي
+        # (لو كان LIKE %علي% لطابق عبدالعلي أيضًا)
         assert metric["result"] == {"ILS": Decimal("100.00")}
 
 
@@ -1556,7 +1568,11 @@ class TestTaskPriorityRecurrence:
         assert len(tasks) == 10
         assert len({t.id for t in tasks}) == 10
 
-    def test_complete_task_respawns_recurring(self, db_session):
+    def test_complete_task_respawns_recurring(self, db_session, monkeypatch):
+        # ثبّت الآن قبل الموعد حتى لا يتقدّم while next_due <= now إلى أسابيع لاحقة
+        from datetime import datetime as _dt
+
+        monkeypatch.setattr("app.database.crud.tasks.now_utc", lambda: _dt(2026, 8, 15, 10, 0))
         task = create_task(
             db_session,
             USER_A,
@@ -1600,9 +1616,12 @@ class TestTaskPriorityRecurrence:
             == 0
         )
 
-    def test_complete_monthly_respawn_clamps_to_shorter_month(self, db_session):
+    def test_complete_monthly_respawn_clamps_to_shorter_month(self, db_session, monkeypatch):
         """مهمة شهرية في 31 يناير → فبراير أقصر: يجب تقييد اليوم لآخر يوم صالح
         (28 في 2026) بدل طرح ValueError بعد إثبات الإنجاز."""
+        from datetime import datetime as _dt
+
+        monkeypatch.setattr("app.database.crud.tasks.now_utc", lambda: _dt(2026, 1, 15, 10, 0))
         task = create_task(
             db_session,
             USER_A,
@@ -1636,7 +1655,10 @@ class TestTaskPriorityRecurrence:
         local_due = to_local_naive(spawned.due_date)
         assert local_due.year == 2027 and local_due.month == 1 and local_due.day == 31
 
-    def test_complete_monthly_respawn_leap_year(self, db_session):
+    def test_complete_monthly_respawn_leap_year(self, db_session, monkeypatch):
+        from datetime import datetime as _dt
+
+        monkeypatch.setattr("app.database.crud.tasks.now_utc", lambda: _dt(2024, 1, 15, 8, 0))
         task = create_task(
             db_session,
             USER_A,

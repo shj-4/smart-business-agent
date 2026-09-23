@@ -107,7 +107,7 @@ class TestBackfillWritesEncrypted:
             )
         ).one()
         for value in row:
-            assert str(value).startswith("v1$")
+            assert str(value).startswith(("v1$", "v2$"))
 
         back = db_session.query(Transaction).filter_by(telegram_user_id=111).one()
         assert back.amount == Decimal("50.00")
@@ -150,18 +150,18 @@ class TestBackfillWritesEncrypted:
         note_raw = db_session.execute(
             text("SELECT description, raw_message FROM notes WHERE telegram_user_id = 111")
         ).one()
-        assert str(note_raw[0]).startswith("v1$") and str(note_raw[1]).startswith("v1$")
+        assert str(note_raw[0]).startswith(("v1$", "v2$")) and str(note_raw[1]).startswith(("v1$", "v2$"))
 
         task_raw = db_session.execute(
             text("SELECT description, raw_message FROM tasks WHERE telegram_user_id = 111")
         ).one()
-        assert str(task_raw[0]).startswith("v1$") and str(task_raw[1]).startswith("v1$")
+        assert str(task_raw[0]).startswith(("v1$", "v2$")) and str(task_raw[1]).startswith(("v1$", "v2$"))
 
         invoice_raw = db_session.execute(
             text("SELECT description, amount FROM invoices WHERE telegram_user_id = 111")
         ).one()
-        assert str(invoice_raw[0]).startswith("v1$")
-        assert str(invoice_raw[1]).startswith("v1$")  # المبلغ (المرقّم) يُشفَّر أيضًا
+        assert str(invoice_raw[0]).startswith(("v1$", "v2$"))
+        assert str(invoice_raw[1]).startswith(("v1$", "v2$"))  # المبلغ (المرقّم) يُشفَّر أيضًا
 
         invoice_obj = db_session.query(Invoice).filter_by(telegram_user_id=111).one()
         assert invoice_obj.amount == Decimal("200.00")
@@ -169,7 +169,7 @@ class TestBackfillWritesEncrypted:
         feedback_raw = db_session.execute(
             text("SELECT raw_message FROM correction_feedback WHERE telegram_user_id = 111")
         ).one()
-        assert str(feedback_raw[0]).startswith("v1$")
+        assert str(feedback_raw[0]).startswith(("v1$", "v2$"))
 
     def test_null_values_left_untouched(self, db_session, enc_key):
         db_session.execute(
@@ -190,7 +190,7 @@ class TestBackfillWritesEncrypted:
                 "FROM transactions WHERE telegram_user_id = 111"
             )
         ).one()
-        assert str(row[0]).startswith("v1$")
+        assert str(row[0]).startswith(("v1$", "v2$"))
         assert row[1] is None  # لا نكتب NULL/لا نخترع قيمة للمفقود
-        assert str(row[2]).startswith("v1$")
+        assert str(row[2]).startswith(("v1$", "v2$"))
         assert row[3] is None

@@ -195,11 +195,6 @@ def _prompt_fallback(name: str) -> str:
     )
 
 
-STT_PROMPT = _prompt_fallback("stt.md")
-
-SYSTEM_PROMPT = _prompt_fallback("system_general.md")
-
-
 _GEMINI_SEMAPHORE = None
 
 
@@ -250,9 +245,6 @@ def _parse_json(raw_text: str) -> dict | None:
         return value if isinstance(value, dict) else None
     except json.JSONDecodeError:
         return None
-
-
-REPAIR_PROMPT = _prompt_fallback("repair_json.md")
 
 
 def _company_context(company) -> str:
@@ -411,9 +403,6 @@ def interpret_arabic_date(text: str, *, now=None) -> str | None:
     return to_local_naive(dt).strftime("%Y-%m-%d %H:%M")
 
 
-RECEIPT_SYSTEM_PROMPT = _prompt_fallback("receipt_system.md")
-
-
 IMAGE_TEXT_PROMPT = """
 اقرأ النص المكتوب الظاهر في هذه الصورة حرفيًا (نص فقط، بدون أي شرح أو مقدمة
 أو علامات اقتباس). إن لم يكن في الصورة نص مكتوب، أعد فراغًا.
@@ -539,9 +528,6 @@ def _generate_text_with_prompt(contents: str, system_prompt: str) -> str:
         logger.error("فشل توليد النص عبر Gemini: %s", exc)
         return ""
     return (response.text or "").strip()
-
-
-DAILY_BRIEF_PROMPT = _prompt_fallback("daily_brief.md")
 
 
 def generate_daily_brief(brief_data: str) -> str:
