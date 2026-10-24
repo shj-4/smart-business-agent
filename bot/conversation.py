@@ -1593,9 +1593,18 @@ def _normalize_edit_value(field: str, raw: str) -> tuple[object, str | None]:
     if field in ("due_date", "date"):
         from app.database.crud import parse_date_local
 
-        if parse_date_local(value) is None:
-            return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"
-        return value, None
+        if parse_date_local(value) is not None:
+            return value, None
+        # نص حر (بكرة/غدًا/بعد يومين...) → يُفسَّر بالذكاء الاصطناعي (مثل apply_confirm_edit)
+        try:
+            import app.ai_service as ai_service
+
+            interpreted = ai_service.interpret_arabic_date(value)
+            if interpreted:
+                return interpreted, None
+        except Exception:
+            pass
+        return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"
     if not value:
         return None, "القيمة لا يمكن أن تكون فارغة."
     return value, None

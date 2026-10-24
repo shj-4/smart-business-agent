@@ -19,6 +19,7 @@ import sqlite3
 from datetime import datetime
 
 from app.database.db import DATABASE_URL
+from app.timeutil import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ DB_PATH = DATABASE_URL.replace("sqlite:///", "") if DATABASE_URL.startswith("sql
 
 
 def _log(msg: str) -> None:
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    line = f"[{now_local().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     logger.info(line)
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -46,12 +47,13 @@ def _list_backups() -> list[str]:
     if not os.path.exists(BACKUP_DIR):
         return []
     return sorted(
-        f for f in os.listdir(BACKUP_DIR) if f.startswith("business_") and f.endswith(".db")
+        f for f in os.listdir(BACKUP_DIR)
+        if f.startswith("business_") and (f.endswith(".db") or f.endswith(".sql.gz"))
     )
 
 
 def _today_prefix() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    return now_local().strftime("%Y%m%d")
 
 
 def _has_backup_for_today() -> bool:
@@ -67,7 +69,7 @@ def _rotate_backups() -> None:
     """
     from datetime import timedelta
 
-    now = datetime.now()
+    now = now_local()
     cutoff = now - timedelta(days=KEEP_DAYS)
     cutoff_str = cutoff.strftime("%Y%m%d")
     for fname in _list_backups():
@@ -110,6 +112,9 @@ def _verify_backup(backup_path: str) -> bool:
 def run_backup() -> bool:
     """ينفّذ نسخة احتياطية (SQLite: نسخ ملف، MySQL: mysqldump إن توفر) — يعيد True عند النجاح."""
     if DATABASE_URL.startswith("mysql"):
+        if _has_backup_for_today():
+            _log("تُوجد نسخة احتياطية لنفس اليوم — تخطي التكرار اليومي")
+            return True
         return _run_mysql_backup()
     if not DB_PATH or not os.path.exists(DB_PATH):
         _log(f"قاعدة SQLite غير موجودة أو أن القاعدة ليست SQLite: {DB_PATH}")
@@ -121,7 +126,7 @@ def run_backup() -> bool:
         _log("تُوجد نسخة احتياطية لنفس اليوم — تخطي التكرار اليومي")
         return True
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = now_local().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(BACKUP_DIR, f"business_{timestamp}.db")
 
     try:
@@ -159,7 +164,11 @@ def _run_mysql_backup() -> bool:
         return False
     # تحذير: النسخ على نفس القرص فقط — يُنصح بنسخ خارجي (سحابة)
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # لا تنشئ نسخة ثانية في نفس اليوم — واحدة يوميًا تكفي (كما في مسار SQLite)
+    if _has_backup_for_today():
+        _log("تُوجد نسخة احتياطية لنفس اليوم — تخطي التكرار اليومي")
+        return True
+    timestamp = now_local().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(BACKUP_DIR, f"business_{timestamp}.sql.gz")
     # DATABASE_URL = mysql+pymysql://user:pass@host:port/db
     try:

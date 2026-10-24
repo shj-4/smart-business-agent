@@ -546,16 +546,35 @@ async def _cmd_plan(update: Update, uid: int, args: list[str]) -> None:
             await update.message.reply_text("استخدم: /bonus plan إضافة <الشخص> <المبلغ> [monthly|quarterly|one_off] [سقف شهري]")
             return
         freq = "monthly"
-        if remaining:
-            raw = remaining[0].strip().lower()
-            freq_map = {"monthly": "monthly", "شهري": "monthly", "quarterly": "quarterly", "ربع سنوي": "quarterly", "one_off": "one_off", "مرة واحدة": "one_off", "مرة": "one_off"}
-            freq = freq_map.get(raw, "monthly")
         cap = None
-        if len(remaining) > 1:
-            try:
-                cap = Decimal(remaining[1])
-            except InvalidOperation:
-                pass
+        if remaining:
+            freq_map = {"monthly": "monthly", "شهري": "monthly", "quarterly": "quarterly", "ربع سنوي": "quarterly", "one_off": "one_off", "مرة واحدة": "one_off", "مرة": "one_off"}
+            raw_joined = " ".join(remaining).strip().lower()
+            matched = False
+            for key in sorted(freq_map, key=len, reverse=True):
+                if raw_joined == key:
+                    freq = freq_map[key]
+                    matched = True
+                    break
+                if raw_joined.startswith(key + " "):
+                    freq = freq_map[key]
+                    cap_part = raw_joined[len(key):].strip()
+                    if cap_part:
+                        cap_token = cap_part.split()[0]
+                        try:
+                            cap = Decimal(cap_token.replace(",", "."))
+                        except InvalidOperation:
+                            pass
+                    matched = True
+                    break
+            if not matched:
+                # لا توجد دورية معروفة في البداية — افترض monthly كما كان سابقًا
+                freq = "monthly"
+                if len(remaining) > 1:
+                    try:
+                        cap = Decimal(remaining[1].replace(",", "."))
+                    except InvalidOperation:
+                        pass
         from app.database.crud import create_employee_bonus_plan
 
         # أول استحقاق بعد دورة كاملة، لا فور الإنشاء (كان now_utc() → يُمنح خلال 30د بلا تأكيد)
