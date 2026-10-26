@@ -272,41 +272,15 @@ async def solo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _clear_co_keys(context)
     # حفظ اختيار الفردي بشكل دائم (حتى لا يُعرض onboarding مجددًا عند /start)
     # الحل: إنشاء شركة فردية (solo) باسم "فردي" للمالك — تصبح has_company True
-    try:
-        from app.database.crud.company import company_id_for_user, create_company
-
-        db = SessionLocal()
-        try:
-            cid = company_id_for_user(db, query.from_user.id)
-            if cid is None:
-                # أنشئ شركة فردية (اسم مؤقت) — يمنع تكرار onboarding
-                comp = create_company(
-                    db,
-                    query.from_user.id,
-                    name=f"فردي {query.from_user.id}",
-                    description="استخدام فردي",
-                    business_type="other",
-                    base_currency="ILS",
-                )
-                if comp:
-                    context.user_data["solo_mode"] = True
-                else:
-                    # إن فشل الإنشاء (عضو بالفعل) اعتبره solo
-                    context.user_data["solo_mode"] = True
-            else:
-                context.user_data["solo_mode"] = True
-        finally:
-            db.close()
-    except Exception:
-        logger.exception("فشل حفظ اختيار الفردي")
-        context.user_data["solo_mode"] = True
+    # الوضع الفردي لا ينشئ شركة — يبقى المستخدم "فردًا" (company_id=None)
+    # حتى يتمكن من الانضمام لشركة لاحقًا (redeem_invite).
+    context.user_data["solo_mode"] = True
     from bot.menus import send_main_menu
 
     await query.edit_message_text("حسنًا، ستستمر كمستخدم فردي.\nيمكنك إنشاء شركة لاحقًا من الإعدادات.")
     # مرر from_user الصحيح لـ send_main_menu لتحديد اللغة
     try:
-        if not getattr(query.message, "from_user", None):
-            query.message.from_user = query.from_user
+        query.message.from_user = query.from_user
         await send_main_menu(query.message, context)
     except Exception:
         logger.exception("فشل إرسال القائمة للفردي")

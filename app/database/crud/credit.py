@@ -126,16 +126,18 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     from app.database.crud.company import report_company_filter
     from app.money import _unified_totals_for_rows
 
-    rows = (
+    from app.database.crud.common import normalize_person_for_match
+
+    all_rows = (
         db.query(Transaction)
         .filter(
             report_company_filter(db, limit_row.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
-            Transaction.person == limit_row.person,
             _debt_filter(Transaction),
         )
         .all()
     )
+    rows = [r for r in all_rows if normalize_person_for_match(r.person) == normalize_person_for_match(limit_row.person)]
 
     per_cur: dict = {}
     for r in rows:
@@ -143,7 +145,11 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
             continue
         c = r.currency or "غير محددة"
         cell = per_cur.setdefault(c, {"income": Decimal("0"), "expense": Decimal("0")})
-        cell[r.type] = cell.get(r.type, Decimal("0")) + r.amount
+        is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+        eff_type = r.type
+        if is_settlement:
+            eff_type = "income" if r.type == "expense" else "expense"
+        cell[eff_type] = cell.get(eff_type, Decimal("0")) + r.amount
     by_currency = {
         c: {
             "income": cell["income"].quantize(Decimal("0.01")),
@@ -163,12 +169,21 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
         from app.database.crud.company import get_user_base_currency as _get_base
 
         base = _get_base(db, limit_row.telegram_user_id)
-        exp_uni = _unified_totals_for_rows(
-            [r for r in rows if r.type == "expense" and r.amount is not None], base
-        ).get("total")
-        inc_uni = _unified_totals_for_rows(
-            [r for r in rows if r.type == "income" and r.amount is not None], base
-        ).get("total")
+        exp_rows = []
+        inc_rows = []
+        for r in rows:
+            if r.amount is None:
+                continue
+            is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+            eff_type = r.type
+            if is_settlement:
+                eff_type = "income" if r.type == "expense" else "expense"
+            if eff_type == "expense":
+                exp_rows.append(r)
+            else:
+                inc_rows.append(r)
+        exp_uni = _unified_totals_for_rows(exp_rows, base).get("total")
+        inc_uni = _unified_totals_for_rows(inc_rows, base).get("total")
         if exp_uni is not None and inc_uni is not None:
             outstanding = inc_uni - exp_uni
         else:

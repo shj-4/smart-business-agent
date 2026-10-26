@@ -55,6 +55,13 @@ def install_sentry() -> bool:
 
             scrubber = EventScrubber(
                 denylist=[
+                    "password",
+                    "token",
+                    "secret",
+                    "api_key",
+                    "apikey",
+                    "authorization",
+                    "cookie",
                     "amount",
                     "person",
                     "description",
@@ -62,7 +69,6 @@ def install_sentry() -> bool:
                     "currency",
                     "raw_message",
                     "telegram_user_id",
-                    "person",
                     "amount_in_base_currency",
                 ],
                 recursive=True,
@@ -75,7 +81,7 @@ def install_sentry() -> bool:
             import re
 
             _SENSITIVE_RE = re.compile(
-                r"(amount|person|description|category|currency|raw_message|telegram_user_id|parameters\s*:)",
+                r"(amount|person|description|category|currency|raw_message|telegram_user_id|parameters\s*:|bot\d+:[A-Za-z0-9_-]{20,})",
                 re.IGNORECASE,
             )
         except Exception:

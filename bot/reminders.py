@@ -235,7 +235,9 @@ async def _broadcast_budget_alert(
     for uid in accessible_user_ids(db, budget.telegram_user_id):
         if not has_permission(db, uid, "budget.manage") and not has_permission(db, uid, "report.view_all"):
             continue
-        if not _user_pref_flag(db, uid, "notif_budget_alert"):
+        # المالك يُنبَّه دائمًا (حتى لو عطّل الأعضاء)
+        is_owner = uid == getattr(budget, "telegram_user_id", None)
+        if not is_owner and not _user_pref_flag(db, uid, "notif_budget_alert"):
             continue
         try:
             await context.bot.send_message(chat_id=uid, text="\n".join(lines))
@@ -322,7 +324,8 @@ async def invoice_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         overdue = mark_overdue_invoices(db)
         # احتفظ بمعرّفات فقط لتجنّب detached instances بعد إغلاق الجلسة
-        overdue_ids = [inv.id for inv in overdue]
+        mark_overdue_invoices(db)
+        overdue_ids = [inv.id for inv in db.query(Invoice).filter(Invoice.status == 'overdue', Invoice.alerted == False).all()]
     except Exception:
         logger.exception("خطأ في جلب الفواتير المتأخرة")
         db.close()
@@ -716,9 +719,10 @@ async def deviation_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         def _anchor(u):
             s = SessionLocal()
             try:
-                from app.database.crud import workspace_for_user
+                from app.database.crud.company import company_id_for_user
 
-                return workspace_for_user(s, u) or u
+                cid = company_id_for_user(s, u)
+                return cid if cid is not None else u
             finally:
                 try:
                     s.close()
@@ -1056,7 +1060,7 @@ def build_morning_summary(db: Session, uid: int) -> str:
 
     if due_today:
         times = sorted(to_local_naive(t.due_date).strftime("%H:%M") for t in due_today if t.due_date)
-        parts.append(f"آخر موعد الساعة {times[0]}")
+        parts.append(f"آخر موعد الساعة {times[-1]}")
 
     if not invoices:
         parts.append("لا فواتير مستحقة")

@@ -71,9 +71,20 @@ def _bonus_category_filter():
 
 def _base_currency_amount(tx) -> Decimal | None:
     """المبلغ بعملة الأساس إن توثّق، وإلا None (لا تُخلط عملات)."""
-    from app.config import settings
-
-    base = (settings.base_currency or "").upper().strip()
+    try:
+        from app.database.crud.company import get_user_base_currency
+        from app.database.db import SessionLocal as _SL
+        _db = _SL()
+        try:
+            base = (get_user_base_currency(_db, tx.telegram_user_id) or "").upper().strip()
+        finally:
+            _db.close()
+    except Exception:
+        from app.config import settings
+        base = (settings.base_currency or "").upper().strip()
+    if not base:
+        from app.config import settings
+        base = (settings.base_currency or "").upper().strip()
     if (
         base
         and tx.base_currency_at_creation == base
@@ -121,7 +132,7 @@ def bonus_report_summary(
     db: Session, telegram_user_id: int, period: str = "this_month", person: str | None = None
 ) -> dict:
     """ملخّص تقارير البونس: إجمالي ممنوح (expense) ومستلم (income) لكل عملة."""
-    rows = list_bonus_transactions(db, telegram_user_id, period, person, limit=200)
+    rows = list_bonus_transactions(db, telegram_user_id, period, person, limit=10000)
     expense: dict = {}
     income: dict = {}
     count_expense = 0
@@ -185,6 +196,7 @@ def record_bonus_grant(
             "person": _clean_person(person),
             "category": BONUS_CATEGORY,
             "description": _clean_text(description),
+            "is_credit": False,
         },
         raw_message=raw_message or "",
     )
@@ -270,6 +282,8 @@ def set_bonus_event_status(
     if event is None:
         return None
     event.status = status
+    if status == "ended" and getattr(event, "end_at", None) is None:
+        event.end_at = now_utc()
     event.updated_at = now_utc()
     db.commit()
     db.refresh(event)
@@ -278,7 +292,12 @@ def set_bonus_event_status(
 
 def end_bonus_event(db: Session, telegram_user_id: int, event_id: int) -> BonusEvent | None:
     """يختم الفعالية (status=ended) — اختصار لـ set_bonus_event_status."""
-    return set_bonus_event_status(db, telegram_user_id, event_id, "ended")
+    event = set_bonus_event_status(db, telegram_user_id, event_id, "ended")
+    if event is not None and getattr(event, "end_at", None) is None:
+        event.end_at = now_utc()
+        db.commit()
+        db.refresh(event)
+    return event
 
 
 def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
@@ -835,6 +854,10 @@ def accrue_loyalty_for_transaction(db: Session, tx: Transaction) -> None:
     النقاط = المبلغ (بعملة الأساس إن توثّقت، وإلا الأصلي) × نقاط/وحدة.
     """
     if tx is None or not getattr(tx, "type", None) == "income":
+        return
+    # لا تراكم على المبيعات الآجلة (charge) — فقط نقد/تسديد
+    direction = getattr(tx, "debt_direction", None) or getattr(tx, "ledger_entry", None)
+    if direction == "charge":
         return
     person = getattr(tx, "person", None)
     if not person:

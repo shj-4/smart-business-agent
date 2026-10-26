@@ -431,11 +431,12 @@ def _summary_month(db: Session, base: str, company_id: int | None = None) -> dic
     for rtype, currency, amount, stored_amt, stored_base in rows:
         c = (currency or "").upper()
         kind = "expense" if rtype == "expense" else "income"
-        entry = by_currency.setdefault(c, {"expense": Decimal("0"), "income": Decimal("0")})
-        entry[kind] += amount or Decimal("0")
-        if stored_amt is not None and stored_base == base and c:
+        if stored_amt is not None and stored_base == base and c and c != base:
             se = stored.setdefault(c, {"expense": Decimal("0"), "income": Decimal("0")})
             se[kind] += Decimal(str(stored_amt))
+        else:
+            entry = by_currency.setdefault(c, {"expense": Decimal("0"), "income": Decimal("0")})
+            entry[kind] += amount or Decimal("0")
     return _convert_month_currency_groups(by_currency, base, stored=stored or None)
 
 
@@ -723,14 +724,11 @@ NOTE_COLUMNS = [
 ]
 
 
-def _recent_transactions(db: Session, limit: int = 10):
-    rows = (
-        db.query(Transaction)
-        .filter(Transaction.deleted_at.is_(None))
-        .order_by(Transaction.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+def _recent_transactions(db: Session, limit: int = 10, company_id: int | None = None):
+    q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    if company_id is not None:
+        q = q.filter(Transaction.company_id == company_id)
+    rows = q.order_by(Transaction.created_at.desc()).limit(limit).all()
     out = []
     for r in rows:
         local_dt = to_local_naive(r.created_at)
@@ -748,15 +746,11 @@ def _recent_transactions(db: Session, limit: int = 10):
     return out
 
 
-def _recent_tasks(db: Session, limit: int = 50):
-    # ترتيب متوافق مع MySQL: NULLs last عبر IS NULL (MySQL لا يدعم NULLS LAST)
-    rows = (
-        db.query(Task)
-        .filter(Task.deleted_at.is_(None))
-        .order_by(Task.due_date.is_(None).asc(), Task.due_date.asc())
-        .limit(limit)
-        .all()
-    )
+def _recent_tasks(db: Session, limit: int = 50, company_id: int | None = None):
+    q = db.query(Task).filter(Task.deleted_at.is_(None))
+    if company_id is not None:
+        q = q.filter(Task.company_id == company_id)
+    rows = q.order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(limit).all()
 
     out = []
     for r in rows:
@@ -773,14 +767,11 @@ def _recent_tasks(db: Session, limit: int = 50):
     return out
 
 
-def _recent_notes(db: Session, limit: int = 10):
-    rows = (
-        db.query(Note)
-        .filter(Note.deleted_at.is_(None))
-        .order_by(Note.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+def _recent_notes(db: Session, limit: int = 10, company_id: int | None = None):
+    q = db.query(Note).filter(Note.deleted_at.is_(None))
+    if company_id is not None:
+        q = q.filter(Note.company_id == company_id)
+    rows = q.order_by(Note.created_at.desc()).limit(limit).all()
     out = []
     for n in rows:
         local_dt = to_local_naive(n.created_at)

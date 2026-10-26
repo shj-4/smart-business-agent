@@ -13,6 +13,11 @@
   "description": string | null,
   "date": string | null,
   "is_credit": boolean | null,
+  "ledger_entry": "charge" | "settlement" | null,
+  "ledger_kind": "charge" | "settlement" | null,
+  "vat_rate": number | null,
+  "vat_amount": number | null,
+  "reply": string | null,
   "priority": "high" | "normal" | "low" | null,
   "recurrence": "daily" | "weekly" | "monthly" | null,
   "missing_fields": [array of strings],
@@ -40,11 +45,17 @@
 - معلومة عامة يريد حفظها → "note"
 - غير واضح → "unknown"
 
-قواعد حقل is_credit (فقط عندما intent = "record" ونوع العملية مالي expense/income مع person):
-- true → قيد ذمة (آجل/تسديد) يؤثر على رصيد الشخص (person_debts) ولا يُحتسب في إجمالي المصاريف/الإيرادات (P&L)
-- false/null → حركة نقدية (صندوق) تُحتسب في الإجماليات ولا تؤثر على رصيد الذمة إلا إذا كان لها person و is_credit=true
-- للتوافق مع البيانات القديمة: person IS NOT NULL و is_credit IS NULL يُعتبر ذمة (آجل) — لكن يُفضل تحديده صراحة
-- مثال: «بعت لسامر بضاعة بالأجل 500» → income, is_credit=true, و«سدد سامر لي 300» → expense, is_credit=true, و«دفعت إيجار 500» → expense, is_credit=false
+قواعد حقل is_credit / ledger_entry (فقط عندما intent = "record" ونوع العملية مالي expense/income):
+- الافتراضي "نقدي" (is_credit=false أو null و ledger_entry=null) ما لم يقل المستخدم "آجل" أو "بالدين" أو "ذمة".
+- charge → قيد آجل (ذمة) يُسجَّل في دفتر الشخص (لا يُحتسب في P&L حتى التسديد):
+   * «بعت لسامر بضاعة بالأجل 500» → income, ledger_entry="charge"
+   * «اشتريت مواد من محمد بالآجل 300» → expense, ledger_entry="charge"
+- settlement → تسديد نقدي يُعدِّل رصيد الشخص ويُحتسب في P&L:
+   * «سدد سامر لي 300» → income, ledger_entry="settlement"
+   * «دفعت لمحمد 300» (تسديد دين) → expense, ledger_entry="settlement"
+- حركة نقدية مباشرة (إيجار، كهرباء، مشتريات نقدية) → expense/income, ledger_entry=null (أو is_credit=false) و person=null إن لم يكن لشخص محدد
+- للتوافق: is_credit=true يُفسَّر كـ ledger_entry="charge".
+- مثال: «دفعت 300 شيكل للمورد محمد» (بدون "آجل") → expense, ledger_entry=null (نقدي) ويُحتسب في المصاريف.
 
 ملاحظة اتجاه الرصيد مع شخص: رصيد الشخص = إجمالي income ذمة - إجمالي expense ذمة (حيث is_credit=true). موجبة تعني «هو مدين لك» وسالبة «أنت مدين له». لذا تسديدٌ من عميل يُسجَّل expense, is_credit=true (يخفض رصيده عندك) لا income.
 

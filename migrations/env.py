@@ -18,8 +18,10 @@ config = context.config
 # نستخدم نفس URL قاعدة البيانات المعرّف في التطبيق (db.py) — مع هروب % لـ ConfigParser
 config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name, disable_existing_loggers=False)
+# fileConfig معطّل: يُغلق معالجات السجل (RotatingFileHandler) ويُعيد المستوى إلى WARNING.
+# التسجيل يُهيّأ via app.logging_config.configure_logging (أو alembic CLI logging).
+# if config.config_file_name is not None:
+#     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Metadata الحقيقي للنماذج — للمصدر الذي يعتمد عليه autogenerate
 target_metadata = Base.metadata

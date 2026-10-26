@@ -11,7 +11,15 @@ from decimal import Decimal, InvalidOperation
 from io import BytesIO
 
 from telegram import Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from app.database.crud import complete_task, undo_last_record
 from app.database.db import SessionLocal
@@ -341,7 +349,10 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             task = candidates[0]
             from bot.menus import MAIN_HOME_KEYBOARD
 
-            complete_task(db, telegram_user_id, task.id)
+            _done_res = complete_task(db, telegram_user_id, task.id)
+            if _done_res is None:
+                await update.message.reply_text("❌ لا تملك صلاحية إنجاز هذه المهمة.")
+                return
             await update.message.reply_text(
                 f"تم إنجاز المهمة: {task.description}", reply_markup=MAIN_HOME_KEYBOARD
             )
@@ -1425,7 +1436,21 @@ async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     from app.ai_service import generate_daily_brief
     from app.database.crud import kpi_dashboard
+    from app.database.crud.common import has_ai_consent
+    from app.database.db import SessionLocal as _SLb
     from bot.formatters import format_brief_data, format_kpi_dashboard
+    from bot.ratelimit import check_and_increment_daily
+
+    # فحص الموافقة والحصة اليومية قبل إرسال ملخص مالي لـ Gemini
+    _consent = True
+    try:
+        _dbb = _SLb()
+        try:
+            _consent = has_ai_consent(_dbb, update.effective_user.id)
+        finally:
+            _dbb.close()
+    except Exception:
+        _consent = True
 
     def _load():
         db = SessionLocal()
@@ -1435,7 +1460,9 @@ async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             db.close()
 
     payload = await asyncio.to_thread(_load)
-    brief = await asyncio.to_thread(generate_daily_brief, format_brief_data(payload))
+    brief = None
+    if _consent and check_and_increment_daily(update.effective_user.id):
+        brief = await asyncio.to_thread(generate_daily_brief, format_brief_data(payload))
     if brief:
         await safe_reply(update.message, brief)
     else:
@@ -1676,7 +1703,58 @@ async def system_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         logger.exception("فشل إرسال رسالة خطأ إلى المستخدم")
 
 
+
+async def requirements_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض وثيقة المتطلبات (SRS) لـ BizMate."""
+    import os
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "SRS_BizMate.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        await update.message.reply_text("تعذّر قراءة وثيقة المتطلبات.")
+        return
+    # تيليجرام حد 4096 حرف
+    await update.message.reply_text(text[:4000])
+
+
 def register_handlers(app: Application) -> None:
+    # فلتر السماح (ALLOWED_USER_IDS / registration_token) على كل الرسائل والأزرار
+    try:
+        from bot.ratelimit import is_user_allowed
+    except Exception:
+        is_user_allowed = lambda uid: True
+
+    async def _allowlist_message_guard(update, context):
+        user = getattr(update, "effective_user", None)
+        if user is not None and not is_user_allowed(user.id):
+            # استثناء /start و /register
+            msg = getattr(update, "message", None)
+            text = getattr(msg, "text", "") or ""
+            if text.strip().startswith("/start") or text.strip().startswith("/register"):
+                return None
+            try:
+                if msg is not None:
+                    await msg.reply_text("غير مسموح لك باستخدام هذا البوت.")
+            except Exception:
+                pass
+            raise ApplicationHandlerStop
+        return None
+
+    async def _allowlist_callback_guard(update, context):
+        user = getattr(update, "effective_user", None)
+        if user is not None and not is_user_allowed(user.id):
+            try:
+                if getattr(update, "callback_query", None) is not None:
+                    await update.callback_query.answer("غير مسموح", show_alert=True)
+            except Exception:
+                pass
+            raise ApplicationHandlerStop
+        return None
+
+    app.add_handler(MessageHandler(filters.ALL, _allowlist_message_guard), group=-1)
+    app.add_handler(CallbackQueryHandler(_allowlist_callback_guard), group=-1)
+
     """يُسجّل كل المعالجات في Application (بما فيها ConversationHandler).
 
     يفعّل أيضًا غلاف Bidi الموحد على طرق إرسال النصوص (reply_text/
@@ -1689,6 +1767,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("register", register_command))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("requirements", requirements_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(CommandHandler("undo", undo_command))

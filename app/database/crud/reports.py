@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database.db import DATABASE_URL
@@ -101,6 +102,7 @@ def monthly_totals(
         Transaction.type,
         Transaction.currency,
         Transaction.created_at,
+        Transaction.occurred_at,
         Transaction.amount,
         Transaction.amount_in_base_currency,
         Transaction.base_currency_at_creation,
@@ -112,7 +114,7 @@ def monthly_totals(
         .filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
-            Transaction.created_at >= start,
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
             _cash_filter(Transaction),
         )
         .all()
@@ -126,11 +128,12 @@ def monthly_totals(
         tx_type,
         currency,
         created_at,
+        occurred_at,
         amount,
         amount_in_base,
         base_at_creation,
     ) in rows:
-        local_dt = to_local_naive(created_at)
+        local_dt = to_local_naive(occurred_at if occurred_at is not None else created_at)
         key = local_dt.strftime("%Y-%m")
         cur_name = currency or "غير محددة"
         per_cur = agg.setdefault(
@@ -226,6 +229,8 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
             agg[cur] = agg.get(cur, Decimal("0")) + Decimal(str(amount or 0))
         return agg
 
+    from app.database.crud.common import _cash_filter as _cf_stats
+
     expenses_rows = [
         r
         for r in db.query(Transaction.amount, Transaction.currency)
@@ -233,6 +238,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
+            _cf_stats(Transaction),
         )
         .all()
     ]
@@ -243,6 +249,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
+            _cf_stats(Transaction),
         )
         .all()
     ]
@@ -250,8 +257,8 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
     # ساعة الذروة خلال آخر 90 يومًا (بالتوقيت المحلي)
     cutoff = now_utc() - timedelta(days=90)
     hour_clock = {}
-    for (created_at,) in (
-        db.query(Transaction.created_at)
+    for (created_at, occurred_at) in (
+        db.query(Transaction.created_at, Transaction.occurred_at)
         .filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
@@ -259,7 +266,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
         )
         .all()
     ):
-        local_dt = to_local_naive(created_at)
+        local_dt = to_local_naive(occurred_at if occurred_at is not None else created_at)
         if local_dt is not None:
             h = local_dt.hour
             hour_clock[h] = hour_clock.get(h, 0) + 1
@@ -312,7 +319,12 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
     from app.database.crud.company import get_user_base_currency as _get_base2
 
     base = _get_base2(db, telegram_user_id)
-    ids = report_scope_ids(db, telegram_user_id) or {-1}
+    from app.database.crud.company import company_id_for_user as _cid_kpi
+    _cid_kpi_val = _cid_kpi(db, telegram_user_id)
+    if _cid_kpi_val is not None:
+        ids = None  # company scope
+    else:
+        ids = report_scope_ids(db, telegram_user_id) or {-1}
 
     entries = monthly_totals(db, telegram_user_id, months=2, include_stored=True)
     current = entries[-1]
@@ -344,26 +356,42 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
             return None
         return round(float((cur - prev) / prev * 100), 1)
 
-    task_q = db.query(Task).filter(
-        Task.telegram_user_id.in_(ids), Task.deleted_at.is_(None)
-    )
+    if _cid_kpi_val is not None:
+        task_q = db.query(Task).filter(Task.company_id == _cid_kpi_val, Task.deleted_at.is_(None))
+    else:
+        task_q = db.query(Task).filter(Task.telegram_user_id.in_(ids), Task.deleted_at.is_(None))
     tasks_pending = task_q.filter(Task.status == "pending").count()
     tasks_overdue = task_q.filter(Task.status == "overdue").count()
 
-    inv_q = db.query(Invoice).filter(Invoice.telegram_user_id.in_(ids))
+    if _cid_kpi_val is not None:
+        inv_q = db.query(Invoice).filter(Invoice.company_id == _cid_kpi_val)
+    else:
+        inv_q = db.query(Invoice).filter(Invoice.telegram_user_id.in_(ids))
     inv_pending = inv_q.filter(Invoice.status == "pending").count()
     inv_overdue = inv_q.filter(Invoice.status == "overdue").count()
 
-    orders_open = (
-        db.query(Note)
-        .filter(
-            Note.telegram_user_id.in_(ids),
-            Note.deleted_at.is_(None),
-            Note.note_type == "order",
-            Note.status == "open",
+    if _cid_kpi_val is not None:
+        orders_open = (
+            db.query(Note)
+            .filter(
+                Note.company_id == _cid_kpi_val,
+                Note.deleted_at.is_(None),
+                Note.note_type == "order",
+                Note.status == "open",
+            )
+            .count()
         )
-        .count()
-    )
+    else:
+        orders_open = (
+            db.query(Note)
+            .filter(
+                Note.telegram_user_id.in_(ids),
+                Note.deleted_at.is_(None),
+                Note.note_type == "order",
+                Note.status == "open",
+            )
+            .count()
+        )
 
     budgets = list_budgets(db, telegram_user_id)
     budgets_over = sum(1 for b in budgets if budget_usage(db, b).get("over"))
@@ -386,16 +414,32 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
     month_start = to_utc_naive(
         local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     )
-    cat_rows = (
-        db.query(Transaction)
-        .filter(
-            Transaction.telegram_user_id.in_(ids),
-            Transaction.deleted_at.is_(None),
-            Transaction.type == "expense",
-            Transaction.created_at >= month_start,
+    from app.database.crud.common import _cash_filter as _cf_kpi
+
+    if _cid_kpi_val is not None:
+        cat_rows = (
+            db.query(Transaction)
+            .filter(
+                Transaction.company_id == _cid_kpi_val,
+                Transaction.deleted_at.is_(None),
+                Transaction.type == "expense",
+                Transaction.created_at >= month_start,
+                _cf_kpi(Transaction),
+            )
+            .all()
         )
-        .all()
-    )
+    else:
+        cat_rows = (
+            db.query(Transaction)
+            .filter(
+                Transaction.telegram_user_id.in_(ids),
+                Transaction.deleted_at.is_(None),
+                Transaction.type == "expense",
+                Transaction.created_at >= month_start,
+                _cf_kpi(Transaction),
+            )
+            .all()
+        )
     cat_groups: dict[str, list] = {}
     for r in cat_rows:
         cat_groups.setdefault(r.category or "بدون تصنيف", []).append(r)
@@ -481,6 +525,9 @@ def forecast_totals(
 
     base = _get_base3(db, telegram_user_id)
     entries = monthly_totals(db, telegram_user_id, months=history, include_stored=True)
+    # استبعاد الشهر الحالي (ناقص) من الانحدار — تجنّب انحياز للأسفل
+    if entries and entries[-1].get("month_key") == now_local().strftime("%Y-%m"):
+        entries = entries[:-1]
     if not entries:
         return {"base": base, "history": history, "months": [], "last_key": None}
 
@@ -591,7 +638,7 @@ def deviation_summary(
             for e in prev:
                 v = (e.get("by_currency") or {}).get(c) or {}
                 val = v.get(kind)
-                if val is not None and val > 0:
+                if val is not None:
                     avg_val += val
                     samples += 1
             if samples == 0:

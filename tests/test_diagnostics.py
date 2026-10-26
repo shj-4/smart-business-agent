@@ -195,6 +195,7 @@ class TestUserStatsCounts:
             db_env, 111, {"type": "expense", "amount": 100, "currency": "ILS"}, "دفعة"
         )
         tx.created_at = to_utc_naive(datetime(2026, 9, 1, 10, 0, 0))  # 10:00 محليًا
+        tx.occurred_at = tx.created_at
         db_env.commit()
         stats = user_stats(db_env, 111)
         assert stats["peak_hour_local"] == 10

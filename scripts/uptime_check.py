@@ -23,6 +23,27 @@ if ROOT not in sys.path:
 LOG_FILE = os.path.join(ROOT, "logs", "uptime.log")
 API_BASE = "http://127.0.0.1:8000"
 
+def _dashboard_auth_header() -> str | None:
+    import base64, os
+    user = os.environ.get("DASHBOARD_USERNAME")
+    pw = os.environ.get("DASHBOARD_PASSWORD")
+    if not user or not pw:
+        # try credentials file
+        cred = os.path.join(ROOT, "data", "dashboard_credentials.txt")
+        if os.path.exists(cred):
+            try:
+                for line in open(cred, encoding="utf-8"):
+                    if line.startswith("DASHBOARD_USERNAME="):
+                        user = line.strip().split("=", 1)[1]
+                    elif line.startswith("DASHBOARD_PASSWORD="):
+                        pw = line.strip().split("=", 1)[1]
+            except Exception:
+                pass
+    if not user or not pw:
+        return None
+    token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    return f"Basic {token}"
+
 
 def _log(msg: str):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -35,6 +56,9 @@ def _check_endpoint(path: str, timeout: int = 5) -> dict:
     start = time.monotonic()
     try:
         req = urllib.request.Request(url)
+        auth = _dashboard_auth_header()
+        if auth:
+            req.add_header("Authorization", auth)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
             elapsed_ms = round((time.monotonic() - start) * 1000, 1)

@@ -37,6 +37,7 @@ def _seed_tx(db, telegram_user_id, kind, amount, year, month, day=15):
     )
     local = datetime(year, month, day, 12, 0)
     tx.created_at = to_utc_naive(local)
+    tx.occurred_at = tx.created_at
     db.commit()
     db.refresh(tx)
     return tx

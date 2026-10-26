@@ -24,6 +24,10 @@ def create_invoice(
     raw_message: str | None = None,
 ) -> Invoice | None:
     """ينشئ فاتورة آجلة؛ amount إلزامي. يعيد None على قيم غير صالحة."""
+    from app.database.crud.company import has_permission
+
+    if not has_permission(db, telegram_user_id, "record.create"):
+        return None
     from app.database.crud import (
         _clean_person,
         _clean_text,
@@ -147,6 +151,28 @@ def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bo
     invoice.status = "paid"
     invoice.paid_at = now_utc()
     invoice.alerted = True  # لا مزيد من تنبيهات التأخر
+    # ربط الفاتورة بمعاملة (سداد) حتى لا يُكرّر تسجيل نفس الدين فاتورةً ومعاملةً
+    try:
+        from app.database.crud.records import create_transaction
+
+        tx = create_transaction(
+            db,
+            telegram_user_id,
+            {
+                "type": "expense",
+                "amount": invoice.amount,
+                "currency": invoice.currency,
+                "person": invoice.person,
+                "description": invoice.description or "سداد فاتورة",
+                "is_credit": False,
+                    "invoice_id": invoice.id,
+            },
+            raw_message=invoice.description or "سداد فاتورة",
+        )
+        if tx is not None:
+            invoice.transaction_id = tx.id
+    except Exception:
+        pass
     db.commit()
     _invalidate_caches(db, telegram_user_id)
     return True

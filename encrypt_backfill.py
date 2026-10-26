@@ -95,8 +95,11 @@ def _encrypt_row(db: Session, model, obj) -> None:
         table = model.__table__
         pk_col = list(table.primary_key.columns)[0] if list(table.primary_key.columns) else None
         if pk_col is not None:
+            # قراءة خام (بلا TypeDecorator) عبر SQL نصي
+            cols = ", ".join(f'"{c.name}"' for c in table.columns)
             raw_row = db.execute(
-                table.select().where(pk_col == obj.id)
+                __import__("sqlalchemy").text(f"SELECT {cols} FROM {table.name} WHERE {pk_col.name} = :id"),
+                {"id": obj.id},
             ).first()
             if raw_row is not None:
                 raw_values = dict(raw_row._mapping)

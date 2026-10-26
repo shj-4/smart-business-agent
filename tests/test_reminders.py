@@ -185,7 +185,7 @@ class TestCreditCheck:
         db = db_env()
         set_credit_limit(db, USER_A, "خالد", "1000")
         create_transaction(
-            db, USER_A, {"type": "expense", "amount": 1200, "currency": "ILS", "person": "خالد"}, "دفعة"
+            db, USER_A, {"type": "expense", "amount": 1200, "currency": "ILS", "person": "خالد", "is_credit": True}, "دفعة"
         )
         db.close()
 
@@ -216,7 +216,7 @@ class TestCreditCheck:
         db = db_env()
         set_credit_limit(db, USER_A, "سامر", "1000")
         create_transaction(
-            db, USER_A, {"type": "income", "amount": 1500, "currency": "ILS", "person": "سامر"}, "بيع بالأجل"
+            db, USER_A, {"type": "income", "amount": 1500, "currency": "ILS", "person": "سامر", "is_credit": True}, "بيع بالأجل"
         )
         db.close()
 
@@ -242,7 +242,7 @@ class TestCreditCheck:
         db = db_env()
         set_credit_limit(db, USER_A, "لؤي", "1000")
         create_transaction(
-            db, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "لؤي"}, "دفعة"
+            db, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "لؤي", "is_credit": True}, "دفعة"
         )
         db.close()
 

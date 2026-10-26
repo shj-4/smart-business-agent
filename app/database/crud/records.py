@@ -167,34 +167,77 @@ def create_transaction(
     if created_at is None and isinstance(raw_date, str) and raw_date.strip():
         # محاولة أخيرة عبر AI لتفسير التاريخ العربي الحر (غدًا/أمس)
         try:
-            import app.ai_service as _ai
-            iso = _ai.interpret_arabic_date(raw_date.strip())
-            if iso:
-                created_at = parse_date_local(iso)
+            from app.database.crud.common import has_ai_consent
+            from app.database.db import SessionLocal as _SLd
+            _dbd = _SLd()
+            try:
+                _consent_d = has_ai_consent(_dbd, telegram_user_id)
+            finally:
+                _dbd.close()
+            if _consent_d:
+                import app.ai_service as _ai
+                iso = _ai.interpret_arabic_date(raw_date.strip())
+                if iso:
+                    created_at = parse_date_local(iso)
         except Exception:
             pass
     if created_at is None:
         created_at = now_utc()
-    # فصل الصندوق عن الذمة: is_credit يحدد هل الحركة ذمة (تؤثر على رصيد الشخص) أم نقدية (P&L)
-    # للتوافق: إذا كان person موجودًا و is_credit غير محدد (None) نعتبره ذمة (آجل) كما كان السلوك القديم
+    # اتجاه الذمة (charge/settlement) حقل صريح مستقل عن النوع (expense/income).
+    # الافتراضي "نقدي" (None) ما لم يُذكر "آجل/بالدين" صراحة.
+    raw_direction = None
+    for _k in ("ledger_kind", "ledger_entry", "debt_direction", "direction", "entry_type"):
+        _v = data.get(_k)
+        if _v is not None and str(_v).strip():
+            raw_direction = _v
+            break
+    direction_val = None
+    if isinstance(raw_direction, str):
+        low = raw_direction.strip().lower()
+        if low in ("charge", "آجل", "ذمة", "credit", "دين"):
+            direction_val = "charge"
+        elif low in ("settlement", "تسديد", "تسوية", "payment", "cash", "نقدي"):
+            direction_val = "settlement"
+        elif low in ("none", "null", "cash", "نقدي"):
+            direction_val = None
+    elif isinstance(raw_direction, bool):
+        direction_val = "charge" if raw_direction else None
+
+    # توافق is_credit القديم:
     raw_is_credit = data.get("is_credit")
-    if raw_is_credit is None and data.get("person"):
-        # بيانات قديمة بلا is_credit ومع person → اعتبرها ذمة
-        is_credit_val = True
-    elif isinstance(raw_is_credit, bool):
-        is_credit_val = raw_is_credit
-    elif isinstance(raw_is_credit, str):
-        low = raw_is_credit.strip().lower()
-        if low in ("true", "1", "yes", "credit", "آجل", "ذمة"):
-            is_credit_val = True
-        elif low in ("false", "0", "no", "cash", "نقدي"):
-            is_credit_val = False
+    if direction_val is None and raw_is_credit is not None:
+        if isinstance(raw_is_credit, bool):
+            direction_val = "charge" if raw_is_credit else None
+        elif isinstance(raw_is_credit, str):
+            low = raw_is_credit.strip().lower()
+            if low in ("true", "1", "yes", "credit", "آجل", "ذمة"):
+                direction_val = "charge"
+            elif low in ("false", "0", "no", "cash", "نقدي"):
+                direction_val = None
         else:
-            is_credit_val = None
-    else:
-        is_credit_val = bool(raw_is_credit) if raw_is_credit is not None else None
-    # إذا كان is_credit صريحًا False مع person، فهي حركة نقدية لشخص لكن لا تؤثر على الرصيد
-    # (مثل دفع نقدي لشخص بدون ذمة). نتركها كما هي.
+            direction_val = "charge" if bool(raw_is_credit) else None
+
+    # is_credit للتوافق (True إن كان قيد ذمة charge/settlement)
+    is_credit_val = direction_val in ("charge", "settlement")
+
+    # approval: مصروف فوق سقف الدور → pending
+    approval_status_val = "approved"
+    try:
+        from app.database.crud.company import get_company_member, get_company
+        m = get_company_member(db, telegram_user_id)
+        if m is not None and data.get("type") == "expense" and amount is not None:
+            comp = get_company(db, m.company_id) if m.company_id is not None else None
+            limit = None
+            if comp is not None:
+                if m.role == "staff":
+                    limit = comp.approval_limit_staff
+                elif m.role == "manager":
+                    limit = comp.approval_limit_manager
+            if limit is not None and amount > limit:
+                approval_status_val = "pending"
+    except Exception:
+        approval_status_val = "approved"
+
     transaction = Transaction(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
@@ -206,8 +249,13 @@ def create_transaction(
         category=_clean_text(data.get("category")),
         description=_clean_text(data.get("description")),
         raw_message=raw_message,
-        created_at=created_at,
+        created_at=now_utc(),
         is_credit=is_credit_val,
+        approval_status=approval_status_val,
+        debt_direction=direction_val,
+        ledger_entry=direction_val,
+        ledger_kind=direction_val,
+        occurred_at=created_at,
         amount_in_base_currency=base_amount,
         base_currency_at_creation=base_at,
         vat_rate=vat_rate.quantize(Decimal("0.001")) if vat_rate is not None else None,
@@ -291,10 +339,12 @@ def create_note(
 
 def soft_delete_last(db: Session, model, telegram_user_id: int) -> object | None:
     """يرجّع آخر سجل غير محذوف للمستخدم، أو None. (لأمر /undo)"""
+    from app.database.crud.company import company_filter
+
     return (
         db.query(model)
         .filter(
-            model.telegram_user_id == telegram_user_id,
+            company_filter(db, telegram_user_id, model),
             model.deleted_at.is_(None),
         )
         .order_by(model.id.desc())
@@ -458,8 +508,9 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
         Transaction.deleted_at.is_(None),
     )
 
+    from sqlalchemy import func as _func
     if start:
-        q = q.filter(Transaction.created_at >= start)
+        q = q.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start)
     if person:
         q = q.filter(Transaction.person == person)
 
@@ -507,26 +558,32 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 "result": None,
                 "error": "no_person",
             }
-        q_income = db.query(Transaction).filter(
+        # رصيد الشخص = charges - settlements (settlement يُ flipping type)
+        from app.database.crud.common import normalize_person_for_match as _npm
+
+        from sqlalchemy import func as _func2
+        debt_rows = db.query(Transaction).filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
-            Transaction.type == "income",
-            Transaction.person == person,
-            _debt_filter(Transaction),
-        )
-        q_expense = db.query(Transaction).filter(
-            report_company_filter(db, telegram_user_id, Transaction),
-            Transaction.deleted_at.is_(None),
-            Transaction.type == "expense",
-            Transaction.person == person,
             _debt_filter(Transaction),
         )
         if start:
-            q_income = q_income.filter(Transaction.created_at >= start)
-            q_expense = q_expense.filter(Transaction.created_at >= start)
+            debt_rows = debt_rows.filter(_func2.coalesce(Transaction.occurred_at, Transaction.created_at) >= start)
+        debt_rows = debt_rows.all()
+        debt_rows = [r for r in debt_rows if _npm(r.person) == _npm(person)]
 
-        income_rows = q_income.all()
-        expense_rows = q_expense.all()
+        income_rows = []
+        expense_rows = []
+        for r in debt_rows:
+            # settlement يعكس الاتجاه: income settlement → expense، expense settlement → income
+            is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+            eff_type = r.type
+            if is_settlement:
+                eff_type = "income" if r.type == "expense" else "expense"
+            if eff_type == "income":
+                income_rows.append(r)
+            else:
+                expense_rows.append(r)
 
         income_by_cur = _sum_amounts_by_currency(income_rows)
         expense_by_cur = _sum_amounts_by_currency(expense_rows)
@@ -569,8 +626,8 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 Transaction.deleted_at.is_(None),
                 Transaction.type == tx_type,
                 _cf2(Transaction),
-                Transaction.created_at >= lo,
-                Transaction.created_at < hi,
+                _func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+                _func.coalesce(Transaction.occurred_at, Transaction.created_at) < hi,
             )
             if person:
                 qq = qq.filter(Transaction.person == person)
@@ -942,6 +999,18 @@ def search_records(
 
 def update_transaction(db: Session, row: Transaction, fields: dict) -> Transaction:
     """يحدّث حقول محددة في معاملة مالية."""
+    try:
+        from app.timeutil import to_local_naive
+        dt = row.occurred_at if getattr(row, "occurred_at", None) is not None else row.created_at
+        if dt is not None:
+            mk = to_local_naive(dt).strftime("%Y-%m")
+            from app.database.crud.records import is_period_closed
+            if is_period_closed(db, row.telegram_user_id, mk):
+                raise ValueError("الفترة مغلقة")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     from app.database.crud import (
         _clean_person,
         _clean_text,
@@ -1043,7 +1112,9 @@ def update_note(db: Session, row: Note, fields: dict) -> Note:
     _invalidate_caches(db, row.telegram_user_id)
     return row
 
-def merge_person(db: Session, source: str, target: str, *args, **kwargs) -> int:
+_ALL_COMPANIES = object()
+
+def merge_person(db: Session, source: str, target: str, *, company_id=_ALL_COMPANIES) -> int:
     """يدمج اسمين لنفس الطرف عبر كل السجلات ذات الصلة.
 
     عزل المستأجرين: الدمج الآن معزول حسب الشركة — أطراف بنفس الاسم
@@ -1063,17 +1134,8 @@ def merge_person(db: Session, source: str, target: str, *args, **kwargs) -> int:
     """
     from app.database.crud import _clean_person, _invalidate_caches
 
-    # تحديد company_id مع تمييز "لم يُمرر" عن "None صريح"
-    # نستخدم sentinel داخلي غير ظاهر للاختبار (ليس Assign علوي)
-    if not hasattr(merge_person, "_ALL"):
-        merge_person._ALL = object()  # type: ignore
-    _ALL = merge_person._ALL  # type: ignore
-    if "company_id" in kwargs:
-        company_id = kwargs["company_id"]
-    elif args:
-        company_id = args[0]
-    else:
-        company_id = _ALL
+    _ALL = _ALL_COMPANIES
+    # company_id passed as keyword-only already
 
     source = _clean_person(source)
     target = _clean_person(target)
@@ -1081,7 +1143,7 @@ def merge_person(db: Session, source: str, target: str, *args, **kwargs) -> int:
         return 0
 
     # حدد نطاق الشركات المراد معالجتها
-    if company_id is not _ALL:
+    if company_id is not _ALL_COMPANIES:
         company_ids = [company_id]
     else:
         company_ids = []
@@ -1202,3 +1264,131 @@ def merge_person(db: Session, source: str, target: str, *args, **kwargs) -> int:
     for uid in sorted(all_affected):
         _invalidate_caches(db, uid)
     return int(total_changed)
+
+
+def approve_transaction(db: Session, actor_id: int, transaction_id: int) -> bool:
+    """اعتماد عملية مالية معلّقة — لا يعتمدها منشئها."""
+    from app.database.crud.company import has_permission
+
+    row = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if row is None or row.approval_status != "pending":
+        return False
+    if row.telegram_user_id == actor_id:
+        return False
+    if not has_permission(db, actor_id, "record.approve") and not has_permission(db, actor_id, "record.edit_any"):
+        return False
+    row.approval_status = "approved"
+    row.approved_by = actor_id
+    row.updated_at = now_utc()
+    db.commit()
+    return True
+
+
+def is_period_closed(db: Session, telegram_user_id: int, month_key: str) -> bool:
+    from app.database.models import PeriodClose
+    from app.database.crud.company import company_id_for_user
+
+    cid = company_id_for_user(db, telegram_user_id)
+    q = db.query(PeriodClose).filter(PeriodClose.month_key == month_key)
+    if cid is None:
+        q = q.filter(PeriodClose.telegram_user_id == telegram_user_id, PeriodClose.company_id.is_(None))
+    else:
+        q = q.filter(PeriodClose.company_id == cid)
+    return q.first() is not None
+
+
+def close_period(db: Session, telegram_user_id: int, month_key: str) -> bool:
+    from app.database.models import PeriodClose
+    from app.database.crud.company import company_id_for_user
+
+    if is_period_closed(db, telegram_user_id, month_key):
+        return True
+    cid = company_id_for_user(db, telegram_user_id)
+    pc = PeriodClose(telegram_user_id=telegram_user_id, company_id=cid, month_key=month_key, closed_by=telegram_user_id)
+    db.add(pc)
+    db.commit()
+    log_audit(telegram_user_id, "close_period", month_key)
+    return True
+
+
+def reopen_period(db: Session, actor_id: int, month_key: str) -> bool:
+    from app.database.models import PeriodClose
+    from app.database.crud.company import company_id_for_user, has_permission
+
+    if not has_permission(db, actor_id, "company.manage"):
+        return False
+    cid = company_id_for_user(db, actor_id)
+    q = db.query(PeriodClose).filter(PeriodClose.month_key == month_key)
+    if cid is None:
+        q = q.filter(PeriodClose.telegram_user_id == actor_id, PeriodClose.company_id.is_(None))
+    else:
+        q = q.filter(PeriodClose.company_id == cid)
+    n = q.delete()
+    db.commit()
+    if n:
+        log_audit(actor_id, "reopen_period", month_key)
+    return n > 0
+
+
+def statement_for_person(db: Session, telegram_user_id: int, person: str) -> list[dict]:
+    """كشف حساب لطرف: حركات مرتبة زمنيًا مع رصيد متراكم."""
+    from app.database.crud.common import _debt_filter, normalize_person_for_match
+    from app.database.crud.company import report_company_filter
+
+    rows = (
+        db.query(Transaction)
+        .filter(
+            report_company_filter(db, telegram_user_id, Transaction),
+            Transaction.deleted_at.is_(None),
+            _debt_filter(Transaction),
+        )
+        .all()
+    )
+    rows = [r for r in rows if normalize_person_for_match(r.person) == normalize_person_for_match(person)]
+    rows.sort(key=lambda r: (r.occurred_at if getattr(r, "occurred_at", None) is not None else r.created_at) or r.created_at)
+    out = []
+    bal = Decimal("0")
+    for r in rows:
+        is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+        eff_type = r.type
+        if is_settlement:
+            eff_type = "income" if r.type == "expense" else "expense"
+        amt = r.amount or Decimal("0")
+        if eff_type == "income":
+            bal += amt
+        else:
+            bal -= amt
+        dt = r.occurred_at if getattr(r, "occurred_at", None) is not None else r.created_at
+        out.append({
+            "id": r.id,
+            "date": dt,
+            "type": r.type,
+            "amount": amt,
+            "currency": r.currency,
+            "balance": bal.quantize(Decimal("0.01")),
+            "description": r.description,
+        })
+    return out
+
+
+# aliases
+statement = statement_for_person
+person_statement = statement_for_person
+
+
+def stock_level(db: Session, product_id: int) -> Decimal:
+    """رصيد الصنف = مجموع الحركات (in +, out -, adjustment)."""
+    from app.database.models import InventoryMovement
+    from decimal import Decimal as _D
+
+    rows = db.query(InventoryMovement).filter(InventoryMovement.product_id == product_id).all()
+    total = _D("0")
+    for r in rows:
+        q = r.quantity or _D("0")
+        if r.movement_type == "out":
+            total -= q
+        elif r.movement_type == "in":
+            total += q
+        else:  # adjustment sets absolute? treat as delta
+            total += q
+    return total.quantize(_D("0.001"))

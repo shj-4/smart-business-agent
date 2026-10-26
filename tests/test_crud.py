@@ -492,7 +492,7 @@ class TestSearchRecordsWindow:
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 100, "currency": "ILS", "person": "مورد الألمنيوم"},
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "مورد الألمنيوم", "is_credit": True},
             raw_message="دفعة عادية",
         )
         hits, _ = search_records(db_session, USER_A, "ألمنيوم", return_meta=True)
@@ -1003,10 +1003,10 @@ class TestCreditLimits:
     def test_usage_outstanding_is_expense_minus_income(self, db_session):
         set_credit_limit(db_session, USER_A, "محمد", "5000")
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 3000, "currency": "ILS", "person": "محمد"}, "دفعة لمحمد"
+            db_session, USER_A, {"type": "expense", "amount": 3000, "currency": "ILS", "person": "محمد", "is_credit": True}, "دفعة لمحمد"
         )
         create_transaction(
-            db_session, USER_A, {"type": "income", "amount": 1000, "currency": "ILS", "person": "محمد"}, "استلام من محمد"
+            db_session, USER_A, {"type": "income", "amount": 1000, "currency": "ILS", "person": "محمد", "is_credit": True}, "استلام من محمد"
         )
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
@@ -1019,7 +1019,7 @@ class TestCreditLimits:
     def test_usage_over_when_exceeds(self, db_session):
         set_credit_limit(db_session, USER_A, "محمد", "1500")
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "محمد"}, "دفعة"
+            db_session, USER_A, {"type": "expense", "amount": 2000, "currency": "ILS", "person": "محمد", "is_credit": True}, "دفعة"
         )
         row = list_credit_limits(db_session, USER_A)[0]
         assert credit_usage(db_session, row)["over"] is True
@@ -1028,7 +1028,7 @@ class TestCreditLimits:
         """عميل يزيد رصيده عليك (income > expense): side=receivable ويُقاس بالسقف."""
         set_credit_limit(db_session, USER_A, "سامر", "1000")
         create_transaction(
-            db_session, USER_A, {"type": "income", "amount": 900, "currency": "ILS", "person": "سامر"}, "بيع بالأجل"
+            db_session, USER_A, {"type": "income", "amount": 900, "currency": "ILS", "person": "سامر", "is_credit": True}, "بيع بالأجل"
         )
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
@@ -1055,13 +1055,13 @@ class TestCreditLimits:
         )
         set_credit_limit(db_session, USER_A, "متعدد", "5000")
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد"}, "دين دولار"
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد", "is_credit": True}, "دين دولار"
         )
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "متعدد"}, "دين شيقل"
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "ILS", "person": "متعدد", "is_credit": True}, "دين شيقل"
         )
         create_transaction(
-            db_session, USER_A, {"type": "income", "amount": 40, "currency": "ILS", "person": "متعدد"}, "سداد جزئي"
+            db_session, USER_A, {"type": "income", "amount": 40, "currency": "ILS", "person": "متعدد", "is_credit": True}, "سداد جزئي"
         )
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
@@ -1080,10 +1080,10 @@ class TestCreditLimits:
         monkeypatch.setattr("app.exchange.get_rate", lambda *a, **k: None)
         set_credit_limit(db_session, USER_A, "متعدد", "3000")
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد"}, "دين دولار"
+            db_session, USER_A, {"type": "expense", "amount": 100, "currency": "USD", "person": "متعدد", "is_credit": True}, "دين دولار"
         )
         create_transaction(
-            db_session, USER_A, {"type": "income", "amount": 50, "currency": "ILS", "person": "متعدد"}, "سداد"
+            db_session, USER_A, {"type": "income", "amount": 50, "currency": "ILS", "person": "متعدد", "is_credit": True}, "سداد"
         )
         row = list_credit_limits(db_session, USER_A)[0]
         usage = credit_usage(db_session, row)
@@ -1139,13 +1139,13 @@ class TestPersonDebts:
             lambda amount, frm, to: {"result": Decimal(str(amount)) * Decimal("1")},
         )
         create_transaction(
-            db_session, USER_A, {"type": "income", "amount": 500, "currency": "ILS", "person": "سامر"}, "استلام من سامر"
+            db_session, USER_A, {"type": "income", "amount": 500, "currency": "ILS", "person": "سامر", "is_credit": True}, "استلام من سامر"
         )
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر"}, "دفعة لسامر"
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر", "is_credit": True}, "دفعة لسامر"
         )
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 200, "currency": "ILS", "person": "خالد"}, "دفعة لخالد"
+            db_session, USER_A, {"type": "expense", "amount": 200, "currency": "ILS", "person": "خالد", "is_credit": True}, "دفعة لخالد"
         )
         debts = person_debts(db_session, USER_A)
         by_name = {d["person"]: d for d in debts}
@@ -1162,7 +1162,7 @@ class TestPersonDebts:
     def test_scoped_to_workspace(self, db_session, monkeypatch):
         monkeypatch.setattr("app.exchange.convert", lambda a, f, t: {"result": Decimal("5")})
         create_transaction(
-            db_session, USER_B, {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد"}, "دفعة لخالد"
+            db_session, USER_B, {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد", "is_credit": True}, "دفعة لخالد"
         )
         assert person_debts(db_session, USER_A) == []
 
@@ -1237,13 +1237,13 @@ class TestBudgetPersonScopeCurrency:
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد"},
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "خالد", "is_credit": True},
             "دفعة شيقل",
         )
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 100, "currency": "USD", "person": "خالد"},
+            {"type": "expense", "amount": 100, "currency": "USD", "person": "خالد", "is_credit": True},
             "دفعة دولار",
         )
         usage = budget_usage(db_session, budget)
@@ -1260,7 +1260,7 @@ class TestBudgetPersonScopeCurrency:
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 200, "currency": "ILS", "person": "سارة"},
+            {"type": "expense", "amount": 200, "currency": "ILS", "person": "سارة", "is_credit": True},
             "دفعة",
         )
         usage = budget_usage(db_session, budget)
@@ -1278,13 +1278,13 @@ class TestBudgetPersonScopeCurrency:
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 100, "currency": "USD", "person": "ريم"},
+            {"type": "expense", "amount": 100, "currency": "USD", "person": "ريم", "is_credit": True},
             "دفعة دولار",
         )
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 100, "currency": "ILS", "person": "ريم"},
+            {"type": "expense", "amount": 100, "currency": "ILS", "person": "ريم", "is_credit": True},
             "دفعة شيقل",
         )
         usage = budget_usage(db_session, budget)
@@ -1308,13 +1308,13 @@ class TestPersonMatchPrecision:
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 400, "currency": "ILS", "person": self.PRECISE},
+            {"type": "expense", "amount": 400, "currency": "ILS", "person": self.PRECISE, "is_credit": True},
             "دفعة للاسم الحرفي",
         )
         create_transaction(
             db_session,
             USER_A,
-            {"type": "expense", "amount": 999, "currency": "ILS", "person": self.OTHER},
+            {"type": "expense", "amount": 999, "currency": "ILS", "person": self.OTHER, "is_credit": True},
             "دفعة للاسم المختلف",
         )
 

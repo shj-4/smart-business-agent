@@ -64,12 +64,15 @@ from .budgets import (
     get_budget,
     list_budgets,
     person_debts,
+    person_debts_aging,
 )
 from .common import (
     _THREE_DECIMAL_CURRENCIES,
     CURRENCY_ALIASES,
     MAX_DESCRIPTION_LEN,
     _cash_filter,
+    _charge_condition,
+    _charge_filter,
     _clean_person,
     _clean_text,
     _debt_filter,
@@ -150,7 +153,9 @@ from .prefs import (
     set_user_lang,
 )
 from .records import (
+    _ALL_COMPANIES,
     _accrue_loyalty_after_transaction,
+    approve_transaction,
     _run_query_uncached,
     _search_row_result,
     create_note,
@@ -224,3 +229,9 @@ from .workspace import (
     workspace_for_user,
     workspace_member_ids,
 )
+
+from .records import close_period, is_period_closed, reopen_period
+
+from .records import statement_for_person, statement, person_statement
+
+from .records import stock_level

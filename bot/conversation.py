@@ -177,12 +177,23 @@ def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | 
         # نص حر (غدًا/بكرة/بعد يومين...) — يُفسَّر بالذكاء الاصطناعي مثل مسار
         # الإدخال الأصلي بدل إضاعته صامتًا (كان create_* يستدعي parse_date_local
         # مباشرة على النص الخام فتضيع قيمة الموعد بلا تنبيه).
-        import app.ai_service as ai_service
+        try:
+            from app.database.crud.common import has_ai_consent
+            from app.database.db import SessionLocal as _SLi
+            _dbi = _SLi()
+            try:
+                _consent_i = has_ai_consent(_dbi, update.effective_user.id) if getattr(update, "effective_user", None) else True
+            finally:
+                _dbi.close()
+        except Exception:
+            _consent_i = True
+        if _consent_i:
+            import app.ai_service as ai_service
 
-        interpreted = ai_service.interpret_arabic_date(value)
-        if interpreted:
-            result["date"] = interpreted
-            return result, None
+            interpreted = ai_service.interpret_arabic_date(value)
+            if interpreted:
+                result["date"] = interpreted
+                return result, None
         return result, "لم أتعرف على الموعد. جرّب مثلًا: 2026-09-10 10:00"
     if not value:
         return result, f"{FIELD_LABELS.get(field, field)} لا يمكن أن يكون فارغًا."
@@ -937,6 +948,23 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     import re as _re_loc
 
                     from app.schemas import normalize_analysis as _norm
+                    low = (text or "").lower()
+                    # كشف استعلام
+                    if any(w in low for w in ("كم", "ما", "كم صرفت", "كم استلمت", "كم دفعت", "show", "total")):
+                        metric = "total_expenses"
+                        if any(w in low for w in ("استلم", "إيراد", "دخل", "income")):
+                            metric = "total_income"
+                        period = "all_time"
+                        if "هذا الشهر" in text or "هذا الشهر" in low or "this month" in low:
+                            period = "this_month"
+                        elif "اليوم" in text or "today" in low:
+                            period = "today"
+                        elif "هذا الأسبوع" in text or "this week" in low:
+                            period = "this_week"
+                        return _norm({"intent": "query", "query_details": {"metric": metric, "period": period, "person": None}, "raw": text})
+                    # كشف محادثة
+                    if any(w in low for w in ("مرحبا", "هلا", "السلام", "hello", "hi", "شكرا", "thanks")):
+                        return _norm({"intent": "chat", "reply": "أهلاً! أنا مساعدك في إدارة أعمالك.", "raw": text})
                     m = _re_loc.search(r"\d+(?:[.,]\d+)?", text)
                     amt = None
                     if m:
@@ -1066,10 +1094,55 @@ async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return None
 
-    reply_result = await asyncio.to_thread(analyze_message, update.message.text)
+    missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
+    field = missing[0] if missing else None
+
+    # فحص موافقة Gemini: بديل محلي (لا Gemini)
+    try:
+        from app.database.crud.common import has_ai_consent
+        from app.database.db import SessionLocal as _SLc
+        _dbc = _SLc()
+        try:
+            _consent = has_ai_consent(_dbc, _uid)
+        finally:
+            _dbc.close()
+    except Exception:
+        _consent = True
+    if not _consent:
+        _txt = update.message.text or ""
+        _rr = {"intent": "record", "type": None}
+        if field == "amount":
+            import re as _re
+            m = _re.search(r"\d+(?:[.,]\d+)?", _txt)
+            if m:
+                try:
+                    _rr["amount"] = float(m.group(0).replace(",", "."))
+                except Exception:
+                    _rr["amount"] = None
+        elif field == "currency":
+            try:
+                from app.database.crud.common import normalize_currency
+                _rr["currency"] = normalize_currency(_txt)
+            except Exception:
+                _rr["currency"] = _txt.strip()
+        elif field == "person":
+            _rr["person"] = _txt.strip()
+        elif field == "description":
+            _rr["description"] = _txt.strip()
+        elif field == "category":
+            _rr["category"] = _txt.strip()
+        reply_result = _rr
+    else:
+        # تحليل محلي أولاً للأرقام
+        _txt = update.message.text or ""
+        import re as _re
+        if field == "amount" and _re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*", _txt):
+            reply_result = {"intent": "record", "type": None, "amount": float(_txt.replace(",", "."))}
+        else:
+            reply_result = await asyncio.to_thread(analyze_message, update.message.text)
 
     missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
-    field = missing[0]
+    field = missing[0] if missing else None
     fill_field_from_reply(partial, reply_result, field)
 
     remaining = missing_fields_for(partial)
@@ -1280,6 +1353,20 @@ async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return None
 
     # حصة يومية قبل استدعاء Gemini (قد يستهلك 2-3 استدعاءات)
+    # فحص موافقة Gemini
+    try:
+        from app.database.crud.common import has_ai_consent
+        from app.database.db import SessionLocal as _SLm
+        _dbm = _SLm()
+        try:
+            if not has_ai_consent(_dbm, telegram_user_id):
+                await update.message.reply_text("تم تعطيل Gemini. فعّله من /privacy.")
+                return None
+        finally:
+            _dbm.close()
+    except Exception:
+        pass
+
     if not check_and_increment_daily(telegram_user_id):
         try:
             from app.config import settings
@@ -1363,6 +1450,11 @@ async def _confirm_resolve(
         _record_feedback(context, source="reject_confirm", telegram_user_id=query.from_user.id)
         await query.edit_message_text("تم الإلغاء. لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD)
     else:
+        if context.user_data.get("_confirm_saved"):
+            await query.edit_message_text("تم الحفظ مسبقًا.", reply_markup=MAIN_HOME_KEYBOARD)
+            _clear_all_pending(context)
+            return ConversationHandler.END
+        context.user_data["_confirm_saved"] = True
         result = context.user_data.get("confirm_result")
         raw = context.user_data.get("confirm_raw")
         msg_id = context.user_data.get("confirm_message_id")
@@ -1387,7 +1479,7 @@ async def _confirm_resolve(
             )
 
     _clear_all_pending(context)
-    return None
+    return ConversationHandler.END
 
 
 async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1597,11 +1689,22 @@ def _normalize_edit_value(field: str, raw: str) -> tuple[object, str | None]:
             return value, None
         # نص حر (بكرة/غدًا/بعد يومين...) → يُفسَّر بالذكاء الاصطناعي (مثل apply_confirm_edit)
         try:
-            import app.ai_service as ai_service
+            try:
+                from app.database.crud.common import has_ai_consent
+                from app.database.db import SessionLocal as _SLi2
+                _dbi2 = _SLi2()
+                try:
+                    _consent_i2 = has_ai_consent(_dbi2, update.effective_user.id) if getattr(update, "effective_user", None) else True
+                finally:
+                    _dbi2.close()
+            except Exception:
+                _consent_i2 = True
+            if _consent_i2:
+                import app.ai_service as ai_service
 
-            interpreted = ai_service.interpret_arabic_date(value)
-            if interpreted:
-                return interpreted, None
+                interpreted = ai_service.interpret_arabic_date(value)
+                if interpreted:
+                    return interpreted, None
         except Exception:
             pass
         return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"

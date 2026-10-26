@@ -478,7 +478,7 @@ class TestDebtsInvoicesOrdersButtons:
         from app.database.crud import create_transaction
 
         create_transaction(
-            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر"}, "دفعة"
+            db_session, USER_A, {"type": "expense", "amount": 300, "currency": "ILS", "person": "سامر", "is_credit": True}, "دفعة"
         )
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         q, edited = _build_query("tool:debts")

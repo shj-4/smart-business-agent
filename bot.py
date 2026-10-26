@@ -38,12 +38,13 @@ def main():
     # لا نخزن ORM في user_data (تم إصلاح editing.py) لذا التخزين آمن.
     import os
 
-    from telegram.ext import PicklePersistence
+    from bot.persistence import FilteredPicklePersistence
+
     persist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "conversation.pickle")
     os.makedirs(os.path.dirname(persist_path), exist_ok=True)
-    persistence = PicklePersistence(filepath=persist_path, single_file=False, on_flush=False)
+    persistence = FilteredPicklePersistence(filepath=persist_path, single_file=False, on_flush=False)
     # concurrent_updates=False يمنع سباق رسالتين متتاليتين على user_data المشتركة (كان True)
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).concurrent_updates(False).post_init(_post_init).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).concurrent_updates(True).post_init(_post_init).build()
     register_handlers(app)
 
     start_cleanup()

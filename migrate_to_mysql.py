@@ -121,7 +121,7 @@ def _migrate(src, dst, model_list: list) -> dict[str, int]:
                 dst.execute(insert(model.__table__).values(**values))
             except Exception as exc:
                 # تعارض مفاتيح مع --force: نحاول upsert (تحديث) بدل تجاهل
-                if "--force" in sys.argv and "Duplicate" in str(exc) or "UNIQUE" in str(exc):
+                if "--force" in sys.argv and ("Duplicate" in str(exc) or "UNIQUE" in str(exc)):
                     from sqlalchemy import update as _upd
                     pk_cols = list(model.__table__.primary_key.columns)
                     if pk_cols:

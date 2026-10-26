@@ -61,12 +61,19 @@ class Transaction(Base):
     amount = Column(EncryptedNumeric(), nullable=True)  # مبلغ مالي (مشفر) — يجمع في Python
     currency = Column(String(16), nullable=True)
     person = Column(String(255), nullable=True)  # المورد أو العميل
+    party_id = Column(Integer, ForeignKey("parties.id", ondelete="SET NULL"), nullable=True, index=True)
     category = Column(String(64), nullable=True)  # تصنيف اختياري (إيجار، رواتب...)
     # فصل حركة الصندوق (نقدي) عن قيد الذمة (آجل/تسديد) — يمنع خلط دفتر الديون بـ P&L
-    # is_credit=True → قيد ذمة (آجل/تسديد) يؤثر على رصيد الشخص، لا على إجمالي المصاريف/الإيرادات
-    # is_credit=False/None → حركة نقدية (P&L) تؤثر على الإجماليات
-    # للتوافق مع البيانات القديمة: person IS NOT NULL و is_credit IS NULL يُعتبر ذمة (آجل)
+    # الاتجاه (charge/settlement) حقل صريح مستقل عن النوع (expense/income):
+    #   - charge     → قيد ذمة (آجل) يُسجَّل في دفتر الشخص (لا P&L إن كان آجلًا)
+    #   - settlement → تسديد يُعدِّل رصيد الشخص (ويُحتسب نقدًا في P&L)
+    #   - None       → حركة نقدية (P&L) — الافتراضي ما لم يُذكر "آجل/بالدين"
+    # is_credit محفوظ للتوافق (True = قيد ذمة legacy).
     is_credit = Column(Boolean, nullable=True, default=None)
+    invoice_id = Column(Integer, ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True)
+    debt_direction = Column(String(16), nullable=True)  # charge | settlement | None
+    ledger_entry = Column(String(16), nullable=True)  # charge | settlement | None (مرادف)
+    ledger_kind = Column(String(16), nullable=True)  # charge | settlement | None (مرادف)
     description = Column(EncryptedString(), nullable=True)  # مشفر
     deleted_at = Column(DateTime, nullable=True)  # Soft delete (لميزة /undo)
 
@@ -81,7 +88,10 @@ class Transaction(Base):
     vat_amount = Column(Numeric(12, 2), nullable=True)  # قيمة الضريبة بعملة العملية
 
     raw_message = Column(EncryptedString(), nullable=True)  # نص الرسالة الأصلية (مشفر)
-    created_at = Column(DateTime, default=now_utc)
+    created_at = Column(DateTime, default=now_utc)  # وقت الإدخال (entry)
+    occurred_at = Column(DateTime, nullable=True)  # وقت العملية (operation)
+    approval_status = Column(String(16), nullable=True, default="approved")  # approved|pending
+    approved_by = Column(BigInteger, nullable=True)
     updated_at = Column(DateTime, nullable=True)
 
 
@@ -198,6 +208,8 @@ class Company(Base):
     description = Column(Text, nullable=True)  # يُغذّى للـ AI
     business_type = Column(String(32), nullable=True)  # trade|services|...
     base_currency = Column(String(16), nullable=True)
+    approval_limit_staff = Column(Numeric(12, 2), nullable=True)
+    approval_limit_manager = Column(Numeric(12, 2), nullable=True)
     owner_telegram_user_id = Column(BigInteger, index=True, nullable=False)
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
@@ -339,6 +351,7 @@ class Invoice(Base):
     status = Column(String(16), nullable=False, default="pending")  # pending|paid|overdue
     paid_at = Column(DateTime, nullable=True)
     alerted = Column(Boolean, default=False, nullable=False)  # أُرسل تنبيه تأخر؟ (مرة واحدة)
+    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True)  # حركة السداد
 
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
@@ -496,3 +509,67 @@ class LoyaltyConfig(Base):
     min_redeem_points = Column(Integer, nullable=False, default=0)
 
     updated_at = Column(DateTime, nullable=True)
+
+
+class PeriodClose(Base):
+    """إقفال فترة مالية (شهر) — يمنع تعديل/حذف سجلات الفترة."""
+
+    __tablename__ = "period_closes"
+    __table_args__ = (UniqueConstraint("company_id", "month_key", name="uq_period_close_company_month"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=True, index=True)
+    month_key = Column(String(7), nullable=False)  # "YYYY-MM"
+    closed_by = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+
+
+class Party(Base):
+    """طرف (عميل/مورد/موظف/آخر) بمعرّف ثابت — بدل المطابقة النصية."""
+
+    __tablename__ = "parties"
+    __table_args__ = (UniqueConstraint("telegram_user_id", "name", name="uq_party_user_name"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
+    name = Column(String(255), nullable=False)
+    party_type = Column(String(16), nullable=True)  # customer|supplier|employee|other
+    phone = Column(String(64), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class Product(Base):
+    """كتالوج منتج: اسم، وحدة، سعر بيع، تكلفة."""
+
+    __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("telegram_user_id", "name", name="uq_product_user_name"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
+    name = Column(String(255), nullable=False)
+    unit = Column(String(32), nullable=True)
+    sell_price = Column(EncryptedNumeric(), nullable=True)
+    cost_price = Column(EncryptedNumeric(), nullable=True)
+    reorder_level = Column(Numeric(12, 3), nullable=True)
+    created_at = Column(DateTime, default=now_utc)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class InventoryMovement(Base):
+    """حركة مخزون: إدخال/إخراج/تسوية جرد."""
+
+    __tablename__ = "inventory_movements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_user_id = Column(BigInteger, index=True, nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    movement_type = Column(String(16), nullable=False)  # in|out|adjustment
+    quantity = Column(Numeric(12, 3), nullable=False)
+    note = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=now_utc)

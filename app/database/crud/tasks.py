@@ -455,6 +455,12 @@ def update_task(db: Session, row: Task, fields: dict[str, str]) -> Task:
                 row.description = cleaned
             elif key == "priority":
                 row.priority = _normalize_priority(fields[key])
+    if "due_date" in fields and fields["due_date"] is not None:
+        new_due = row.due_date
+        if new_due is None or new_due > now_utc():
+            row.status = "pending"
+            if hasattr(row, "reminder_sent"):
+                row.reminder_sent = False
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)

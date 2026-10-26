@@ -342,8 +342,8 @@ async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["edit_field"] = field
 
     await query.edit_message_text(
-        f"أرسل القيمة الجديدة للحقل {_escape_md(label)}:\n"
-        f"القيمة الحالية: {_escape_md(current)}\n\n"
+        f"أرسل القيمة الجديدة للحقل {label}:\n"
+        f"القيمة الحالية: {current}\n\n"
         f"(أرسل /cancel لإلغاء)",
     )
     return EDIT_FIELD

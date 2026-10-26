@@ -11,6 +11,8 @@
   "category": string | null,
   "description": string | null,
   "date": string | null,
+  "vat_rate": number | null,
+  "vat_amount": number | null,
   "missing_fields": [array of strings]
 }
 

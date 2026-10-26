@@ -107,7 +107,10 @@ def _known_currency(val: str) -> str | None:
     from app.database.crud import normalize_currency
     from app.exchange import CURRENCY_NAMES
 
-    norm = normalize_currency(val.strip()).upper()
+    norm = normalize_currency(val.strip())
+    if norm is None:
+        return None
+    norm = norm.upper()
     if norm in CURRENCY_NAMES:
         return norm
     return None

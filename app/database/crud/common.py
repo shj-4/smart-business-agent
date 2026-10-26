@@ -107,7 +107,7 @@ def normalize_currency(raw: str | None) -> str | None:
         # أيضًا جرّب المطابقة التامة بدون مسافات (مثل "$" أو "₪")
         if alias == raw_lower:
             return code
-    return raw.strip() or None
+    return None
 
 def _clean_text(value) -> str | None:
     """ينظّف نصًا حرًا: يقلّص المسافات ويحدّ طوله (أو يعيد None)."""
@@ -353,28 +353,55 @@ def toggle_notification_pref(db: Session, telegram_user_id: int, field: str, ena
     return field
 
 
-def _cash_filter(model):
-    """فلتر صندوق (P&L نقدي) — يستثني الذمم.
-
-    نقدي = is_credit == False أو (is_credit IS NULL و person IS NULL) — للتوافق
-    مع البيانات القديمة حيث person NOT NULL و is_credit NULL كان يُعتبر ذمة.
-    """
+def _charge_condition(model):
+    """شرط «قيد آجل (charge)» — يُستبعد من P&L (استحقاق غير نقدي)."""
     from sqlalchemy import and_, or_
 
     return or_(
-        model.is_credit == False,  # noqa: E712
-        and_(model.is_credit.is_(None), model.person.is_(None)),
+        model.debt_direction == "charge",
+        model.ledger_entry == "charge",
+        model.ledger_kind == "charge",
+        # توافق قديم: is_credit=True بلا اتجاه صريح يُعامل كقيد آجل
+        and_(
+            model.debt_direction.is_(None),
+            model.ledger_entry.is_(None),
+            model.is_credit.is_(True),
+        ),
     )
+
+
+def _cash_filter(model):
+    """فلتر صندوق (P&L) — يشمل النقدي والتسديدات (تدفق نقدي) ويستثني القيود الآجلة (charge)."""
+    from sqlalchemy import and_, or_
+
+    base = or_(
+        model.debt_direction == "settlement",
+        model.ledger_entry == "settlement",
+        model.ledger_kind == "settlement",
+        model.is_credit.is_(False),
+        and_(
+            model.debt_direction.is_(None),
+            model.ledger_entry.is_(None),
+            model.is_credit.is_(None),
+        ),
+    )
+    # استبعاد العمليات المعلّقة (بانتظار الموافقة)
+    return and_(base, or_(model.approval_status.is_(None), model.approval_status != "pending"))
 
 
 def _debt_filter(model):
-    """فلتر ذمة (آجل/تسديد) — يستثني النقدي.
-
-    ذمة = is_credit == True أو (is_credit IS NULL و person IS NOT NULL) للتوافق.
-    """
+    """فلتر دفتر Personen (ذمم) — يشمل القيود الآجلة والتسديدات (charge/settlement)."""
     from sqlalchemy import and_, or_
 
-    return or_(
-        model.is_credit == True,  # noqa: E712
-        and_(model.is_credit.is_(None), model.person.isnot(None)),
+    base = or_(
+        model.debt_direction.in_(("charge", "settlement")),
+        model.ledger_entry.in_(("charge", "settlement")),
+        model.ledger_kind.in_(("charge", "settlement")),
+        model.is_credit.is_(True),
     )
+    return and_(base, or_(model.approval_status.is_(None), model.approval_status != "pending"))
+
+
+def _charge_filter(model):
+    """فلتر قيود آجلة (charge) فقط — للاستحقاق."""
+    return _charge_condition(model)

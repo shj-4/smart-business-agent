@@ -208,11 +208,11 @@ def validate_env() -> list[str]:
         missing.append(f"  TELEGRAM_BOT_TOKEN — {REQUIRED_ENV['TELEGRAM_BOT_TOKEN']}")
     if not settings.gemini_api_key:
         missing.append(f"  GEMINI_API_KEY — {REQUIRED_ENV['GEMINI_API_KEY']}")
-    if settings.app_env == "production" and not (settings.encryption_key or "").strip():
+    if (settings.app_env or "").strip().lower() == "production" and not (settings.encryption_key or "").strip():
         missing.append(
             "  ENCRYPTION_KEY — إجباري في الإنتاج لتشفير الحقول الحساسة (بدونه لن يبدأ البوت)."
         )
-    if settings.app_env == "production" and not (settings.dashboard_password or "").strip():
+    if (settings.app_env or "").strip().lower() == "production" and not (settings.dashboard_password or "").strip():
         missing.append(
             "  DASHBOARD_PASSWORD — إجباري في الإنتاج؛ يمنع توليد كلمة مرور مؤقتة "
             "لأن ملف data/dashboard_credentials.txt لا يُحمى تلقائيًا بـ 0o600 على Windows "

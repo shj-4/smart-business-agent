@@ -1051,7 +1051,8 @@ async def _handle_tool_summary(
             )
             .scalar()
         )
-        base = (settings.base_currency or "ILS").upper()
+        from app.database.crud.company import get_user_base_currency as _gubc
+        base = (_gubc(db, uid) or settings.base_currency or "ILS").upper()
         local_now = now_local()
         start = to_utc_naive(
             local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1354,7 +1355,6 @@ async def _start_record_edit(
 
     context.user_data["pending_record_edit_id"] = record.id
     context.user_data["pending_record_edit_model"] = model_name
-    context.user_data["pending_record_edit_obj"] = record
 
     lines = ["✏️ تعديل السجل — اختر الحقل:\n"]
     if model_name == "Transaction":
@@ -1419,7 +1419,14 @@ async def _handle_record_field(
         )
         return
     field = parts[-1]
-    record = context.user_data.get("pending_record_edit_obj")
+    uid = query.from_user.id
+    model_name = context.user_data.get("pending_record_edit_model")
+    record_id = context.user_data.get("pending_record_edit_id")
+    db = SessionLocal()
+    try:
+        record, _ = get_record_by_id(db, uid, model_name, record_id)
+    finally:
+        db.close()
     if record is None:
         await query.edit_message_text(
             "انتهت الجلسة — أعد فتح من القائمة.", reply_markup=_home_keyboard()
@@ -2043,5 +2050,4 @@ async def menu_callback_router(
     handler = HANDLERS.get(action)
     if handler is None:
         return
-    await query.answer()
     await handler(query, context, [p for p in parts if p != ""])

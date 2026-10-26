@@ -79,6 +79,10 @@ def _freeze_now(monkeypatch, dt_local):
 
     monkeypatch.setattr(tu, "now_local", lambda: dt_local)
 
+    import app.database.crud.reports as rep
+
+    monkeypatch.setattr(rep, "now_local", lambda: dt_local)
+
 
 # ---------- get_comparison_ranges ----------
 

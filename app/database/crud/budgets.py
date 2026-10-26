@@ -155,7 +155,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     - scope=currency/category → نقدي فقط (P&L) — الذمم لا تُحتسب
     - scope=person → ذمم فقط — النقدي لشخص لا يُحتسب في ميزانية الشخص
     """
-    from app.database.crud.common import _cash_filter, _debt_filter
+    from app.database.crud.common import _cash_filter, _charge_filter, _debt_filter, normalize_person_for_match
     from app.database.crud.company import get_user_base_currency
 
 
@@ -178,9 +178,13 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         # + نقدي فقط
         q = q.filter(Transaction.category == budget.category, _cash_filter(Transaction))
     else:
-        q = q.filter(Transaction.person == budget.person, _debt_filter(Transaction))
+        q = q.filter(_charge_filter(Transaction))
+        _norm_budget_person = normalize_person_for_match(budget.person)
 
-    spent_rows = q.all()
+    if budget.scope == "person":
+        spent_rows = [r for r in q.all() if normalize_person_for_match(r.person) == _norm_budget_person]
+    else:
+        spent_rows = q.all()
 
     if budget.scope == "currency":
         # الميزانية مُقوَّمة بعملتها: مبالغ العملة نفسها تُجمع مباشرة.
@@ -276,7 +280,11 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
             c = r.currency or "غير محددة"
             cell = per_cur.setdefault(c, {"income": Decimal("0"), "expense": Decimal("0")})
             if r.amount is not None:
-                cell[r.type] = cell.get(r.type, Decimal("0")) + r.amount
+                is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+                eff_type = r.type
+                if is_settlement:
+                    eff_type = "income" if r.type == "expense" else "expense"
+                cell[eff_type] = cell.get(eff_type, Decimal("0")) + r.amount
         by_currency = {}
         for c, cell in per_cur.items():
             balance = cell["income"] - cell["expense"]
@@ -286,12 +294,21 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
                 "balance": balance.quantize(Decimal("0.01")),
             }
 
-        unified_inc = _unified_totals_for_rows(
-            [r for r in pr if r.type == "income"], base
-        )["total"]
-        unified_exp = _unified_totals_for_rows(
-            [r for r in pr if r.type == "expense"], base
-        )["total"]
+        inc_rows = []
+        exp_rows = []
+        for r in pr:
+            if r.amount is None:
+                continue
+            is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+            eff_type = r.type
+            if is_settlement:
+                eff_type = "income" if r.type == "expense" else "expense"
+            if eff_type == "income":
+                inc_rows.append(r)
+            else:
+                exp_rows.append(r)
+        unified_inc = _unified_totals_for_rows(inc_rows, base)["total"]
+        unified_exp = _unified_totals_for_rows(exp_rows, base)["total"]
         if unified_inc is not None and unified_exp is not None:
             net = unified_inc - unified_exp
         else:
@@ -310,4 +327,58 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
         )
 
     result.sort(key=lambda d: (d["last_activity"] is not None, d["last_activity"]), reverse=True)
+    return result
+
+
+def person_debts_aging(db: Session, telegram_user_id: int) -> list[dict]:
+    """أعمار الديون: توزيع رصيد كل شخص على شرائح 0-30/31-60/61-90/+90 يوم."""
+    from datetime import datetime, timedelta
+    from app.database.crud.common import _debt_filter, normalize_person_for_match
+    from app.database.crud.company import report_company_filter
+    from app.timeutil import now_utc, to_local_naive
+
+    now = now_utc()
+    rows = (
+        db.query(Transaction)
+        .filter(
+            report_company_filter(db, telegram_user_id, Transaction),
+            Transaction.deleted_at.is_(None),
+            Transaction.person.isnot(None),
+            _debt_filter(Transaction),
+        )
+        .all()
+    )
+    buckets = ["0-30", "31-60", "61-90", "90+"]
+    persons: dict[str, dict] = {}
+    display: dict[str, str] = {}
+    for r in rows:
+        raw = (r.person or "").strip()
+        if not raw:
+            continue
+        folded = normalize_person_for_match(raw) or raw
+        if folded not in display:
+            display[folded] = raw
+        dt = r.occurred_at if getattr(r, "occurred_at", None) is not None else r.created_at
+        age = (now - dt).days if dt is not None else 0
+        if age <= 30:
+            b = "0-30"
+        elif age <= 60:
+            b = "31-60"
+        elif age <= 90:
+            b = "61-90"
+        else:
+            b = "90+"
+        cell = persons.setdefault(folded, {k: Decimal("0") for k in buckets})
+        is_settlement = (r.debt_direction == "settlement" or r.ledger_entry == "settlement" or r.ledger_kind == "settlement")
+        eff_type = r.type
+        if is_settlement:
+            eff_type = "income" if r.type == "expense" else "expense"
+        amt = r.amount or Decimal("0")
+        if eff_type == "income":
+            cell[b] += amt
+        else:
+            cell[b] -= amt
+    result = []
+    for folded, data in persons.items():
+        result.append({"person": display.get(folded, folded), "buckets": {k: data[k].quantize(Decimal("0.01")) for k in buckets}, "total": sum(data.values()).quantize(Decimal("0.01"))})
     return result

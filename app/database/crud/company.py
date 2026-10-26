@@ -23,7 +23,7 @@ from app.timeutil import now_utc
 _lock = threading.RLock()
 _CID_CACHE: dict[int, tuple[int | None, float]] = {}
 _CID_TTL = 60.0
-_MEMBER_CACHE: dict[int, tuple[CompanyMember | None, float]] = {}
+_MEMBER_CACHE: dict[int, tuple[object | None, float]] = {}
 
 
 def _cid_cache_get(uid: int) -> int | None | object:
@@ -54,15 +54,16 @@ def invalidate_company_cache(telegram_user_id: int | None = None) -> None:
             _MEMBER_CACHE.pop(telegram_user_id, None)
 
 
-def get_company_member(db: Session, telegram_user_id: int) -> CompanyMember | None:
-    # استخدم ذاكرة قصيرة (نفس TTL) — العضوية لا تتغير كل ثانية
-    # محمية بقفل مثل app/cache.py
+def get_company_member(db: Session, telegram_user_id: int):
+    """يعيد عضوية المستخدم (قراءة فقط) — يخزّن قيمًا بسيطة (وليس كائن ORM)
+    لتجنب DetachedInstanceError ومشاكل commit عبر جلسات."""
+    from types import SimpleNamespace
+
     with _lock:
         ent = _MEMBER_CACHE.get(telegram_user_id)
         if ent is not None:
             cached, ts = ent
             if _time_mod.time() - ts < _CID_TTL:
-                # تحقق أن الكائن لا يزال مرتبطًا بجلسة صالحة؟ نعيد نفس الكائن (قراءة فقط)
                 return cached
             _MEMBER_CACHE.pop(telegram_user_id, None)
     res = (
@@ -70,11 +71,19 @@ def get_company_member(db: Session, telegram_user_id: int) -> CompanyMember | No
         .filter(CompanyMember.telegram_user_id == telegram_user_id, CompanyMember.status == "active")
         .first()
     )
+    if res is None:
+        cached = None
+    else:
+        cached = SimpleNamespace(
+            telegram_user_id=res.telegram_user_id,
+            company_id=res.company_id,
+            role=res.role,
+            status=res.status,
+        )
     with _lock:
-        _MEMBER_CACHE[telegram_user_id] = (res, _time_mod.time())
-        # _cid_cache_set يجلب القفل داخليًا (RLock يسمح بالتداخل)
-        _cid_cache_set(telegram_user_id, res.company_id if res else None)
-    return res
+        _MEMBER_CACHE[telegram_user_id] = (cached, _time_mod.time())
+        _cid_cache_set(telegram_user_id, cached.company_id if cached else None)
+    return cached
 
 
 def company_id_for_user(db: Session, telegram_user_id: int) -> int | None:
@@ -210,6 +219,9 @@ def report_company_filter(db: Session, telegram_user_id: int, model) -> object:
     """فلتر التقارير: كامل الشركة (company_id) لمن عنده view_all، وإلا سجلاته فقط."""
     if has_permission(db, telegram_user_id, "report.view_all"):
         return company_filter(db, telegram_user_id, model)
+    from app.database.crud.company import company_id_for_user as _cid_rc
+    if _cid_rc(db, telegram_user_id) is None:
+        return (model.telegram_user_id == telegram_user_id) & model.company_id.is_(None)
     return model.telegram_user_id == telegram_user_id
 
 
@@ -240,7 +252,12 @@ def company_filter(db: Session, telegram_user_id: int, model) -> object:
 
     cid = company_id_for_user(db, telegram_user_id)
     if cid is None:
-        return model.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id))
+        # فرد: لا يرى سجلات الشركة (company_id غير NULL) — يمنع موظفًا مفصولًا
+        # من الوصول إلى بيانات الشركة القديمة عبر "فرد".
+        return (
+            model.telegram_user_id.in_(accessible_user_ids(db, telegram_user_id))
+            & model.company_id.is_(None)
+        )
     # شركة: نطابق فقط سجلات الشركة (لا fallback إلى company_id IS NULL)
     return model.company_id == cid
 
@@ -396,14 +413,13 @@ def redeem_invite(
             invited_by=inv.created_by,
         )
     )
-    # نقل سجلاته القديمة (company_id IS NULL) إلى الشركة الجديدة
-    try:
-        _backfill_company_id_for_user(db, telegram_user_id, inv.company_id)
-    except Exception:
-        # لا نكسر الانضمام بسبب فشل النقل
-        pass
+    # لا ننقل سجلات المنضم (company_id IS NULL) تلقائيًا — تبقى شخصية (خصوصية).
+    # النقل (إن لزم) يتطلب موافقة صريحة.
     db.commit()
     _invalidate_caches(db, telegram_user_id)
+    from app.database.crud.company import invalidate_company_cache
+
+    invalidate_company_cache(telegram_user_id)
     return True, get_company(db, inv.company_id)
 
 
@@ -417,8 +433,10 @@ def revoke_invite(db: Session, actor_id: int, invite_id: int) -> bool:
 
 
 def set_member_role(db: Session, actor_id: int, target_id: int, role: str) -> bool:
-    actor = get_company_member(db, actor_id)
-    target = get_company_member(db, target_id)
+    from app.database.crud import invalidate_company_cache
+
+    actor = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == actor_id, CompanyMember.status == "active").first()
+    target = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == target_id, CompanyMember.status == "active").first()
     if not actor or not target or actor.company_id != target.company_id:
         return False
     if not role_has(actor.role, "members.manage") or target.role == ROLE_OWNER:
@@ -429,14 +447,17 @@ def set_member_role(db: Session, actor_id: int, target_id: int, role: str) -> bo
         return False
     target.role = role
     db.commit()
+    invalidate_company_cache(actor_id)
+    invalidate_company_cache(target_id)
     return True
 
 
 def remove_company_member(db: Session, actor_id: int, target_id: int) -> bool:
     from app.database.crud import _invalidate_caches
+    from app.database.crud.company import invalidate_company_cache
 
-    actor = get_company_member(db, actor_id)
-    target = get_company_member(db, target_id)
+    actor = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == actor_id, CompanyMember.status == "active").first()
+    target = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == target_id, CompanyMember.status == "active").first()
     if not actor or not target or actor.company_id != target.company_id:
         return False
     if target.role == ROLE_OWNER or actor_id == target_id:
@@ -450,6 +471,8 @@ def remove_company_member(db: Session, actor_id: int, target_id: int) -> bool:
     db.commit()
     for uid in members:
         _invalidate_caches(db, uid)
+        invalidate_company_cache(uid)
+    invalidate_company_cache(target_id)
     return True
 
 
@@ -484,8 +507,10 @@ def update_company(
 
 def transfer_company_ownership(db: Session, current_owner: int, new_owner: int) -> bool:
     """ينقل ملكية الشركة إلى عضو آخر — يحتاج company.manage."""
-    actor = get_company_member(db, current_owner)
-    target = get_company_member(db, new_owner)
+    from app.database.crud.company import invalidate_company_cache
+
+    actor = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == current_owner, CompanyMember.status == "active").first()
+    target = db.query(CompanyMember).filter(CompanyMember.telegram_user_id == new_owner, CompanyMember.status == "active").first()
     if not actor or not target or actor.company_id != target.company_id:
         return False
     if actor.role != ROLE_OWNER or target.role == ROLE_OWNER:
@@ -505,6 +530,9 @@ def transfer_company_ownership(db: Session, current_owner: int, new_owner: int) 
 
     for uid in company_member_ids(db, comp.id):
         _invalidate_caches(db, uid)
+        invalidate_company_cache(uid)
+    invalidate_company_cache(current_owner)
+    invalidate_company_cache(new_owner)
     return True
 
 

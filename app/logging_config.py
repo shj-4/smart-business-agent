@@ -33,6 +33,7 @@ _SECRET_PATTERNS = (
     re.compile(r"((?:DASHBOARD_PASSWORD|PASSWORD)[=:]\s*)\S+", re.IGNORECASE),
     re.compile(r"(Authorization[=:]\s*(?:Basic|Bearer|Token)\s+)\S+", re.IGNORECASE),
     re.compile(r"(token[=:]\s*)\S+", re.IGNORECASE),
+    re.compile(r"(bot\d+:[A-Za-z0-9_-]{20,})", re.IGNORECASE),
 )
 
 

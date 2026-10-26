@@ -120,6 +120,15 @@ class AnalysisResultSchema(BaseModel):
     description: str | None = None
     date: str | None = None
     is_credit: bool | None = None
+    ledger_entry: str | None = None
+    debt_direction: str | None = None
+    ledger_kind: str | None = None
+    reply: str | None = None
+    vat_rate: float | None = None
+    vat_amount: float | None = None
+    ledger_entry: str | None = None
+    debt_direction: str | None = None
+    ledger_kind: str | None = None
     priority: str | None = None
     recurrence: str | None = None
     missing_fields: list[str] = Field(default_factory=list)
@@ -209,6 +218,22 @@ class AnalysisResultSchema(BaseModel):
         if isinstance(v, int) and not isinstance(v, bool):
             return bool(v)
         return None
+
+    @field_validator("ledger_entry", "debt_direction", mode="before")
+    @classmethod
+    def _ledger_entry(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "charge" if v else None
+        s = str(v).strip().lower()
+        if s in ("charge", "آجل", "ذمة", "credit", "true", "1", "yes"):
+            return "charge"
+        if s in ("settlement", "تسديد", "تسوية", "payment", "cash", "نقدي", "false", "0", "no"):
+            return "settlement" if s in ("settlement", "تسديد", "تسوية", "payment") else None
+        if s in ("none", "null", ""):
+            return None
+        return s if s in ("charge", "settlement") else None
 
     @field_validator("missing_fields", mode="before")
     @classmethod

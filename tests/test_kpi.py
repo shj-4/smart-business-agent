@@ -83,8 +83,8 @@ class TestKpiDashboard:
         assert payload["budgets"]["total"] == 1
 
     def test_debts_net_positive(self, db_session):
-        _tx(db_session, "300", tx_type="income", person="أحمد")
-        _tx(db_session, "100", tx_type="expense", person="أحمد")
+        create_transaction(db_session, USER, {"type": "income", "amount": 300, "currency": "ILS", "person": "p", "is_credit": True}, "x", telegram_message_id=1)
+        create_transaction(db_session, USER, {"type": "expense", "amount": 100, "currency": "ILS", "person": "p", "is_credit": True}, "x", telegram_message_id=2)
         payload = kpi_dashboard(db_session, USER)
         assert payload["debts_net"] == Decimal("200.00")
 
