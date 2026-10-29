@@ -28,22 +28,6 @@ THIN_BORDER = Border(
 )
 
 
-def _scope_ids(db: Session, telegram_user_id: int | None) -> list[int]:
-    """يعيد معرّفات المستخدمين المسموح تضمينهم في التصدير."""
-    if telegram_user_id is not None:
-        from app.database.crud import report_scope_ids
-
-        return list(report_scope_ids(db, telegram_user_id))
-    ids = {
-        rid
-        for (rid,) in db.query(Transaction.telegram_user_id).all()
-        if rid is not None
-    }
-    ids.update(rid for (rid,) in db.query(Task.telegram_user_id).all() if rid is not None)
-    ids.update(rid for (rid,) in db.query(Note.telegram_user_id).all() if rid is not None)
-    return list(ids) or [-1]
-
-
 def _style_header(ws: Worksheet, cols: int) -> None:
     for col in range(1, cols + 1):
         cell = ws.cell(row=1, column=col)
@@ -82,12 +66,16 @@ def generate_transactions_excel(
         )
     else:
         q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
-    if start_utc:
-        q = q.filter(Transaction.created_at >= start_utc)
-    if end_utc:
-        q = q.filter(Transaction.created_at <= end_utc)
+    from sqlalchemy import func as _func
 
-    rows = q.order_by(Transaction.created_at.desc()).all()
+    from app.database.crud.common import _cash_filter as _exp_cash
+    if start_utc:
+        q = q.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start_utc)
+    if end_utc:
+        q = q.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) <= end_utc)
+    q = q.filter(_exp_cash(Transaction))
+
+    rows = q.order_by(_func.coalesce(Transaction.occurred_at, Transaction.created_at).desc()).all()
 
     wb = Workbook()
     ws = wb.active
@@ -314,11 +302,15 @@ def generate_export_excel(
         )
     else:
         tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    from sqlalchemy import func as _func
+
+    from app.database.crud.common import _cash_filter as _exp_cash
     if start_utc:
-        tq = tq.filter(Transaction.created_at >= start_utc)
+        tq = tq.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start_utc)
     if end_utc:
-        tq = tq.filter(Transaction.created_at <= end_utc)
-    transactions = tq.order_by(Transaction.created_at.desc()).all()
+        tq = tq.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) <= end_utc)
+    tq = tq.filter(_exp_cash(Transaction))
+    transactions = tq.order_by(_func.coalesce(Transaction.occurred_at, Transaction.created_at).desc()).all()
 
     if telegram_user_id is not None:
         mark_overdue_tasks(db, telegram_user_id)
@@ -472,11 +464,15 @@ def generate_export_pdf(
         )
     else:
         tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    from sqlalchemy import func as _func
+
+    from app.database.crud.common import _cash_filter as _exp_cash
     if start_utc:
-        tq = tq.filter(Transaction.created_at >= start_utc)
+        tq = tq.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start_utc)
     if end_utc:
-        tq = tq.filter(Transaction.created_at <= end_utc)
-    transactions = tq.order_by(Transaction.created_at.desc()).all()
+        tq = tq.filter(_func.coalesce(Transaction.occurred_at, Transaction.created_at) <= end_utc)
+    tq = tq.filter(_exp_cash(Transaction))
+    transactions = tq.order_by(_func.coalesce(Transaction.occurred_at, Transaction.created_at).desc()).all()
 
     if telegram_user_id is not None:
         mark_overdue_tasks(db, telegram_user_id)

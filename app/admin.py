@@ -65,22 +65,37 @@ def _build_admin_stats_uncached(db: Session) -> dict:
     report_prefs_count = db.query(ReportPref).filter(ReportPref.frequency != "off").count()
 
     # إجماليات مالية (تجمع في Python لأنها مشفّرة) — عبر money (leaf) لا crud
-    expense_rows = (
-        db.query(Transaction)
-        .filter(
-            Transaction.deleted_at.is_(None),
-            Transaction.type == "expense",
+    # فلتر الصندوق (P&L) يُطبَّق هنا دون الاعتماد على crud (لتجنب اعتماد admin على crud)
+
+    def _admin_cash_ok(r) -> bool:
+        base = (
+            r.debt_direction == "settlement"
+            or r.ledger_entry == "settlement"
+            or r.ledger_kind == "settlement"
+            or r.is_credit is False
+            or (
+                r.debt_direction is None
+                and r.ledger_entry is None
+                and r.is_credit is None
+            )
         )
+        pending_ok = r.approval_status is None or r.approval_status != "pending"
+        return bool(base and pending_ok)
+
+    expense_rows = [
+        r
+        for r in db.query(Transaction)
+        .filter(Transaction.deleted_at.is_(None), Transaction.type == "expense")
         .all()
-    )
-    income_rows = (
-        db.query(Transaction)
-        .filter(
-            Transaction.deleted_at.is_(None),
-            Transaction.type == "income",
-        )
+        if _admin_cash_ok(r)
+    ]
+    income_rows = [
+        r
+        for r in db.query(Transaction)
+        .filter(Transaction.deleted_at.is_(None), Transaction.type == "income")
         .all()
-    )
+        if _admin_cash_ok(r)
+    ]
     total_expenses = money._sum_amounts_by_currency(expense_rows)
     total_incomes = money._sum_amounts_by_currency(income_rows)
 

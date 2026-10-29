@@ -78,3 +78,42 @@ def test_reapply_refuses_existing_without_consent(tmp_path):
     reapply_migrations(db_url=url)  # تُنشئ القاعدة أولًا
     with pytest.raises(RuntimeError):
         reapply_migrations(db_url=url)  # بلا موافقة → رفض
+
+
+def test_upgrade_head_matches_model_metadata(tmp_path):
+    """انجراف المخطط: قاعدة مبنية بـ upgrade head يجب أن تطابق Base.metadata بالكامل."""
+    import os
+
+    from alembic import command
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from sqlalchemy import create_engine
+
+    import app.database.db as dbmod
+    from app.database.db import Base
+
+    # ALEMBIC_INI path
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    alembic_ini = os.path.join(root, "alembic.ini")
+
+    db_path = tmp_path / "drift.db"
+    url = "sqlite:///" + str(db_path).replace("\\", "/")
+
+    original_url = dbmod.DATABASE_URL
+    dbmod.DATABASE_URL = url
+    try:
+        cfg = Config(alembic_ini)
+        command.upgrade(cfg, "head")
+    finally:
+        dbmod.DATABASE_URL = original_url
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            ctx = MigrationContext.configure(conn)
+            from alembic.autogenerate import compare_metadata
+
+            diff = compare_metadata(ctx, Base.metadata)
+        assert diff == [], f"انجراف بين migrations و models: {diff}"
+    finally:
+        engine.dispose()

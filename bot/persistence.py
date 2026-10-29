@@ -29,6 +29,7 @@ SENSITIVE_USER_DATA_KEYS: set[str] = {
     # تأكيد وتجميع النواقص (قبل الحفظ)
     "confirm_result",
     "confirm_raw",
+    "_confirm_saved",
     "pending_raw",
     "pending_record",
     # تعديل السجلات

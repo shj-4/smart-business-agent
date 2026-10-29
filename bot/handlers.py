@@ -26,7 +26,7 @@ from app.database.db import SessionLocal
 from app.exchange import CURRENCY_NAMES, convert
 from app.formatting import fmt_amount
 from bot.formatters import safe_reply
-from bot.icons import EXPENSE, INCOME, NEW, SUCCESS, TASK
+from bot.icons import EXPENSE, INCOME, SUCCESS, TASK
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +150,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_main_menu(
         update.message,
         context,
-        text=(
-            f"أهلًا بك {first} 👋\nأنا مساعدك الذكي لإدارة أعمالك.\n"
-            "اختر من القائمة، أو أرسل مباشرة أي عملية أو سؤال\n"
-            "مثل:\n• 300 شيكل لمحمد مقابل مواد\n• كم صرفت هذا الشهر؟\n"
-            "🕘 اطلب /help لعرض دليل الأوامر الكامل."
-        ),
+        text=f"أهلًا {first} 👋\nاكتب عمليتك أو اختر من القائمة.",
+        uid=update.effective_user.id,
     )
 
 
@@ -257,51 +253,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     from bot.menus import send_main_menu
 
     guide = (
-        "📖 دليل استخدام البوت — مساعد أعمالك الذكي\n\n"
-        "🗣️ اكتب مباشرة أي عملية أو سؤال، مثل:\n"
-        "• 300 شيكل لمحمد مقابل مواد\n"
-        "• صرفت 500 دولار فاتورة كهرباء\n"
-        "• كم صرفت هذا الشهر؟ / كم لي على سامر؟\n\n"
-        "🧭 الأزرار الرئيسية:\n"
-        f"• {NEW} تسجيل عملية — مصاريف/إيراد/طلبية/ملاحظة/مهمة\n"
-        "• 📊 التقارير — ملخصات، رسوم بيانية، مقارنة فترات\n"
-        f"• {TASK} مهامي — قوائم المهام وإنجازها وحذفها\n"
-        "• 🧰 أدوات — آخر سجل، ميزانيات، رسم بياني، تصدير، تحويل، بحث، مساحة مشتركة\n\n"
-        "⚠️ الخصوصية: نصوصك/صورك تُرسل لـ Gemini (انظر /privacy). التشفير لا يغطي الإرسال.\n\n"
-        "⌨️ الأوامر السريعة:\n"
-        "/menu — القائمة الرئيسية\n"
-        "/privacy — إعدادات الخصوصية وحذف الملغاة\n"
-        "/done وصف — إنجاز مهمة\n"
-        "/undo — تراجع عن آخر سجل\n"
-        "/redo — استعادة آخر سجل تم التراجع عنه\n"
-        "/convert مبلغ من إلى — تحويل عملة (مثل: /convert 300 ILS USD)\n"
-        "/budget سقف — إدارة ميزانية شهرية\n"
-        "/report — ملخص الفترة\n"
-        "/export — تصدير Excel\n"
-        "/chart — رسم بياني بالمصاريف\n"
-        "/report_on — تقرير دوري تلقائي\n"
-        "/report_off — إيقاف التقرير الدوري\n"
-        "/work — إدارة المساحة المشتركة\n"
-        "/company — شركتك وعضويتها\n"
-        "/join — الانضمام برمز دعوة\n"
-        "/debts — من يدين لك ومن تدين له\n"
-        "/finance — بطاقة ذمم موحّدة (ديون/فواتير/ائتمان)\n"
-        "/invoices — الفواتير الآجلة\n"
-        "/orders — الطلبيات وحالتها\n"
-        "/credit — الحدود الائتمانية للأشخاص\n"
-        "/bonus — البونس والمكافآت ونقاط الولاء\n"
-        "/stats — إحصائيات استخدامك\n"
-        "/kpi — لوحة مؤشرات أداء أعمالك (مال الشهر/مهام/فواتير)\n"
-        "/brief — نشرة إدارة يومية ذكية عن حالة عملك\n"
-        "/health — فحص صحة النظام\n"
-        "/export pdf — تصدير PDF بكل السجلات\n"
-        "/forecast — توقعات الأشهر القادمة\n"
-        "/deviation — انحراف الإنفاق عن المتوسط\n"
-        "/lang — تبديل لغة الواجهة عربي/English\n"
-        "/cancel — إلغاء أي عملية معلّقة\n\n"
-        "📸 صوّر أي فاتورة وأرسلها، وسأستخرج تفاصيلها تلقائيًا.\n"
-        "🎤 أرسل صوتًا وسأفهمه كعملية.\n\n"
-        "تحتاج تفاصيل أكثر؟ أرسل أي سؤال مكتوبًا بصياغتك الطبيعية."
+        "📖 المساعدة\n\n"
+        "اكتب مباشرة: عملية، مهمة، أو سؤال.\n"
+        "أرسل صورة فاتورة أو رسالة صوتية.\n\n"
+        "/menu القائمة\n"
+        "/undo تراجع · /redo استعادة\n"
+        "/report تقرير · /export تصدير\n"
+        "/budget الميزانيات · /debts الديون\n"
+        "/lang اللغة · /privacy الخصوصية"
     )
     await send_main_menu(update.message, context, text=guide)
 
@@ -387,6 +346,47 @@ async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text("لا يوجد سجلات سابقة يمكن التراجع عنها.")
 
+
+async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """اعتماد عملية مالية معلّقة (pending) — للمعتمد (manager/accountant/owner)."""
+    from app.database.crud import approve_transaction
+
+    args = list(context.args or [])
+    if not args or not str(args[0]).isdigit():
+        await update.message.reply_text("الاستخدام: /approve <id>")
+        return
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        ok = approve_transaction(db, uid, int(args[0]))
+    finally:
+        db.close()
+    if ok:
+        await update.message.reply_text("تم اعتماد العملية.")
+    else:
+        await update.message.reply_text("تعذر الاعتماد (غير موجودة، أو معلّقة، أو صلاحيات غير كافية).")
+
+
+async def close_period_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """إقفال فترة مالية (YYYY-MM) — يمنع تعديل/حذف سجلات تلك الفترة."""
+    from app.database.crud import close_period, is_period_closed
+
+    args = list(context.args or [])
+    if not args:
+        await update.message.reply_text("الاستخدام: /close_period YYYY-MM")
+        return
+    month_key = str(args[0]).strip()
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        already = is_period_closed(db, uid, month_key)
+        close_period(db, uid, month_key)
+    finally:
+        db.close()
+    if already:
+        await update.message.reply_text(f"الفترة {month_key} مغلقة بالفعل.")
+    else:
+        await update.message.reply_text(f"تم إقفال الفترة {month_key}.")
 
 async def redo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """أمر /redo — يستعيد آخر سجل تم التراجع عنه (/undo عكسيًا)."""
@@ -943,12 +943,12 @@ async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     from app.database.crud import person_debts
     from bot.formatters import format_debts
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
 
     def _load():
         db = SessionLocal()
         try:
-            return person_debts(db, telegraph_id)
+            return person_debts(db, telegram_user_id)
         finally:
             db.close()
 
@@ -963,14 +963,14 @@ async def finance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     from app.database.crud import credit_usage, list_credit_limits, list_invoices, person_debts
     from bot.formatters import format_finance_card
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
 
     def _load():
         db = SessionLocal()
         try:
-            debts = person_debts(db, telegraph_id)
-            invoices = list_invoices(db, telegraph_id, status=None, limit=50)
-            limits = list_credit_limits(db, telegraph_id)
+            debts = person_debts(db, telegram_user_id)
+            invoices = list_invoices(db, telegram_user_id, status=None, limit=50)
+            limits = list_credit_limits(db, telegram_user_id)
             credit_payload = [
                 {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
             ]
@@ -987,7 +987,7 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     from app.database.crud import create_invoice, list_invoices
     from bot.formatters import format_invoices
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
     args = context.args or []
     # إنشاء فاتورة: /invoices add 500 ILS محمد due:2026-10-01 وصف
     if args and args[0].strip().lower() in ("add", "إضافة", "اضافة", "new", "إنشاء", "create"):
@@ -1032,7 +1032,7 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         try:
             inv = create_invoice(
                 db,
-                telegraph_id,
+                telegram_user_id,
                 {"amount": amount, "currency": currency, "person": person, "description": desc, "due_date": due_date},
                 raw_message=raw,
             )
@@ -1056,8 +1056,8 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         if status == "pending" and not status_arg:
             # افتراضي: اعرض معلّقة + متأخرة معًا (المتأخرة هي pending فات موعدها)
-            pending = list_invoices(db, telegraph_id, status="pending", limit=50)
-            overdue = list_invoices(db, telegraph_id, status="overdue", limit=50)
+            pending = list_invoices(db, telegram_user_id, status="pending", limit=50)
+            overdue = list_invoices(db, telegram_user_id, status="overdue", limit=50)
             # دمج مع ترتيب زمني (الأحدث أولًا) — list_invoices مرتبة desc
             invoices = sorted(pending + overdue, key=lambda x: x.created_at or 0, reverse=True)[:50]
             title = "🧾 الفواتير الآجلة (معلّقة + ⚠️ متأخرة):"
@@ -1067,15 +1067,15 @@ async def invoices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 title = "🧾 الفواتير الآجلة:"
         elif status == "pending":
             # طلب صريح لـ pending فقط — لكن اعرض overdue ضمن pending إن وجدت
-            pending = list_invoices(db, telegraph_id, status="pending", limit=50)
-            overdue = list_invoices(db, telegraph_id, status="overdue", limit=50)
+            pending = list_invoices(db, telegram_user_id, status="pending", limit=50)
+            overdue = list_invoices(db, telegram_user_id, status="overdue", limit=50)
             invoices = (pending + overdue)[:50]
             title = "🧾 الفواتير الآجلة (معلّقة + ⚠️ متأخرة):"
             if not overdue:
                 title = "🧾 الفواتير الآجلة:"
                 invoices = pending
         else:
-            invoices = list_invoices(db, telegraph_id, status=status, limit=50)
+            invoices = list_invoices(db, telegram_user_id, status=status, limit=50)
             title = {
                 "paid": f"{SUCCESS} الفواتير المسددة:",
                 "overdue": "⚠️ الفواتير المتأخرة:",
@@ -1092,7 +1092,7 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     from app.database.crud import list_orders
     from bot.formatters import format_orders
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
     args = context.args or []
     status_arg = (args[0].strip().lower() if args else "") or None
     if status_arg in ("done", "منجزة", "مكتملة", "انجزت"):
@@ -1104,7 +1104,7 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     db = SessionLocal()
     try:
-        orders = list_orders(db, telegraph_id, status=status, limit=50)
+        orders = list_orders(db, telegram_user_id, status=status, limit=50)
     finally:
         db.close()
 
@@ -1121,7 +1121,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     from app.database.crud import credit_usage, list_credit_limits, set_credit_limit
     from bot.formatters import format_credit_limits
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
     args = context.args or []
     # الكتابة تبقى متزامنة (سريعة)؛ القراءة تُنقل لـ thread
     if args and args[0].strip().lower() in ("add", "اضافة", "إضافة"):
@@ -1137,7 +1137,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         limit = str(limit_dec)
         db = SessionLocal()
         try:
-            row = set_credit_limit(db, telegraph_id, person, limit)
+            row = set_credit_limit(db, telegram_user_id, person, limit)
         finally:
             db.close()
         if not row:
@@ -1154,7 +1154,7 @@ async def credit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     def _load():
         db2 = SessionLocal()
         try:
-            lims = list_credit_limits(db2, telegraph_id)
+            lims = list_credit_limits(db2, telegram_user_id)
             return [
                 {"person": lim.person, "usage": credit_usage(db2, lim)} for lim in lims
             ]
@@ -1192,12 +1192,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     from app.database.crud import user_stats
     from bot.formatters import format_user_stats
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
 
     def _load():
         db = SessionLocal()
         try:
-            return user_stats(db, telegraph_id)
+            return user_stats(db, telegram_user_id)
         finally:
             db.close()
 
@@ -1210,7 +1210,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     from app.database.crud import forecast_totals
     from bot.formatters import format_forecast
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
     months = 3
     if context.args:
         try:
@@ -1219,7 +1219,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             months = 3
     db = SessionLocal()
     try:
-        payload = forecast_totals(db, telegraph_id, months=months)
+        payload = forecast_totals(db, telegram_user_id, months=months)
     finally:
         db.close()
     await safe_reply(update.message, format_forecast(payload))
@@ -1230,10 +1230,10 @@ async def deviation_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     from app.database.crud import deviation_summary
     from bot.formatters import format_deviation
 
-    telegraph_id = update.effective_user.id
+    telegram_user_id = update.effective_user.id
     db = SessionLocal()
     try:
-        payload = deviation_summary(db, telegraph_id)
+        payload = deviation_summary(db, telegram_user_id)
     finally:
         db.close()
     await update.message.reply_text(format_deviation(payload))
@@ -1706,6 +1706,12 @@ async def system_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 async def requirements_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """عرض وثيقة المتطلبات (SRS) لـ BizMate."""
+    from app.config import settings
+
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None or (settings.admin_user_ids and uid not in settings.admin_user_ids):
+        await update.message.reply_text("غير مسموح.")
+        return
     import os
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "SRS_BizMate.md")
     try:
@@ -1723,7 +1729,8 @@ def register_handlers(app: Application) -> None:
     try:
         from bot.ratelimit import is_user_allowed
     except Exception:
-        is_user_allowed = lambda uid: True
+        def is_user_allowed(uid):
+            return True
 
     async def _allowlist_message_guard(update, context):
         user = getattr(update, "effective_user", None)
@@ -1797,20 +1804,27 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("kpi", kpi_command))
     app.add_handler(CommandHandler("brief", brief_command))
     app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("approve", approve_command))
+    app.add_handler(CommandHandler("close_period", close_period_command))
     app.add_handler(CommandHandler("forecast", forecast_command))
     app.add_handler(CommandHandler("deviation", deviation_command))
 
     from bot.bonus import register_bonus_handlers, setup_bonus_check
     register_bonus_handlers(app)
 
+    # ترتيب مهم: Onboarding أولًا، ثم التعديل (edit) قبل المحادثة العامة —
+    # وإلا فإن input التعديل (أي نص) يُلتقط بواسطة conversation_handler
+    # ويُحلل كرسالة جديدة وقد تُسجّل كعملية.
+    # /cancel عام (group منخفض) — يمسح كل الحالات المعلّقة خارج المحادثات
+    # (pending_budget, pending_convert, pending_search, pending_*_edit, ...)
+    # لأن fallbacks داخل ConversationHandler لا تُفحص إلا في حالة نشطة.
+    from bot.conversation import cancel as _global_cancel
     from bot.conversation import conversation_handler
     from bot.editing import edit_conversation
     from bot.menus import menu_callback_router
     from bot.onboarding import onboarding_conversation
 
-    # ترتيب مهم: Onboarding أولًا، ثم التعديل (edit) قبل المحادثة العامة —
-    # وإلا فإن input التعديل (أي نص) يُلتقط بواسطة conversation_handler
-    # ويُحلل كرسالة جديدة وقد تُسجّل كعملية.
+    app.add_handler(CommandHandler("cancel", _global_cancel), group=1)
     app.add_handler(onboarding_conversation)
     app.add_handler(edit_conversation)
     app.add_handler(conversation_handler)

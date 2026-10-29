@@ -21,7 +21,7 @@ import math
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.database.crud.company import company_filter, report_company_filter
@@ -119,10 +119,10 @@ def list_bonus_transactions(
             Transaction.deleted_at.is_(None),
             _bonus_category_filter(),
         )
-        .order_by(Transaction.created_at.desc())
+        .order_by(func.coalesce(Transaction.occurred_at, Transaction.created_at).desc())
     )
     if start:
-        q = q.filter(Transaction.created_at >= start)
+        q = q.filter(func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start)
     if person:
         q = q.filter(Transaction.person == person)
     return q.limit(limit).all()
@@ -330,8 +330,8 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
             Transaction.deleted_at.is_(None),
             Transaction.type == "expense",
             _bonus_category_filter(),
-            Transaction.created_at >= lo,
-            Transaction.created_at < (hi or now_utc()),
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) < (hi or now_utc()),
         )
         .all()
     )
@@ -346,8 +346,8 @@ def event_bonus_summary(db: Session, event: BonusEvent) -> dict:
             company_filter(db, event.telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
             Transaction.type == "income",
-            Transaction.created_at >= lo,
-            Transaction.created_at < (hi or now_utc()),
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) < (hi or now_utc()),
         )
         .all()
     )
@@ -549,7 +549,7 @@ def _employee_bonus_monthly_spent(
             Transaction.type == "expense",
             Transaction.person == plan.person,
             _bonus_category_filter(),
-            Transaction.created_at >= month_start,
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) >= month_start,
         )
         .all()
     )

@@ -238,6 +238,8 @@ def ensure_env_or_exit() -> None:
         print("\n".join(missing), file=sys.stderr)
         print("\nتأكد من وجود ملف .env في جذر المشروع يحتوي على هذه المتغيرات.", file=sys.stderr)
         raise SystemExit(1)
+    if (settings.app_env or '').strip().lower() == 'production' and not (settings.allowed_user_ids or []) and not (settings.registration_token or '').strip():
+        print('WARNING: ALLOWED_USER_IDS / REGISTRATION_TOKEN فارغان في الإنتاج — يمكن لأي شخص استهلاك حصة Gemini.', file=sys.stderr)
 
 
 # أسماء مباشرة للتوافق مع الكود الحالي (app.main.py, bot.py القديم, ai_service.py)

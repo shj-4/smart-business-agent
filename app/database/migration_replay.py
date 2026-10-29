@@ -59,6 +59,16 @@ def reapply_migrations(
             raise RuntimeError(
                 "قاعدة البيانات موجودة ولن تُلمس بدون موافقة صريحة — أعد التشغيل بـ --yes"
             )
+        # نسخة احتياطية تلقائية قبل الحذف
+        try:
+            import datetime as _dt
+            import shutil as _shutil
+
+            backup_path = f"{path}.bak-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            _shutil.copy2(path, backup_path)
+            steps.append(f"نسخة احتياطية تلقائية: {backup_path}")
+        except Exception as exc:
+            steps.append(f"تحذير: فشل النسخ الاحتياطي التلقائي: {exc}")
         os.remove(path)
         _delete_sqlite_sidecars(path)
         steps.append(f"حُذفت القاعدة السابقة ({path})")

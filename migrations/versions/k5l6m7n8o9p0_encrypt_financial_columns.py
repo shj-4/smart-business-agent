@@ -35,7 +35,6 @@ def upgrade() -> None:
     # الحقيقية حتى عند reapply_migrations على قاعدة مؤقتة (أثر جانبي في الاختبار).
     # الآن نتخطى النسخ التلقائي هنا — المسؤول يشغل backup_db.cmd يدويًا قبل الترقية
     # (النسخ داخل الهجرة لا يضمن سلامة السياق المؤقت). لا أثر جانبي.
-    pass
 
     # invoices.amount: NOT NULL
     # recreate="auto" (الافتراضي) يعيد بناء الجدول على SQLite عند تغيير النوع
@@ -85,38 +84,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("bonus_events") as batch:
-        batch.alter_column(
-            "budget",
-            existing_type=sa.Text(),
-            type_=sa.Numeric(12, 2),
-            existing_nullable=True,
-        )
-    with op.batch_alter_table("employee_bonus_plans") as batch:
-        batch.alter_column(
-            "amount",
-            existing_type=sa.Text(),
-            type_=sa.Numeric(12, 2),
-            existing_nullable=False,
-        )
-    with op.batch_alter_table("credit_limits") as batch:
-        batch.alter_column(
-            "limit_amount",
-            existing_type=sa.Text(),
-            type_=sa.Numeric(12, 2),
-            existing_nullable=False,
-        )
-    with op.batch_alter_table("budgets") as batch:
-        batch.alter_column(
-            "monthly_limit",
-            existing_type=sa.Text(),
-            type_=sa.Numeric(12, 2),
-            existing_nullable=False,
-        )
-    with op.batch_alter_table("invoices") as batch:
-        batch.alter_column(
-            "amount",
-            existing_type=sa.Text(),
-            type_=sa.Numeric(12, 2),
-            existing_nullable=False,
-        )
+    # لا نُحوّل أعمدة Text (مشفّرة) إلى Numeric عند التراجع: التحويل يُتلف
+    # البيانات المشفّرة أو يفشل على MySQL. التراجع يُبقي الأعمدة Text (آمن).
+    return None

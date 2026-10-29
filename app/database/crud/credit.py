@@ -11,7 +11,7 @@ from app.database.models import (
     CreditLimit,
     Transaction,
 )
-from app.timeutil import now_local, now_utc, to_local_naive
+from app.timeutil import now_local, now_utc
 
 
 def set_credit_limit(
@@ -67,15 +67,25 @@ def credit_monthly_reset(db: Session, limit_row: CreditLimit) -> bool:
     ضبط إلا بتحديد الحد يدويًا). العلامة تُقدَّم للشهر الجاري حتى لا يُعاد
     التصفير في كل فحص من نفس الشهر.
     """
-    stamp = limit_row.updated_at or limit_row.created_at
-    if stamp is None:
-        return False
     current = now_local()
-    stamp_local = to_local_naive(stamp)
-    if (stamp_local.year, stamp_local.month) == (current.year, current.month):
+    current_key = f"{current.year:04d}-{current.month:02d}"
+    last = getattr(limit_row, "last_alert_month", "") or ""
+    if not last:
+        # توافق خلفي: صفوف قديمة بلا last_alert_month — استخدم updated_at/created_at
+        stamp = limit_row.updated_at or limit_row.created_at
+        if stamp is not None:
+            from app.timeutil import to_local_naive
+
+            sl = to_local_naive(stamp)
+            last = f"{sl.year:04d}-{sl.month:02d}"
+    if last == current_key:
+        # تهيئة last_alert_month إن كانت فارغة
+        if not getattr(limit_row, "last_alert_month", ""):
+            limit_row.last_alert_month = current_key
+            db.commit()
         return False
     limit_row.alerted_status = 0
-    limit_row.updated_at = now_utc()
+    limit_row.last_alert_month = current_key
     db.commit()
     return True
 
@@ -122,11 +132,9 @@ def credit_usage(db: Session, limit_row: CreditLimit) -> dict:
     يعيد: {outstanding, amount, by_currency, unified_ok, side, limit, percent, over}
     side: "payable" (عليك له) | "receivable" (مدين لك) | "balanced" | "unknown".
     """
-    from app.database.crud.common import _debt_filter
+    from app.database.crud.common import _debt_filter, normalize_person_for_match
     from app.database.crud.company import report_company_filter
     from app.money import _unified_totals_for_rows
-
-    from app.database.crud.common import normalize_person_for_match
 
     all_rows = (
         db.query(Transaction)

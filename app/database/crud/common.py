@@ -35,7 +35,7 @@ CURRENCY_ALIASES = {
     "الدينار الاردني": "JOD",
     "دنانير": "JOD",
     "jd": "JOD",
-    "دينار عراقي": "IQD",
+    "jod": "JOD",    "دينار عراقي": "IQD",
     "الدينار العراقي": "IQD",
     "iqd": "IQD",
     "يورو": "EUR",
@@ -76,36 +76,73 @@ CURRENCY_ALIASES = {
 
 MAX_DESCRIPTION_LEN = 500  # حد أقصى لطول النصوص الحرة (الوصف/الطلبية/الملاحظة)
 
+def _fold_currency_key(value: str | None) -> str:
+    """يطوي مفتاح عملة للمقارنة: lowercase + إزالة تشكيل/همزات + إزالة مسافات."""
+    if not value:
+        return ""
+    try:
+        from app.normalize import fold_text
+
+        folded = fold_text(str(value))
+    except Exception:
+        folded = str(value).strip().lower()
+    return folded.lower().replace(" ", "")
+
+
 def normalize_currency(raw: str | None) -> str | None:
     """يحوّل أي صيغة عملة إلى رمز ISO موحّد (ILS لشيقل، USD لدولار...)."""
     if not raw:
         return None
-    key = raw.strip().lower().replace(" ", "")
-    if key in CURRENCY_ALIASES:
-        return CURRENCY_ALIASES[key]
-    # تطابق جزئي (مثل "شيكل جديد", "دولار امريكي") — بمقارنة غير حساسة لحالة الأحرف
-    # نُرتّب حسب طول الاسم تنازليًا حتى لا يطغى "دولار" على "دولار كندي"
-    # إصلاح: الأسماء القصيرة (SAR, ILS, TRY طول ≤3) كانت تطابق داخل أسماء أشخاص
-    # (Sarah→SAR, Nisreen→ILS جزئيًا، Tryphon→TRY) — نطلب مطابقة كلمة كاملة
-    # أو حدود كلمات لضمان عدم الخلط.
+    # توليد aliases تلقائيًا لرموز ISO (حتى لا تُفقد عملة عند إضافتها إلى CURRENCY_NAMES)
+    try:
+        from app.exchange import CURRENCY_NAMES as _CN
+
+        for code in _CN:
+            CURRENCY_ALIASES.setdefault(code.lower(), code)
+    except Exception:
+        pass
+
+    # exact match مع طيّ الهمزات/المسافات
+    key = _fold_currency_key(raw)
+    folded_aliases = {_fold_currency_key(a): c for a, c in CURRENCY_ALIASES.items()}
+    if key in folded_aliases:
+        return folded_aliases[key]
+
+    # تطابق جزئي — طيّ الهمزات لتجنب «جنيه إسترليني» (مع همزة) ≠ «جنيه استرليني»
     import re
 
-    raw_lower = raw.strip().lower()
-    # أولاً: جرّب الأسماء الطويلة (≥4) كمطابقة جزئية عادية
-    for alias, code in sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
-        if len(alias) <= 3:
+    raw_folded = _fold_currency_key(raw)
+    # أولاً: الأسماء الطويلة (≥4) كمطابقة جزئية عادية
+    # نُرتّب حسب طول alias تنازليًا
+    items = sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True)
+    for alias, code in items:
+        alias_folded = _fold_currency_key(alias)
+        if len(alias_folded) <= 3:
             continue
-        if alias in raw_lower:
+        if alias_folded and alias_folded in raw_folded:
             return code
-    # ثانيًا: الأسماء القصيرة (≤3) فقط بمطابقة كلمة كاملة بحدود كلمات
-    for alias, code in sorted(CURRENCY_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True):
-        if len(alias) > 3:
+    # ثانيًا: الأسماء القصيرة (≤3) بمطابقة كلمة كاملة
+    raw_lower = (raw or "").strip().lower()
+    for alias, code in items:
+        alias_folded = _fold_currency_key(alias)
+        if len(alias_folded) > 3:
             continue
-        # استخدم حدود كلمات: \balias\b
-        if re.search(r"\b" + re.escape(alias) + r"\b", raw_lower):
+        # مطابقة كلمة كاملة على النص المطوي (مع مسافات)
+        folded_raw_spaced = None
+        try:
+            from app.normalize import fold_text
+
+            folded_raw_spaced = fold_text(raw or "")
+        except Exception:
+            folded_raw_spaced = raw_lower
+        if re.search(r"\b" + re.escape(alias.lower()) + r"\b", raw_lower):
             return code
-        # أيضًا جرّب المطابقة التامة بدون مسافات (مثل "$" أو "₪")
-        if alias == raw_lower:
+        if folded_raw_spaced and re.search(
+            r"\b" + re.escape(fold_text(alias)) + r"\b", folded_raw_spaced
+        ):
+            return code
+        # مطابقة تامة بدون مسافات (مثل "$" أو "₪" أو رمز ISO)
+        if alias.lower() == raw_lower or alias_folded == raw_folded:
             return code
     return None
 
@@ -387,6 +424,18 @@ def _cash_filter(model):
     )
     # استبعاد العمليات المعلّقة (بانتظار الموافقة)
     return and_(base, or_(model.approval_status.is_(None), model.approval_status != "pending"))
+
+
+def effective_date_col(model):
+    """عمود التاريخ الفعّال: occurred_at إن وُجد وإلا created_at."""
+    from sqlalchemy import func
+
+    return func.coalesce(model.occurred_at, model.created_at)
+
+
+def cash_scope(model):
+    """اختصار موحّد لفلتر الصندوق (_cash_filter)."""
+    return _cash_filter(model)
 
 
 def _debt_filter(model):

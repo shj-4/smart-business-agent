@@ -322,10 +322,9 @@ async def invoice_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     db = SessionLocal()
     try:
-        overdue = mark_overdue_invoices(db)
-        # احتفظ بمعرّفات فقط لتجنّب detached instances بعد إغلاق الجلسة
         mark_overdue_invoices(db)
-        overdue_ids = [inv.id for inv in db.query(Invoice).filter(Invoice.status == 'overdue', Invoice.alerted == False).all()]
+        # احتفظ بمعرّفات فقط لتجنّب detached instances بعد إغلاق الجلسة
+        overdue_ids = [inv.id for inv in db.query(Invoice).filter(Invoice.status == 'overdue', Invoice.alerted.is_(False)).all()]
     except Exception:
         logger.exception("خطأ في جلب الفواتير المتأخرة")
         db.close()
@@ -934,7 +933,14 @@ async def proactive_check(context: ContextTypes.DEFAULT_TYPE) -> None:
                     continue
                 if _LAST_PROACTIVE_SENT.get(uid) == today:
                     continue
-                digest = build_proactive_digest(db, uid)
+                def _digest(_uid=uid):  # noqa: B023
+                    s = SessionLocal()
+                    try:
+                        return build_proactive_digest(s, _uid)
+                    finally:
+                        s.close()
+
+                digest = await asyncio.to_thread(_digest)
                 if digest is None:
                     continue
                 await context.bot.send_message(chat_id=uid, text=digest)

@@ -11,6 +11,7 @@
 from datetime import datetime
 from decimal import Decimal
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database.crud import mark_overdue_tasks
@@ -44,14 +45,15 @@ def _totals_between(
     المبالغ تُجمع في Python لأنها مخزّنة مشفّرة. يحترم report.view_all.
     """
     from app.database.crud import _sum_amounts_by_currency
+    from app.database.crud.common import _cash_filter as _bot_cash
     from app.database.crud.company import report_scope_ids
-
     q = db.query(Transaction).filter(
         Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
-        Transaction.created_at >= lo,
-        Transaction.created_at < hi,
+        _bot_cash(Transaction),
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) < hi,
     )
     return _sum_amounts_by_currency(q.all())
 
@@ -119,12 +121,14 @@ def _stored_totals_between(
 
     base = get_user_base_currency(db, user_id)
 
+    from app.database.crud.common import _cash_filter as _bot_cash
     q = db.query(Transaction).filter(
         Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
-        Transaction.created_at >= lo,
-        Transaction.created_at < hi,
+        _bot_cash(Transaction),
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) < hi,
     )
     stored: dict = {}
     for r in q.all():
@@ -152,12 +156,14 @@ def _live_totals_between(
     from app.database.crud.company import get_user_base_currency, report_scope_ids
 
     base = get_user_base_currency(db, user_id)
+    from app.database.crud.common import _cash_filter as _bot_cash
     q = db.query(Transaction).filter(
         Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
-        Transaction.created_at >= lo,
-        Transaction.created_at < hi,
+        _bot_cash(Transaction),
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) < hi,
     )
     live: dict = {}
     for r in q.all():
@@ -182,14 +188,15 @@ def _vat_totals_between(
     أول استخدام تقريري فعلي لأعمدة VAT المخزّنة منذ استخراجها (#24): محصَّلة
     (income) أو مدفوعة (expense) — بلا خلط عملات (تبقى كل عملة في سطرها).
     """
+    from app.database.crud.common import _cash_filter as _bot_cash
     from app.database.crud.company import report_scope_ids
-
     q = db.query(Transaction).filter(
         Transaction.telegram_user_id.in_(report_scope_ids(db, user_id)),
         Transaction.deleted_at.is_(None),
         Transaction.type == tx_type,
-        Transaction.created_at >= lo,
-        Transaction.created_at < hi,
+        _bot_cash(Transaction),
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= lo,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) < hi,
     )
     vat: dict = {}
     for r in q.all():

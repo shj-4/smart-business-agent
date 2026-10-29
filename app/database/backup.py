@@ -16,7 +16,6 @@
 import logging
 import os
 import sqlite3
-from datetime import datetime
 
 from app.database.db import DATABASE_URL
 from app.timeutil import now_local
@@ -156,15 +155,15 @@ def run_backup() -> bool:
 
 def _run_mysql_backup() -> bool:
     """نسخ MySQL عبر mysqldump إلى ملف .sql.gz (إن توفر الأداة)."""
+    import gzip
     import shutil
     import subprocess
+    from urllib.parse import unquote, urlparse
 
     if shutil.which("mysqldump") is None:
         _log("mysqldump غير متوفر — تخطي نسخ MySQL")
         return False
-    # تحذير: النسخ على نفس القرص فقط — يُنصح بنسخ خارجي (سحابة)
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    # لا تنشئ نسخة ثانية في نفس اليوم — واحدة يوميًا تكفي (كما في مسار SQLite)
     if _has_backup_for_today():
         _log("تُوجد نسخة احتياطية لنفس اليوم — تخطي التكرار اليومي")
         return True
@@ -172,26 +171,43 @@ def _run_mysql_backup() -> bool:
     backup_path = os.path.join(BACKUP_DIR, f"business_{timestamp}.sql.gz")
     # DATABASE_URL = mysql+pymysql://user:pass@host:port/db
     try:
-        # استخرج معاملات الاتصال ببساطة
-        url = DATABASE_URL.replace("mysql+pymysql://", "mysql://")
-        # استخدم mysqldump مع --single-transaction
+        parsed = urlparse(DATABASE_URL.replace("mysql+pymysql://", "mysql://"))
+        user = unquote(parsed.username or "")
+        password = unquote(parsed.password or "")
+        host = parsed.hostname or "localhost"
+        port = str(parsed.port or 3306)
+        db_name = (parsed.path or "").lstrip("/")
+        if not db_name:
+            _log("اسم قاعدة MySQL غير موجود في DATABASE_URL")
+            return False
+
+        env = dict(os.environ)
+        if password:
+            env["MYSQL_PWD"] = password  # avoid exposing password in process list
+
+        args = [
+            "mysqldump",
+            f"--host={host}",
+            f"--port={port}",
+            f"--user={user}",
+            "--single-transaction",
+            "--default-character-set=utf8mb4",
+            db_name,
+        ]
+        proc = subprocess.run(args, capture_output=True, env=env, timeout=120)
+        if proc.returncode != 0:
+            _log(f"فشل mysqldump: {proc.stderr.decode(errors='ignore')[:200]}")
+            return False
         with open(backup_path, "wb") as out:
-            proc = subprocess.run(
-                ["mysqldump", "--single-transaction", url],
-                stdout=out,
-                stderr=subprocess.PIPE,
-                timeout=120,
-            )
-            if proc.returncode != 0:
-                _log(f"فشل mysqldump: {proc.stderr.decode(errors='ignore')[:200]}")
-                try:
-                    os.remove(backup_path)
-                except OSError:
-                    pass
-                return False
+            with gzip.GzipFile(filename="", mode="wb", fileobj=out) as gz:
+                gz.write(proc.stdout)
         _log(f"تم نسخ MySQL: {backup_path}")
         _rotate_backups()
         return True
     except Exception as exc:
         _log(f"خطأ نسخ MySQL: {exc}")
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
         return False

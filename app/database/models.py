@@ -70,7 +70,7 @@ class Transaction(Base):
     #   - None       → حركة نقدية (P&L) — الافتراضي ما لم يُذكر "آجل/بالدين"
     # is_credit محفوظ للتوافق (True = قيد ذمة legacy).
     is_credit = Column(Boolean, nullable=True, default=None)
-    invoice_id = Column(Integer, ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True)
+    invoice_id = Column(Integer, ForeignKey("invoices.id", ondelete="SET NULL", use_alter=True, name="fk_transactions_invoice_id"), nullable=True)
     debt_direction = Column(String(16), nullable=True)  # charge | settlement | None
     ledger_entry = Column(String(16), nullable=True)  # charge | settlement | None (مرادف)
     ledger_kind = Column(String(16), nullable=True)  # charge | settlement | None (مرادف)
@@ -327,6 +327,7 @@ class CreditLimit(Base):
     limit_amount = Column(EncryptedNumeric(), nullable=False)
 
     alerted_status = Column(Integer, default=0, nullable=False)  # 0=لا تنبيه | 1=اقتراب | 2=تجاوز
+    last_alert_month = Column(String(7), default="", nullable=False, server_default="")
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)
 
@@ -349,9 +350,10 @@ class Invoice(Base):
     description = Column(EncryptedString(), nullable=True)  # وصف الفاتورة (مشفر)
     due_date = Column(DateTime, nullable=True)  # تاريخ الاستحقاق (UTC)
     status = Column(String(16), nullable=False, default="pending")  # pending|paid|overdue
+    direction = Column(String(16), nullable=False, default="payable", server_default="payable")  # payable|receivable
     paid_at = Column(DateTime, nullable=True)
     alerted = Column(Boolean, default=False, nullable=False)  # أُرسل تنبيه تأخر؟ (مرة واحدة)
-    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True)  # حركة السداد
+    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL", use_alter=True, name="fk_invoices_transaction_id"), nullable=True)  # حركة السداد
 
     created_at = Column(DateTime, default=now_utc)
     updated_at = Column(DateTime, nullable=True)

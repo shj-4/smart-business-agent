@@ -167,7 +167,7 @@ async def got_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await query.edit_message_text(f"✅ تم إنشاء شركة '{company.name}' بنجاح! أنت المالك الآن.")
     # إرسال القائمة الرئيسية كرسالة جديدة
     try:
-        await send_main_menu(query.message, context, text=f"أهلاً بك في {company.name} 👋")
+        await send_main_menu(query.message, context, text=f"أهلاً بك في {company.name} 👋", uid=telegram_user_id)
     except Exception:
         logger.exception("فشل إرسال القائمة بعد إنشاء الشركة")
     return ConversationHandler.END
@@ -233,7 +233,7 @@ async def got_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         from bot.menus import send_main_menu
 
         try:
-            await send_main_menu(update.message, context, text=f"أهلاً بك في {company.name} 👋")
+            await send_main_menu(update.message, context, text=f"أهلاً بك في {company.name} 👋", uid=telegram_user_id)
         except Exception:
             logger.exception("فشل إرسال القائمة بعد الانضمام")
         # إشعار للمالك — في PTB v20+ يجب استخدام context.bot
@@ -278,10 +278,9 @@ async def solo_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     from bot.menus import send_main_menu
 
     await query.edit_message_text("حسنًا، ستستمر كمستخدم فردي.\nيمكنك إنشاء شركة لاحقًا من الإعدادات.")
-    # مرر from_user الصحيح لـ send_main_menu لتحديد اللغة
+    # مرر uid صراحةً (PTB v20+ message غير قابل للتعديل)
     try:
-        query.message.from_user = query.from_user
-        await send_main_menu(query.message, context)
+        await send_main_menu(query.message, context, uid=query.from_user.id)
     except Exception:
         logger.exception("فشل إرسال القائمة للفردي")
     return ConversationHandler.END

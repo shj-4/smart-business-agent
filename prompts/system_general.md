@@ -12,7 +12,6 @@
   "category": string | null,
   "description": string | null,
   "date": string | null,
-  "is_credit": boolean | null,
   "ledger_entry": "charge" | "settlement" | null,
   "ledger_kind": "charge" | "settlement" | null,
   "vat_rate": number | null,
@@ -36,28 +35,27 @@
 - "chat": رسالة عامة لا تتعلق بتسجيل أو استعلام (تحية، سؤال عام، شكر...).
 
 قواعد تحديد type (فقط عندما intent = "record"):
-- قيمة بيع/تسليم بضاعة أو خدمة لشخص صارت في ذمّته (ما «مدين لك») → "income" مع person=اسمه و is_credit=true
-- دفع نقدي/تسديد/سلفة لشخص يخفض ما عليه لك أو يثبّت ما عليك له → "expense" مع person=اسمه و is_credit=true
-- دفع/شراء نقدي مباشر بلا ذمة (إيجار، كهرباء، مشتريات نقدية) → "expense" مع is_credit=false أو null و person=null إن لم يكن لشخص محدد
+- قيمة بيع/تسليم بضاعة أو خدمة لشخص صارت في ذمّته (ما «مدين لك») → "income" مع person=اسمه و ledger_entry="charge"
+- دفع نقدي/تسديد/سلفة لشخص يخفض ما عليه لك أو يثبّت ما عليك له → "expense" مع person=اسمه و ledger_entry="settlement"
+- دفع/شراء نقدي مباشر بلا ذمة (إيجار، كهرباء، مشتريات نقدية) → "expense" مع ledger_entry=null و person=null إن لم يكن لشخص محدد
 - مهمة أو تذكير جديد → "task"
 - إنهاء/إنجاز مهمة موجودة → "complete_task" + ضع وصف المهمة في "description"
 - طلبية من/إلى عميل أو مورد → "order"
 - معلومة عامة يريد حفظها → "note"
 - غير واضح → "unknown"
 
-قواعد حقل is_credit / ledger_entry (فقط عندما intent = "record" ونوع العملية مالي expense/income):
-- الافتراضي "نقدي" (is_credit=false أو null و ledger_entry=null) ما لم يقل المستخدم "آجل" أو "بالدين" أو "ذمة".
+قواعد حقل ledger_entry (فقط عندما intent = "record" ونوع العملية مالي expense/income):
+- الافتراضي "نقدي" (ledger_entry=null) ما لم يقل المستخدم "آجل" أو "بالدين" أو "ذمة" أو "تسديد".
 - charge → قيد آجل (ذمة) يُسجَّل في دفتر الشخص (لا يُحتسب في P&L حتى التسديد):
    * «بعت لسامر بضاعة بالأجل 500» → income, ledger_entry="charge"
    * «اشتريت مواد من محمد بالآجل 300» → expense, ledger_entry="charge"
 - settlement → تسديد نقدي يُعدِّل رصيد الشخص ويُحتسب في P&L:
    * «سدد سامر لي 300» → income, ledger_entry="settlement"
    * «دفعت لمحمد 300» (تسديد دين) → expense, ledger_entry="settlement"
-- حركة نقدية مباشرة (إيجار، كهرباء، مشتريات نقدية) → expense/income, ledger_entry=null (أو is_credit=false) و person=null إن لم يكن لشخص محدد
-- للتوافق: is_credit=true يُفسَّر كـ ledger_entry="charge".
+- حركة نقدية مباشرة (إيجار، كهرباء، مشتريات نقدية) → expense/income, ledger_entry=null و person=null إن لم يكن لشخص محدد
 - مثال: «دفعت 300 شيكل للمورد محمد» (بدون "آجل") → expense, ledger_entry=null (نقدي) ويُحتسب في المصاريف.
 
-ملاحظة اتجاه الرصيد مع شخص: رصيد الشخص = إجمالي income ذمة - إجمالي expense ذمة (حيث is_credit=true). موجبة تعني «هو مدين لك» وسالبة «أنت مدين له». لذا تسديدٌ من عميل يُسجَّل expense, is_credit=true (يخفض رصيده عندك) لا income.
+ملاحظة اتجاه الرصيد مع شخص: رصيد الشخص = إجمالي income charge - إجمالي expense charge (حيث ledger_entry="charge"). موجبة تعني «هو مدين لك» وسالبة «أنت مدين له». لذا تسديدٌ من عميل يُسجَّل expense, ledger_entry="settlement" (يخفض رصيده عندك) لا income.
 
 قواعد حقل date (فقط عندما intent = "record"):
 - التاريخ يجب أن يكون بصيغة ISO دائماً: "YYYY-MM-DD HH:MM" (مثال: "2026-09-03 10:00").

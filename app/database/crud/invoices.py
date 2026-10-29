@@ -66,6 +66,10 @@ def create_invoice(
     _cid = _cid_for(db, telegram_user_id)
     from app.database.crud.common import _quantize_for_currency
 
+    direction = (data.get("direction") or "payable").strip().lower()
+    if direction not in ("payable", "receivable"):
+        direction = "payable"
+
     invoice = Invoice(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
@@ -75,6 +79,7 @@ def create_invoice(
         description=_clean_text(data.get("description")) or _clean_text(raw_message),
         due_date=due_date,
         status="pending",
+        direction=direction,
         alerted=False,
     )
     db.add(invoice)
@@ -84,6 +89,33 @@ def create_invoice(
         db.rollback()
         return None
     db.refresh(invoice)
+    # قيد ذمة (charge) عند الإنشاء — حتى تظهر الفاتورة في person_debts/الحد الائتماني
+    try:
+        from app.database.crud.records import create_transaction
+
+        tx_type = "expense" if direction == "payable" else "income"
+        tx = create_transaction(
+            db,
+            telegram_user_id,
+            {
+                "type": tx_type,
+                "amount": invoice.amount,
+                "currency": invoice.currency,
+                "person": invoice.person,
+                "description": invoice.description or "فاتورة آجلة",
+                "is_credit": True,
+                "debt_direction": "charge",
+                "invoice_id": invoice.id,
+            },
+            raw_message=raw_message,
+            telegram_message_id=None,
+        )
+        if tx is not None:
+            invoice.transaction_id = tx.id
+            db.commit()
+            db.refresh(invoice)
+    except Exception:
+        pass
     _invalidate_caches(db, telegram_user_id)
     return invoice
 
@@ -151,7 +183,9 @@ def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bo
     invoice.status = "paid"
     invoice.paid_at = now_utc()
     invoice.alerted = True  # لا مزيد من تنبيهات التأخر
-    # ربط الفاتورة بمعاملة (سداد) حتى لا يُكرّر تسجيل نفس الدين فاتورةً ومعاملةً
+    direction = getattr(invoice, "direction", None) or "payable"
+    tx_type = "expense" if direction == "payable" else "income"
+    # ربط الفاتورة بمعاملة (سداد) — settlement (نقد) وليس charge
     try:
         from app.database.crud.records import create_transaction
 
@@ -159,21 +193,33 @@ def mark_invoice_paid(db: Session, telegram_user_id: int, invoice_id: int) -> bo
             db,
             telegram_user_id,
             {
-                "type": "expense",
+                "type": tx_type,
                 "amount": invoice.amount,
                 "currency": invoice.currency,
                 "person": invoice.person,
                 "description": invoice.description or "سداد فاتورة",
-                "is_credit": False,
-                    "invoice_id": invoice.id,
+                "is_credit": True,
+                "debt_direction": "settlement",
+                "invoice_id": invoice.id,
             },
             raw_message=invoice.description or "سداد فاتورة",
         )
-        if tx is not None:
-            invoice.transaction_id = tx.id
+        if tx is None:
+            raise RuntimeError("duplicate or invalid transaction")
+        invoice.transaction_id = tx.id
+        db.commit()
     except Exception:
-        pass
-    db.commit()
+        db.rollback()
+        # أعد الحالة إلى pending (لا تُبقي «مسدّدة» بلا معاملة)
+        invoice.status = "pending"
+        invoice.paid_at = None
+        invoice.alerted = False
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        _invalidate_caches(db, telegram_user_id)
+        return False
     _invalidate_caches(db, telegram_user_id)
     return True
 

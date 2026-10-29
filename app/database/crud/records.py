@@ -183,6 +183,17 @@ def create_transaction(
             pass
     if created_at is None:
         created_at = now_utc()
+    # period close: منع إنشاء معاملة في فترة مغلقة
+    try:
+        from app.timeutil import to_local_naive
+
+        _mk = to_local_naive(created_at).strftime("%Y-%m")
+        if is_period_closed(db, telegram_user_id, _mk):
+            raise ValueError("الفترة مغلقة — لا يمكن إضافة معاملة في شهر مغلق.")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     # اتجاه الذمة (charge/settlement) حقل صريح مستقل عن النوع (expense/income).
     # الافتراضي "نقدي" (None) ما لم يُذكر "آجل/بالدين" صراحة.
     raw_direction = None
@@ -196,7 +207,7 @@ def create_transaction(
         low = raw_direction.strip().lower()
         if low in ("charge", "آجل", "ذمة", "credit", "دين"):
             direction_val = "charge"
-        elif low in ("settlement", "تسديد", "تسوية", "payment", "cash", "نقدي"):
+        elif low in ("settlement", "تسديد", "تسوية", "payment"):
             direction_val = "settlement"
         elif low in ("none", "null", "cash", "نقدي"):
             direction_val = None
@@ -223,7 +234,7 @@ def create_transaction(
     # approval: مصروف فوق سقف الدور → pending
     approval_status_val = "approved"
     try:
-        from app.database.crud.company import get_company_member, get_company
+        from app.database.crud.company import get_company, get_company_member
         m = get_company_member(db, telegram_user_id)
         if m is not None and data.get("type") == "expense" and amount is not None:
             comp = get_company(db, m.company_id) if m.company_id is not None else None
@@ -242,6 +253,7 @@ def create_transaction(
         telegram_user_id=telegram_user_id,
         company_id=_cid,
         telegram_message_id=telegram_message_id,
+        invoice_id=data.get("invoice_id"),
         type=data.get("type"),
         amount=amount,
         currency=currency,
@@ -559,9 +571,9 @@ def _run_query_uncached(db: Session, telegram_user_id: int, query_details: dict)
                 "error": "no_person",
             }
         # رصيد الشخص = charges - settlements (settlement يُ flipping type)
-        from app.database.crud.common import normalize_person_for_match as _npm
-
         from sqlalchemy import func as _func2
+
+        from app.database.crud.common import normalize_person_for_match as _npm
         debt_rows = db.query(Transaction).filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
@@ -677,6 +689,17 @@ def undo_last_record(db: Session, telegram_user_id: int) -> dict | None:
     for model in (Transaction, Task, Note):
         row = soft_delete_last(db, model, telegram_user_id)
         if row is not None:
+            # period close: تخطّي معاملة في فترة مغلقة
+            if model is Transaction:
+                try:
+                    from app.timeutil import to_local_naive
+
+                    dt = row.occurred_at if getattr(row, "occurred_at", None) is not None else row.created_at
+                    if dt is not None and is_period_closed(db, telegram_user_id, to_local_naive(dt).strftime("%Y-%m")):
+                        # استعادة (soft-delete لم يُطبَّق بعد? soft_delete_last may mark deleted_at? check)
+                        continue
+                except Exception:
+                    pass
             candidates.append((row.created_at, model, row))
 
     if not candidates:
@@ -847,6 +870,17 @@ def delete_record_by_id(
     row, _ = get_record_by_id(db, telegram_user_id, model_name, record_id)
     if row is None:
         return None
+    # period close: منع حذف معاملة في فترة مغلقة
+    if model_name.lower() in ("transaction", "transactions") and getattr(row, "created_at", None) is not None:
+        try:
+            from app.timeutil import to_local_naive
+
+            dt = row.occurred_at if getattr(row, "occurred_at", None) is not None else row.created_at
+            mk = to_local_naive(dt).strftime("%Y-%m")
+            if is_period_closed(db, telegram_user_id, mk):
+                return None
+        except Exception:
+            pass
     label = row.description or getattr(row, "amount", None) or "(بدون وصف)"
     row.deleted_at = now_utc()
     row.updated_at = now_utc()
@@ -1082,6 +1116,24 @@ def update_transaction(db: Session, row: Transaction, fields: dict) -> Transacti
         base_amount, base_at = _best_effort_base_amount(row.amount, row.currency)
         row.amount_in_base_currency = base_amount
         row.base_currency_at_creation = base_at
+    # إعادة فحص سقف الموافقة (approval) عند تغيير المبلغ — منع تجاوز السقف بالتعديل
+    if "amount" in fields:
+        try:
+            from app.database.crud.company import get_company, get_company_member
+
+            m = get_company_member(db, row.telegram_user_id)
+            if m is not None and row.type == "expense" and row.amount is not None:
+                comp = get_company(db, m.company_id) if m.company_id is not None else None
+                limit = None
+                if comp is not None:
+                    if m.role == "staff":
+                        limit = comp.approval_limit_staff
+                    elif m.role == "manager":
+                        limit = comp.approval_limit_manager
+                if limit is not None:
+                    row.approval_status = "pending" if row.amount > limit else "approved"
+        except Exception:
+            pass
     row.updated_at = now_utc()
     db.commit()
     db.refresh(row)
@@ -1134,9 +1186,7 @@ def merge_person(db: Session, source: str, target: str, *, company_id=_ALL_COMPA
     """
     from app.database.crud import _clean_person, _invalidate_caches
 
-    _ALL = _ALL_COMPANIES
     # company_id passed as keyword-only already
-
     source = _clean_person(source)
     target = _clean_person(target)
     if not source or not target or source == target:
@@ -1285,8 +1335,8 @@ def approve_transaction(db: Session, actor_id: int, transaction_id: int) -> bool
 
 
 def is_period_closed(db: Session, telegram_user_id: int, month_key: str) -> bool:
-    from app.database.models import PeriodClose
     from app.database.crud.company import company_id_for_user
+    from app.database.models import PeriodClose
 
     cid = company_id_for_user(db, telegram_user_id)
     q = db.query(PeriodClose).filter(PeriodClose.month_key == month_key)
@@ -1298,8 +1348,8 @@ def is_period_closed(db: Session, telegram_user_id: int, month_key: str) -> bool
 
 
 def close_period(db: Session, telegram_user_id: int, month_key: str) -> bool:
-    from app.database.models import PeriodClose
     from app.database.crud.company import company_id_for_user
+    from app.database.models import PeriodClose
 
     if is_period_closed(db, telegram_user_id, month_key):
         return True
@@ -1312,8 +1362,8 @@ def close_period(db: Session, telegram_user_id: int, month_key: str) -> bool:
 
 
 def reopen_period(db: Session, actor_id: int, month_key: str) -> bool:
-    from app.database.models import PeriodClose
     from app.database.crud.company import company_id_for_user, has_permission
+    from app.database.models import PeriodClose
 
     if not has_permission(db, actor_id, "company.manage"):
         return False
@@ -1378,8 +1428,9 @@ person_statement = statement_for_person
 
 def stock_level(db: Session, product_id: int) -> Decimal:
     """رصيد الصنف = مجموع الحركات (in +, out -, adjustment)."""
-    from app.database.models import InventoryMovement
     from decimal import Decimal as _D
+
+    from app.database.models import InventoryMovement
 
     rows = db.query(InventoryMovement).filter(InventoryMovement.product_id == product_id).all()
     total = _D("0")

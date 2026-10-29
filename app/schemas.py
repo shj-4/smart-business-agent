@@ -126,9 +126,6 @@ class AnalysisResultSchema(BaseModel):
     reply: str | None = None
     vat_rate: float | None = None
     vat_amount: float | None = None
-    ledger_entry: str | None = None
-    debt_direction: str | None = None
-    ledger_kind: str | None = None
     priority: str | None = None
     recurrence: str | None = None
     missing_fields: list[str] = Field(default_factory=list)

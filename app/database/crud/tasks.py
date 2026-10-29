@@ -457,7 +457,8 @@ def update_task(db: Session, row: Task, fields: dict[str, str]) -> Task:
                 row.priority = _normalize_priority(fields[key])
     if "due_date" in fields and fields["due_date"] is not None:
         new_due = row.due_date
-        if new_due is None or new_due > now_utc():
+        # لا نُعيد مهمة منتهية (done) إلى pending عند تعديل موعد — فقط المعلّقة/المتأخرة
+        if row.status != "done" and (new_due is None or new_due > now_utc()):
             row.status = "pending"
             if hasattr(row, "reminder_sent"):
                 row.reminder_sent = False

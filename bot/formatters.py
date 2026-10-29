@@ -12,7 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from app.database.models import Invoice, Note
 from app.formatting import fmt_amount as _fmt_amount
 from app.formatting import totals_line as _totals_line
-from bot.icons import ERROR, EXPENSE, HOME, INCOME, SUCCESS, TASK, WARNING
+from bot.icons import ERROR, EXPENSE, INCOME, SUCCESS, TASK, WARNING
 
 TYPE_NAMES = {
     "expense": "مصروف",
@@ -336,21 +336,17 @@ def _unified_total_line(result: dict, metric: str, unified: dict | None = None) 
 
 
 def _build_confirm_text(data: dict) -> str:
-    lines = ["هل تريد حفظ هذا السجل؟\n"]
-    if data.get("type"):
-        lines.append(f"النوع: {TYPE_NAMES.get(data['type'], data['type'])}")
-    if data.get("amount") is not None:
-        lines.append(f"المبلغ: {data['amount']}")
-    if data.get("currency"):
-        lines.append(f"العملة: {data['currency']}")
-    if data.get("person"):
-        lines.append(f"الشخص: {data['person']}")
-    if data.get("category"):
-        lines.append(f"التصنيف: {data['category']}")
-    if data.get("description"):
-        lines.append(f"الوصف: {data['description']}")
-    if data.get("date"):
-        lines.append(f"الموعد: {data['date']}")
+    icon = {"expense": EXPENSE, "income": INCOME, "task": TASK}.get(data.get("type"), "📝")
+    head = f"{icon} {TYPE_NAMES.get(data.get('type'), '')}"
+    money = " ".join(str(x) for x in (data.get("amount"), data.get("currency")) if x)
+    who = data.get("person")
+    line2 = " · ".join(x for x in (money, who) if x)
+    lines = [head]
+    if line2:
+        lines.append(line2)
+    for key in ("description", "category", "date"):
+        if data.get(key):
+            lines.append(str(data[key]))
     return "\n".join(lines)
 
 
@@ -360,31 +356,13 @@ def _build_confirm_keyboard(data: dict | None = None) -> InlineKeyboardMarkup:
     كان الزر يظهر لكل الأنواع ويضبط pending_missing=["amount"] دائمًا، فيظهر
     لمهمة/طلبية سؤال غير منطقي «ما هو المبلغ؟». الآن يُخفى لغير المالية.
     """
-    rows = [
-        [
-            InlineKeyboardButton(f"{SUCCESS} تأكيد", callback_data="confirm:yes"),
-            InlineKeyboardButton("✏️ تعديل", callback_data="confirm:edit"),
-        ],
-    ]
-    # إظهار «تكرار» فقط للمصاريف/الإيرادات (التي يُعاد فيها المبلغ)
+    rows = [[("✔️ حفظ", "confirm:yes"), ("✏️ تعديل", "confirm:edit")]]
+    # convert labels to InlineKeyboardButton
+    rows = [[InlineKeyboardButton(a, callback_data=b) for a, b in r] for r in rows]
     if data is None or data.get("type") in ("expense", "income"):
-        rows.append(
-            [
-                InlineKeyboardButton("🔁 تكرار العملية", callback_data="confirm:repeat"),
-                InlineKeyboardButton(f"{HOME} القائمة الرئيسية", callback_data="menu:main"),
-            ]
-        )
+        rows.append([InlineKeyboardButton("🔁 تكرار", callback_data="confirm:repeat"), InlineKeyboardButton("✖️ إلغاء", callback_data="confirm:no")])
     else:
-        rows.append(
-            [
-                InlineKeyboardButton(f"{HOME} القائمة الرئيسية", callback_data="menu:main"),
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton("❌ إلغاء", callback_data="confirm:no"),
-        ]
-    )
+        rows.append([InlineKeyboardButton("✖️ إلغاء", callback_data="confirm:no")])
     return InlineKeyboardMarkup(rows)
 
 

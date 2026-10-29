@@ -155,7 +155,12 @@ def budget_usage(db: Session, budget: Budget) -> dict:
     - scope=currency/category → نقدي فقط (P&L) — الذمم لا تُحتسب
     - scope=person → ذمم فقط — النقدي لشخص لا يُحتسب في ميزانية الشخص
     """
-    from app.database.crud.common import _cash_filter, _charge_filter, _debt_filter, normalize_person_for_match
+    from app.database.crud.common import (
+        _cash_filter,
+        _charge_filter,
+        effective_date_col,
+        normalize_person_for_match,
+    )
     from app.database.crud.company import get_user_base_currency
 
 
@@ -168,7 +173,7 @@ def budget_usage(db: Session, budget: Budget) -> dict:
         company_filter(db, budget.telegram_user_id, Transaction),
         Transaction.deleted_at.is_(None),
         Transaction.type == "expense",
-        Transaction.created_at >= start,
+        effective_date_col(Transaction) >= start,
     )
     if budget.scope == "currency":
         q = q.filter(Transaction.currency == budget.currency, _cash_filter(Transaction))
@@ -332,10 +337,9 @@ def person_debts(db: Session, telegram_user_id: int) -> list[dict]:
 
 def person_debts_aging(db: Session, telegram_user_id: int) -> list[dict]:
     """أعمار الديون: توزيع رصيد كل شخص على شرائح 0-30/31-60/61-90/+90 يوم."""
-    from datetime import datetime, timedelta
     from app.database.crud.common import _debt_filter, normalize_person_for_match
     from app.database.crud.company import report_company_filter
-    from app.timeutil import now_utc, to_local_naive
+    from app.timeutil import now_utc
 
     now = now_utc()
     rows = (

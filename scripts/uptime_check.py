@@ -24,7 +24,8 @@ LOG_FILE = os.path.join(ROOT, "logs", "uptime.log")
 API_BASE = "http://127.0.0.1:8000"
 
 def _dashboard_auth_header() -> str | None:
-    import base64, os
+    import base64
+    import os
     user = os.environ.get("DASHBOARD_USERNAME")
     pw = os.environ.get("DASHBOARD_PASSWORD")
     if not user or not pw:

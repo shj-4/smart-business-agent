@@ -262,7 +262,7 @@ def user_stats(db: Session, telegram_user_id: int) -> dict:
         .filter(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
-            Transaction.created_at >= cutoff,
+            func.coalesce(Transaction.occurred_at, Transaction.created_at) >= cutoff,
         )
         .all()
     ):
@@ -415,6 +415,7 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
         local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     )
     from app.database.crud.common import _cash_filter as _cf_kpi
+    from app.database.crud.common import effective_date_col
 
     if _cid_kpi_val is not None:
         cat_rows = (
@@ -423,7 +424,7 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
                 Transaction.company_id == _cid_kpi_val,
                 Transaction.deleted_at.is_(None),
                 Transaction.type == "expense",
-                Transaction.created_at >= month_start,
+                effective_date_col(Transaction) >= month_start,
                 _cf_kpi(Transaction),
             )
             .all()
@@ -435,7 +436,7 @@ def kpi_dashboard(db: Session, telegram_user_id: int) -> dict:
                 Transaction.telegram_user_id.in_(ids),
                 Transaction.deleted_at.is_(None),
                 Transaction.type == "expense",
-                Transaction.created_at >= month_start,
+                effective_date_col(Transaction) >= month_start,
                 _cf_kpi(Transaction),
             )
             .all()

@@ -58,10 +58,7 @@ def build_menu(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 
 # ---------- القوائم (تصميم صوتي) ----------
 
-MAIN_MENU_TEXT = (
-    "القائمة الرئيسية — اختر ما تريد:\n"
-    "أو اكتب مباشرة أي عملية أو سؤال (مثل: 300 شيكل لمحمد مقابل مواد)."
-)
+MAIN_MENU_TEXT = "القائمة الرئيسية"
 
 MAIN_MENU = [
     [(f"{NEW} تسجيل عملية", "menu:record")],
@@ -81,11 +78,11 @@ RECORD_MENU = [
 ]
 
 RECORD_HINTS = {
-    "expense": f"{EXPENSE} مصروف — أرسل التفاصيل.\nمثال: سددت 300 شيكل لمحمد (دفعة/تسديد دين)",
-    "income": f"{INCOME} إيراد — أرسل التفاصيل.\nمثال: بعت بضاعة بـ 500 دولار لأحمد (آجل — يصبح مدينًا لك)",
-    "order": "🛒 طلبية — أرسل التفاصيل.\nمثال: طلبية 5 صناديق من مورّد الرياض",
-    "note": "📝 ملاحظة — أرسل التفاصيل.\nمثال: ملاحظة: سيأتي العمال يوم السبت",
-    "task": f"{TASK} مهمة جديدة — أرسل التفاصيل.\nمثال: مهمة الاتصال بسامر غدًا الساعة 10",
+    "expense": f"{EXPENSE} مصروف — اكتب التفاصيل",
+    "income":  f"{INCOME} إيراد — اكتب التفاصيل",
+    "order":   "🛒 طلبية — اكتب التفاصيل",
+    "note":    "📝 ملاحظة — اكتب التفاصيل",
+    "task":    f"{TASK} مهمة — اكتب التفاصيل",
 }
 
 TASK_STATUS_MENU = [
@@ -139,16 +136,14 @@ SETTINGS_DOCS = {
 }
 
 TOOLS_MENU = [
-    # صفّان في كل سطر — أسلس بصريًا ويختصر التمرير بنصف طول العمود الواحد
-    [("✏️ تعديل آخر سجل", "el:last"), ("🕘 آخر العمليات", "his:p:1")],
-    [("🔍 بحث", "sb:start"), (f"{EXPENSE} الميزانيات", "bg:list")],
-    [("💳 الذمم الموحّدة", "tool:finance"), ("💳 الديون", "tool:debts")],
-    [("🧾 الفواتير", "tool:invoices"), ("🛒 طلبياتي", "tool:orders")],
-    [(f"{WARNING} الحدود", "tool:credit"), ("🧭 المؤشرات", "tool:kpi")],
-    [("📈 الرسم", "tool:chart"), ("🧾 تقرير شامل", "tool:summary")],
-    [("📄 تصدير PDF", "tool:pdf"), ("📦 تصدير Excel", "ex:menu")],
-    [("💱 تحويل عملة", "tool:convert"), ("🏢 مساحتي", "ws:status")],
-    [("🎁 البونس والنقاط", "bn:overview"), (f"{BACK} رجوع", "menu:main")],
+    [("✏️ تعديل آخر سجل", "el:last"), ("🕘 السجل", "his:p:1")],
+    [("🔍 بحث", "sb:start"), ("💸 الميزانيات", "bg:list")],
+    [("💳 الذمم", "tool:finance"), ("🧾 الفواتير", "tool:invoices")],
+    [("🛒 الطلبيات", "tool:orders"), ("⚠️ الحدود", "tool:credit")],
+    [("📈 رسم", "tool:chart"), ("🧭 مؤشرات", "tool:kpi")],
+    [("📦 Excel", "ex:menu"), ("📄 PDF", "tool:pdf")],
+    [("💱 تحويل", "tool:convert"), ("🎁 بونس", "bn:overview")],
+    [("🏢 المساحة", "ws:status"), (f"{BACK} رجوع", "menu:main")],
 ]
 
 EXPORT_MENU = [
@@ -184,12 +179,17 @@ def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
     try:
         db = SessionLocal()
         try:
+            from app.database.crud.workspace import accessible_user_ids as _acc
             from app.database.models import Task
 
+            try:
+                uids = _acc(db, uid) if uid is not None else [uid]
+            except Exception:
+                uids = [uid] if uid is not None else []
             overdue = (
-                db.query(Task.telegram_user_id)
+                db.query(Task)
                 .filter(
-                    Task.telegram_user_id == uid,
+                    Task.telegram_user_id.in_(uids),
                     Task.status == "overdue",
                     Task.deleted_at.is_(None),
                 )
@@ -198,9 +198,9 @@ def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
             if overdue:
                 return f"{label} ({overdue} {WARNING} متأخرة)"
             pending = (
-                db.query(Task.telegram_user_id)
+                db.query(Task)
                 .filter(
-                    Task.telegram_user_id == uid,
+                    Task.telegram_user_id.in_(uids),
                     Task.status == "pending",
                     Task.deleted_at.is_(None),
                 )
@@ -262,29 +262,28 @@ def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 async def send_main_menu(
-    message: Message, context: ContextTypes.DEFAULT_TYPE, text: str = ""
+    message: Message, context: ContextTypes.DEFAULT_TYPE, text: str = "", uid: int | None = None
 ) -> None:
     """يرسل القائمة الرئيسية كرسالة جديدة (لأوامر /start و /menu)."""
     _clear_all_pending(context)
-    # إصلاح لغة القائمة: جرّب message.from_user أولاً، ثم effective_user من context
-    # إن كانت الرسالة من query (callback) فـ from_user قد يكون None، نستخدم
-    # البديل من context أو من message نفسه
-    uid = None
-    from_user = getattr(message, "from_user", None)
-    if from_user and getattr(from_user, "id", None):
-        uid = from_user.id
-    else:
-        # محاولة من context (قد يحمل user_data مع _user_id)
-        try:
-            if hasattr(context, "_user_id") and context._user_id:
-                uid = context._user_id
-            elif getattr(context, "user_data", None) and isinstance(context.user_data, dict):
-                # لا يوجد user_id هنا، جرّب من message.chat
-                chat = getattr(message, "chat", None)
-                if chat and getattr(chat, "id", None):
-                    uid = chat.id
-        except Exception:
-            pass
+    # uid can be passed explicitly (required for callback queries where
+    # message.from_user is the bot, not the user).
+    if uid is None:
+        from_user = getattr(message, "from_user", None)
+        if from_user and getattr(from_user, "id", None):
+            uid = from_user.id
+        else:
+            # محاولة من context (قد يحمل user_data مع _user_id)
+            try:
+                if hasattr(context, "_user_id") and context._user_id:
+                    uid = context._user_id
+                elif getattr(context, "user_data", None) and isinstance(context.user_data, dict):
+                    # لا يوجد user_id هنا، جرّب من message.chat
+                    chat = getattr(message, "chat", None)
+                    if chat and getattr(chat, "id", None):
+                        uid = chat.id
+            except Exception:
+                pass
     lang = user_lang(uid) if uid else "ar"
     body = text or t("main_title", lang)
     from_user = getattr(message, "from_user", None)
@@ -297,11 +296,11 @@ async def send_main_menu(
 # ---------- رصف القوائم إداريًا ----------
 
 PAGES = {
-    "record": ("تسجيل عملية — ماذا تريد أن تسجّل؟", RECORD_MENU),
-    "reports": ("التقارير — اختر الفترة:", REPORT_PERIODS),
-    "tasks": ("مهامي — اختر الحالة:", TASK_STATUS_MENU),
-    "tools": ("🧰 صندوق الأدوات ✨ — كل شيء بضغطتين", TOOLS_MENU),
-    "settings": ("الإعدادات:", SETTINGS_MENU),
+    "record": ("تسجيل", RECORD_MENU),
+    "reports": ("التقارير", REPORT_PERIODS),
+    "tasks": ("المهام", TASK_STATUS_MENU),
+    "tools": ("🧰 الأدوات", TOOLS_MENU),
+    "settings": ("الإعدادات", SETTINGS_MENU),
 }
 
 
@@ -336,7 +335,7 @@ async def _handle_record(
     _clear_all_pending(context)
     context.user_data["record_seed_type"] = rtype
     await query.edit_message_text(
-        f"{RECORD_HINTS[rtype]}\n\n(أرسل /cancel لإلغاء)",
+        RECORD_HINTS[rtype],
         reply_markup=_home_keyboard(),
     )
 
@@ -1021,9 +1020,11 @@ async def _handle_tool_summary(
         # استخدم فلتر الشركة/النطاق بدل accessible_user_ids العام
         # للعدّ استخدم company_filter المتوافق مع report
         # لكن للاختصار نحافظ على in_(ids) حيث ids هو نطاق التقرير الصحيح
+        from app.database.crud.common import _cash_filter as _menu_cash
         filters_tx = (
             report_company_filter(db, uid, Transaction),
             Transaction.deleted_at.is_(None),
+            _menu_cash(Transaction),
         )
         # العدّ عبر report_company_filter مباشرة لضمان العزل
         # نحتاج base count بنفس الفلتر؛ in_(ids) كان يتجاوز view_all
@@ -1062,7 +1063,7 @@ async def _handle_tool_summary(
             Transaction.type,
             Transaction.currency,
             Transaction.amount,
-        ).filter(*filters_tx, Transaction.created_at >= start).all():
+        ).filter(*filters_tx, func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start).all():
             c = (currency or "").upper()
             entry = agg.setdefault(
                 c, {"expense": Decimal("0"), "income": Decimal("0")}
@@ -1809,7 +1810,7 @@ async def _team_invites(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
             lines.append(f"{status} #{inv.id} {inv.role} — {inv.uses}/{inv.max_uses} — ينتهي {exp} — `{inv.token[:12]}...`")
             rows.append([(f"🚫 إلغاء #{inv.id}", f"team:revoke:{inv.id}")])
         rows.append([(f"{BACK} رجوع", "team:menu")])
-        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows), parse_mode="Markdown")
+        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
     finally:
         db.close()
 

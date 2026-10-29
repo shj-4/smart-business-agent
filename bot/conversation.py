@@ -58,6 +58,8 @@ from bot.ratelimit import (
     is_user_allowed,
 )
 
+CANCEL_KB = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ إلغاء", callback_data="confirm:no")]])
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,7 +132,9 @@ def _confirm_value_preview(result: dict, field: str) -> str:
     return val or "(فارغ)"
 
 
-def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | None]:
+def apply_confirm_edit(
+    result: dict, field: str, raw: str, telegram_user_id: int | None = None, update=None
+) -> tuple[dict, str | None]:
     """يطبّق قيمة نصّية على حقل في نتائج التأكيد. يُعيد (result, خطأ|None)."""
     value = raw.strip()
     if field == "amount":
@@ -177,16 +181,23 @@ def apply_confirm_edit(result: dict, field: str, raw: str) -> tuple[dict, str | 
         # نص حر (غدًا/بكرة/بعد يومين...) — يُفسَّر بالذكاء الاصطناعي مثل مسار
         # الإدخال الأصلي بدل إضاعته صامتًا (كان create_* يستدعي parse_date_local
         # مباشرة على النص الخام فتضيع قيمة الموعد بلا تنبيه).
-        try:
-            from app.database.crud.common import has_ai_consent
-            from app.database.db import SessionLocal as _SLi
-            _dbi = _SLi()
-            try:
-                _consent_i = has_ai_consent(_dbi, update.effective_user.id) if getattr(update, "effective_user", None) else True
-            finally:
-                _dbi.close()
-        except Exception:
+        _uid = telegram_user_id
+        if _uid is None and update is not None:
+            _u = getattr(update, "effective_user", None)
+            _uid = getattr(_u, "id", None) if _u is not None else None
+        if _uid is None:
             _consent_i = True
+        else:
+            try:
+                from app.database.crud.common import has_ai_consent
+                from app.database.db import SessionLocal as _SLi
+                _dbi = _SLi()
+                try:
+                    _consent_i = has_ai_consent(_dbi, _uid)
+                finally:
+                    _dbi.close()
+            except Exception:
+                _consent_i = False
         if _consent_i:
             import app.ai_service as ai_service
 
@@ -452,7 +463,7 @@ def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _clear_confirm_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """يمسح حالة شاشة التأكيد المعلّقة."""
-    for key in ("confirm_result", "confirm_raw", "confirm_message_id", "confirm_editing_field"):
+    for key in ("confirm_result", "confirm_raw", "confirm_message_id", "confirm_editing_field", "_confirm_saved"):
         context.user_data.pop(key, None)
 
 
@@ -622,18 +633,11 @@ def missing_fields_for(result: dict) -> list[str]:
     return missing
 
 
+_PROMPTS = {"amount": "المبلغ؟", "currency": "العملة؟", "person": "الشخص؟",
+            "date": "الموعد؟", "description": "الوصف؟"}
+
 def ask_for_field_prompt(data_type: str, field: str) -> str:
-    label = FIELD_LABELS.get(field, field)
-    type_label = TYPE_NAMES.get(data_type, data_type)
-    if field == "amount":
-        return f"عملية {type_label}: ما هو المبلغ؟ (مثال: 300 أو 300 شيكل)"
-    if field == "currency":
-        return "ما هي العملة؟ (مثال: شيكل، دولار، دينار)"
-    if field == "person":
-        return "ما اسم الشخص (المورد/العميل)؟ (مثال: محمد)"
-    if field == "date":
-        return "ما هو الموعد؟ (مثال: غدًا الساعة 10)"
-    return f"أرسل {label} من فضلك."
+    return _PROMPTS.get(field, f"{FIELD_LABELS.get(field, field)}؟")
 
 
 def fill_field_from_reply(partial: dict, reply_result: dict, field: str) -> None:
@@ -687,15 +691,8 @@ async def _start_collect(
     context.user_data["pending_message_id"] = msg_id
 
     first = missing[0]
-    reply = (
-        f"سجّلت لك {TYPE_NAMES.get(data_type, data_type)} لكن تنقصه بيانات:\n"
-        f"• {FIELD_LABELS.get(first, first)}"
-    )
-    if len(missing) > 1:
-        reply += " (وبعدها أرجو إكمال بقية البنود)"
-    reply += "\n" + ask_for_field_prompt(data_type, first)
-    reply += "\n\n(لإلغاء الأمر أرسل /cancel)"
-    await update.message.reply_text(reply)
+    reply = ask_for_field_prompt(data_type, first)
+    await update.message.reply_text(reply, reply_markup=CANCEL_KB)
 
 
 def _send_confirm(
@@ -950,7 +947,8 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     from app.schemas import normalize_analysis as _norm
                     low = (text or "").lower()
                     # كشف استعلام
-                    if any(w in low for w in ("كم", "ما", "كم صرفت", "كم استلمت", "كم دفعت", "show", "total")):
+                    _words = low.split()
+                    if any(w in _words for w in ("كم", "ما")) or any(w in low for w in ("كم صرفت", "كم استلمت", "كم دفعت", "show", "total")):
                         metric = "total_expenses"
                         if any(w in low for w in ("استلم", "إيراد", "دخل", "income")):
                             metric = "total_income"
@@ -1450,11 +1448,10 @@ async def _confirm_resolve(
         _record_feedback(context, source="reject_confirm", telegram_user_id=query.from_user.id)
         await query.edit_message_text("تم الإلغاء. لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD)
     else:
-        if context.user_data.get("_confirm_saved"):
-            await query.edit_message_text("تم الحفظ مسبقًا.", reply_markup=MAIN_HOME_KEYBOARD)
-            _clear_all_pending(context)
-            return ConversationHandler.END
-        context.user_data["_confirm_saved"] = True
+        # لا نعتمد على فلاغ في الجلسة لمنع التكرار — idempotency في DB
+        # (telegram_message_id) هي الحارس (create_transaction/create_task/create_note
+        # تعيد None عند التكرار). فلاغ "_confirm_saved" القديم (إن وُجد في ذاكرة
+        # جلسة سابقة) يُزال أدناه عبر _clear_confirm_state.
         result = context.user_data.get("confirm_result")
         raw = context.user_data.get("confirm_raw")
         msg_id = context.user_data.get("confirm_message_id")
@@ -1557,10 +1554,7 @@ async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # رسالة حسب الحقل الناقص
     first_missing = missing[0] if missing else "amount"
-    prompt = (
-        f"{SUCCESS} حُفظت العملية.\n"
-        f"🔁 سأكرّر نفس التفاصيل — {ask_for_field_prompt(data_type, first_missing)}"
-    )
+    prompt = f"✔️ حُفظت.\n{ask_for_field_prompt(data_type, first_missing)}"
     await query.edit_message_text(
         prompt, reply_markup=MAIN_HOME_KEYBOARD
     )
@@ -1605,9 +1599,8 @@ async def confirm_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["confirm_editing_field"] = field
     preview = _confirm_value_preview(result, field)
     await query.edit_message_text(
-        f"أرسل القيمة الجديدة لـ **{FIELD_LABELS.get(field, field)}**:\n"
+        f"أرسل القيمة الجديدة لـ {FIELD_LABELS.get(field, field)}:\n"
         f"القيمة الحالية: {preview}\n\n(أرسل /cancel للإلغاء)",
-        parse_mode="Markdown",
     )
     return CONFIRM
 
@@ -1618,7 +1611,7 @@ async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT
     field = context.user_data.pop("confirm_editing_field", None)
     if not field:
         return await text_router(update, context)
-    new_result, err = apply_confirm_edit(result, field, update.message.text)
+    new_result, err = apply_confirm_edit(result, field, update.message.text, telegram_user_id=update.effective_user.id)
     if err:
         await update.message.reply_text(f"{err}\nأعد المحاولة أو أرسل /cancel.")
         return CONFIRM
@@ -1663,7 +1656,9 @@ async def task_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return None
 
 
-def _normalize_edit_value(field: str, raw: str) -> tuple[object, str | None]:
+def _normalize_edit_value(
+    field: str, raw: str, telegram_user_id: int | None = None, update=None
+) -> tuple[object, str | None]:
     """يجعل قيمة إدخال الحقل صالحة للنوع حسب الحقل (عودة: قيمة, خطأ|None)."""
     value = (raw or "").strip()
     if field == "amount":
@@ -1688,25 +1683,32 @@ def _normalize_edit_value(field: str, raw: str) -> tuple[object, str | None]:
         if parse_date_local(value) is not None:
             return value, None
         # نص حر (بكرة/غدًا/بعد يومين...) → يُفسَّر بالذكاء الاصطناعي (مثل apply_confirm_edit)
-        try:
+        _uid2 = telegram_user_id
+        if _uid2 is None and update is not None:
+            _u2 = getattr(update, "effective_user", None)
+            _uid2 = getattr(_u2, "id", None) if _u2 is not None else None
+        if _uid2 is None:
+            _consent_i2 = True
+        else:
             try:
                 from app.database.crud.common import has_ai_consent
                 from app.database.db import SessionLocal as _SLi2
                 _dbi2 = _SLi2()
                 try:
-                    _consent_i2 = has_ai_consent(_dbi2, update.effective_user.id) if getattr(update, "effective_user", None) else True
+                    _consent_i2 = has_ai_consent(_dbi2, _uid2)
                 finally:
                     _dbi2.close()
             except Exception:
-                _consent_i2 = True
-            if _consent_i2:
+                _consent_i2 = False
+        if _consent_i2:
+            try:
                 import app.ai_service as ai_service
 
                 interpreted = ai_service.interpret_arabic_date(value)
                 if interpreted:
                     return interpreted, None
-        except Exception:
-            pass
+            except Exception:
+                pass
         return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"
     if not value:
         return None, "القيمة لا يمكن أن تكون فارغة."
@@ -1721,7 +1723,7 @@ async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not record_id or not model_name or not field:
         return await fresh_entry(update, context)
 
-    value, error = _normalize_edit_value(field, update.message.text)
+    value, error = _normalize_edit_value(field, update.message.text, telegram_user_id=update.effective_user.id)
     from bot.menus import MAIN_HOME_KEYBOARD
 
     if error:
@@ -1854,6 +1856,7 @@ conversation_handler = ConversationHandler(
             # عند الجمع نجيب على ردّ المستخدم (حالة المحادثة تُفحص قبل الـ entry)
             MessageHandler(TEXT_FILTER, collect_reply),
             MessageHandler(MEDIA_FILTER, media_router),
+            CallbackQueryHandler(confirm_no, pattern="^confirm:no$"),
         ],
         CONFIRM: [
             CallbackQueryHandler(confirm_yes, pattern="^confirm:yes$"),

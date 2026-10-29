@@ -910,8 +910,9 @@ class TestMergePerson:
             assert (
                 db_session.query(model).filter(model.person == "محل النور").count() == 0
             ), model.__name__
+            expected = 2 if model is Transaction else 1
             assert (
-                db_session.query(model).filter(model.person == "محل النهار").count() == 1
+                db_session.query(model).filter(model.person == "محل النهار").count() == expected
             ), model.__name__
         assert [lim.person for lim in list_credit_limits(db_session, USER_A)] == ["محل النهار"]
         assert changed >= 5

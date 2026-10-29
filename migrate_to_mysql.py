@@ -106,13 +106,9 @@ def _migrate(src, dst, model_list: list) -> dict[str, int]:
                 if val == UNREADABLE_VALUE:
                     skip = True
                     break
-                # حقول EncryptedNumeric: None بعد فك مشفّر يعني فقدان مبلغ — لا ننسخ صفًا بمبلغ فارغ
-                if val is None and col.key in ("amount", "limit_amount", "monthly_limit", "budget", "amount_in_base_currency"):
-                    # تحقق أن القيمة الخام لم تكن NULL أصلًا بل فشل فك
-                    raw = row.__dict__.get(col.key, None)
-                    if raw is not None and isinstance(raw, str) and raw.startswith(("v1$", "v2$")):
-                        skip = True
-                        break
+                # حقول EncryptedNumeric: None بعد فك مشفّر يعني فقدان مبلغ — لا ننسخ صفًا بمبلغ فارغ.
+                # ملاحظة: row.__dict__ يحمل القيمة المفكوكة (None) لا الخام، لذا لا يمكن
+                # الاعتماد عليه. نكتفي بـ UNREADABLE_VALUE (أعلاه) كحماية فعّالة.
             if skip:
                 skipped[model.__name__] = skipped.get(model.__name__, 0) + 1
                 continue

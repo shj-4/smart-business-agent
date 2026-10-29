@@ -50,9 +50,11 @@ from app.database.models import (
     WorkspaceMember,
 )
 from app.exchange import convert_totals_to_base
+from app.logging_config import configure_logging
 from app.sentry import install_sentry
 from app.timeutil import now_local, to_local_naive
 
+configure_logging(service="api")
 setup_audit_log()
 start_sweeper()
 install_sentry()
@@ -225,8 +227,9 @@ def _basic_auth_ok(authorization: str) -> bool:
     user, sep, password = credentials.partition(":")
     if not sep:
         return False
-    return secrets.compare_digest(user, _DASHBOARD_USERNAME) and secrets.compare_digest(
-        password, _DASHBOARD_PASSWORD
+    # قارن bytes لدعم non-ASCII (كلمات مرور عربية) بدون TypeError
+    return secrets.compare_digest(user.encode("utf-8"), _DASHBOARD_USERNAME.encode("utf-8")) and secrets.compare_digest(
+        password.encode("utf-8"), _DASHBOARD_PASSWORD.encode("utf-8")
     )
 
 
@@ -423,10 +426,12 @@ def _summary_month(db: Session, base: str, company_id: int | None = None) -> dic
         Transaction.base_currency_at_creation,
     ).filter(
         Transaction.deleted_at.is_(None),
-        Transaction.created_at >= start,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
     )
     if company_id is not None:
         q = q.filter(Transaction.company_id == company_id)
+    from app.database.crud.common import _cash_filter as _main_cash
+    q = q.filter(_main_cash(Transaction))
     rows = q.all()
     for rtype, currency, amount, stored_amt, stored_base in rows:
         c = (currency or "").upper()
@@ -457,10 +462,12 @@ def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | Non
     ).filter(
         Transaction.deleted_at.is_(None),
         Transaction.type == "expense",
-        Transaction.created_at >= start,
+        func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
     )
     if company_id is not None:
         q = q.filter(Transaction.company_id == company_id)
+    from app.database.crud.common import _cash_filter as _main_cash
+    q = q.filter(_main_cash(Transaction))
     rows = q.all()
     agg: dict = {}
     for category, currency, amount, stored_amt, stored_base in rows:
@@ -533,8 +540,9 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
             tasks_count[key] = tasks_count.get(key, 0) + c
     # للمعاملات: count عبر SQL + streaming للمبالغ (فكّ التشفير فقط في Python)
     tx_counts: dict[tuple, int] = {}
+    from app.database.crud.common import _cash_filter as _main_cash
     q_tx = db.query(Transaction.company_id, Transaction.person, func.count(Transaction.id)).filter(
-        Transaction.deleted_at.is_(None), Transaction.person.isnot(None)
+        Transaction.deleted_at.is_(None), Transaction.person.isnot(None), _main_cash(Transaction)
     )
     if company_id is not None:
         q_tx = q_tx.filter(Transaction.company_id == company_id)
@@ -551,7 +559,7 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
         Transaction.amount,
         Transaction.amount_in_base_currency,
         Transaction.base_currency_at_creation,
-    ).filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None))
+    ).filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None), _main_cash(Transaction))
     if company_id is not None:
         q_rows = q_rows.filter(Transaction.company_id == company_id)
     # yield_per دون .all() — كان .yield_per(500).all() يبطل الفائدة (يجلب الكل مرة واحدة)
@@ -841,11 +849,11 @@ def dashboard(
         if company_id is not None:
             # للتبسيط: الرسم العالمي يُبقى عالميًا حتى مع فلتر — يمكن توسيعه لاحقًا
             buf = generate_global_monthly_chart(
-                db, months=settings.chart_months, base_currency=base
+                db, months=settings.chart_months, base_currency=base, company_id=company_id
             )
         else:
             buf = generate_global_monthly_chart(
-                db, months=settings.chart_months, base_currency=base
+                db, months=settings.chart_months, base_currency=base, company_id=company_id
             )
         if buf:
             chart_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
@@ -865,9 +873,9 @@ def dashboard(
             "summary_partial": summary_partial,
             "top_categories": _category_tops(db, base, company_id=company_id),
             "top_parties": _party_rows(db, base, company_id=company_id)[:6],
-            "transactions": _recent_transactions(db, limit=10),
-            "notes": _recent_notes(db, limit=10),
-            "overdue_tasks": [t for t in _recent_tasks(db, limit=100) if t["status"] == "overdue"],
+            "transactions": _recent_transactions(db, limit=10, company_id=company_id),
+            "notes": _recent_notes(db, limit=10, company_id=company_id),
+            "overdue_tasks": [t for t in _recent_tasks(db, limit=100, company_id=company_id) if t["status"] == "overdue"],
         },
     )
 
@@ -981,7 +989,7 @@ def dashboard_transactions(
         filters.append(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
-        filters.append(Transaction.created_at >= start)
+        filters.append(func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start)
     if ttype in ("expense", "income"):
         filters.append(Transaction.type == ttype)
     term = q.strip()
@@ -1459,8 +1467,12 @@ def _budget_rows(db: Session, company_id: int | None = None) -> list[dict]:
         usage = budget_usage(db, b)
         if b.scope == "currency":
             target = CURRENCY_NAMES.get(b.currency, b.currency)
+        elif b.scope == "category":
+            target = f"تصنيف {b.category or '—'}"
+        elif b.scope == "person":
+            target = f"الشخص {b.person or '—'}"
         else:
-            target = f"الشخص {b.person}"
+            target = b.person or b.currency or "—"
         rows.append(
             {
                 "id": b.id,
@@ -1525,7 +1537,10 @@ async def dashboard_company_update(
 ):
     raw = (await request.body()).decode("utf-8", errors="replace")
     parsed = urllib.parse.parse_qs(raw)
-    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    try:
+        cid = int(str((parsed.get("company_id") or ["0"])[0] or "0").strip())
+    except (TypeError, ValueError):
+        cid = 0
     name = (parsed.get("name") or [""])[0].strip()
     description = (parsed.get("description") or [""])[0].strip()
     # للوحة التحكم: نعتبر المالك هو الفاعل (أول عضو owner)
@@ -1567,7 +1582,10 @@ async def dashboard_company_transfer(
 ):
     raw = (await request.body()).decode("utf-8", errors="replace")
     parsed = urllib.parse.parse_qs(raw)
-    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    try:
+        cid = int(str((parsed.get("company_id") or ["0"])[0] or "0").strip())
+    except (TypeError, ValueError):
+        cid = 0
     target = int((parsed.get("target_id") or ["0"])[0] or 0)
     comp = db.query(Company).filter(Company.id == cid).first()
     if comp and target:
@@ -1586,7 +1604,10 @@ async def dashboard_company_delete(
 ):
     raw = (await request.body()).decode("utf-8", errors="replace")
     parsed = urllib.parse.parse_qs(raw)
-    cid = int((parsed.get("company_id") or ["0"])[0] or 0)
+    try:
+        cid = int(str((parsed.get("company_id") or ["0"])[0] or "0").strip())
+    except (TypeError, ValueError):
+        cid = 0
     confirm = (parsed.get("confirm") or [""])[0]
     if confirm != "DELETE":
         return RedirectResponse(url="/dashboard/company", status_code=303)
@@ -1637,8 +1658,8 @@ def api_transactions(
         q = q.filter(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
-        q = q.filter(Transaction.created_at >= start)
-    rows = q.order_by(Transaction.created_at.desc()).limit(500).all()
+        q = q.filter(func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start)
+    rows = q.order_by(func.coalesce(Transaction.occurred_at, Transaction.created_at).desc()).limit(500).all()
     return [
         {
             "id": r.id,
