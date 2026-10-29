@@ -12,11 +12,16 @@ import json
 import logging
 import os
 import re
+import sys
 from logging.handlers import RotatingFileHandler
 
 # مجلد السجلات داخل جذر المشروع (موجود افتراضيًا)
 LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
+try:
+    os.makedirs(LOGS_DIR, exist_ok=True)
+except OSError:
+    # NSSM stdout/stderr remains available when the account cannot write here.
+    pass
 
 # المسار الموحّد لملف السجل الرئيسي
 MAIN_LOG = os.path.join(LOGS_DIR, "app.log")
@@ -111,17 +116,25 @@ def configure_logging(level: int = logging.INFO, service: str = "") -> None:
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    file_handler = RotatingFileHandler(
-        MAIN_LOG, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(fmt)
-    root.addHandler(file_handler)
-
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(fmt)
     root.addHandler(console)
+
+    try:
+        file_handler = RotatingFileHandler(
+            MAIN_LOG, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+        )
+    except OSError as exc:
+        print(
+            f"Unable to open application log file; using service stdout/stderr: {type(exc).__name__}",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        file_handler.setLevel(level)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
 
     # تصعيد مكتبات خارجية مزعجة إلى مستوى أعلى لو أردنا ضبطها لاحقًا
     logging.getLogger("httpx").setLevel(logging.WARNING)

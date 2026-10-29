@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from telegram.error import BadRequest
 
 import bot.reminders as reminders_mod
 from app.database import models  # noqa: F401
@@ -130,6 +131,35 @@ class TestOverdueCheck:
         context = _make_context()
         _run(overdue_check(context))
         context.bot.send_message.assert_not_called()
+
+
+class TestDeviationCheck:
+    def test_unreachable_chat_does_not_stop_other_workspace_recipients(self, db_env, monkeypatch):
+        import app.database.crud as crud
+        import app.database.crud.company as company_crud
+
+        monkeypatch.setattr(crud, "user_ids_with_data", lambda _db: [USER_A])
+        monkeypatch.setattr(
+            crud,
+            "deviation_summary",
+            lambda _db, _uid: {
+                "month_partial": False,
+                "month_elapsed_pct": 100,
+                "deviations": [{"significant": True, "kind": "expense", "currency": "SAR", "pct": 50}],
+            },
+        )
+        monkeypatch.setattr(crud, "accessible_user_ids", lambda _db, _uid: [USER_A, USER_B])
+        monkeypatch.setattr(company_crud, "company_id_for_user", lambda _db, _uid: None)
+        monkeypatch.setattr(company_crud, "has_permission", lambda _db, _uid, _permission: True)
+        monkeypatch.setattr(reminders_mod, "_LAST_DEVIATION_SENT", {})
+
+        context = _make_context()
+        context.bot.send_message.side_effect = [BadRequest("Chat not found"), MagicMock()]
+
+        _run(deviation_check(context))
+
+        assert [call.kwargs["chat_id"] for call in context.bot.send_message.await_args_list] == [USER_A, USER_B]
+        assert reminders_mod._LAST_DEVIATION_SENT
 
 
 class TestSetupReminder:

@@ -22,6 +22,22 @@ from bot.formatters import format_health_report, format_user_stats
 _VALID_B64_KEY = base64.b64encode(b"0" * 32).decode("ascii")
 
 
+def test_production_startup_does_not_auto_migrate_without_opt_in(monkeypatch):
+    from alembic import command
+
+    from app.config import settings
+    from bot.diagnostics import _try_auto_migrate
+
+    calls = []
+    monkeypatch.setenv("AUTO_MIGRATE", "")
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(command, "upgrade", lambda *args: calls.append(args))
+
+    _try_auto_migrate()
+
+    assert calls == []
+
+
 @pytest.fixture
 def db_env(monkeypatch):
     engine = create_engine(

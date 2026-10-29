@@ -6,6 +6,7 @@ bot.ratelimit) — هذا الملف مجرد تجميع وتسجيل وبدء �
 """
 
 import logging
+import os
 
 from telegram.ext import ApplicationBuilder
 
@@ -32,12 +33,19 @@ async def _post_init(application) -> None:
 
 
 def main():
+    from bot.single_instance import BotAlreadyRunning, acquire_polling_lock
+
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bot-polling.lock")
+    try:
+        acquire_polling_lock(lock_path)
+    except BotAlreadyRunning:
+        logger.error("يوجد مثيل آخر للبوت يستطلع Telegram بالفعل؛ لن يبدأ هذا المثيل.")
+        return
+
     ensure_env_or_exit()
     startup_diagnostics()
     # استمرارية المحادثات: PicklePersistence يحفظ user_data/ConversationHandler عبر إعادة التشغيل
     # لا نخزن ORM في user_data (تم إصلاح editing.py) لذا التخزين آمن.
-    import os
-
     from bot.persistence import FilteredPicklePersistence, scrub_existing_pickle
 
     persist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "conversation.pickle")

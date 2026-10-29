@@ -110,12 +110,20 @@ def create_invoice(
             raw_message=raw_message,
             telegram_message_id=None,
         )
-        if tx is not None:
-            invoice.transaction_id = tx.id
-            db.commit()
-            db.refresh(invoice)
+        if tx is None:
+            raise RuntimeError("failed to create charge transaction")
+        invoice.transaction_id = tx.id
+        db.commit()
+        db.refresh(invoice)
     except Exception:
-        pass
+        db.rollback()
+        # أزل الفاتورة لتجنب فاتورة بلا قيد ذمة
+        try:
+            db.delete(invoice)
+            db.commit()
+        except Exception:
+            db.rollback()
+        return None
     _invalidate_caches(db, telegram_user_id)
     return invoice
 

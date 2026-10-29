@@ -97,16 +97,15 @@ def _restrict_file_windows(path: str) -> None:
     import subprocess
 
     try:
-        # حدد هوية المالك الحالي
-        username = os.environ.get("USERNAME") or os.environ.get("USER")
-        if not username:
-            try:
-                out = subprocess.check_output(
-                    "whoami", shell=True, text=True, stderr=subprocess.DEVNULL
-                )
-                username = out.strip().split("\\")[-1].split("/")[-1]
-            except Exception:
-                username = None
+        # Preserve the domain-qualified identity; USERNAME alone can resolve
+        # to a different local account when NSSM runs under a service identity.
+        try:
+            out = subprocess.check_output(
+                ["whoami"], text=True, stderr=subprocess.DEVNULL
+            )
+            username = out.strip()
+        except Exception:
+            username = os.environ.get("USERNAME") or os.environ.get("USER")
         if not username:
             # لا يمكن تحديد المستخدم — حاول تقييد بالوراثة فقط
             subprocess.run(
@@ -167,17 +166,24 @@ def _write_dashboard_credentials(username: str, password: str) -> str:
     """يكتب الاعتماديات في ملف منفصل بصلاحيات مقيدة (0600 على POSIX / icacls على Windows)."""
     os.makedirs(os.path.dirname(_DASHBOARD_CRED_FILE), exist_ok=True)
     # 0o600 فعال على POSIX فقط؛ على Windows نطبّق icacls لاحقًا
-    fd = os.open(_DASHBOARD_CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    path = _DASHBOARD_CRED_FILE
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except PermissionError:
+        # A previous service identity may have left this file with a restrictive ACL.
+        # Preserve it and write a fresh, private file for this process instead.
+        path = f"{_DASHBOARD_CRED_FILE}.{os.getpid()}"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(f"DASHBOARD_USERNAME={username}\nDASHBOARD_PASSWORD={password}\n")
     try:
         if os.name == "nt":
-            _restrict_file_windows(_DASHBOARD_CRED_FILE)
+            _restrict_file_windows(path)
         else:
-            os.chmod(_DASHBOARD_CRED_FILE, 0o600)
+            os.chmod(path, 0o600)
     except Exception as exc:
-        logger.warning("تعذر ضبط صلاحيات الملف %s: %s", _DASHBOARD_CRED_FILE, exc)
-    return _DASHBOARD_CRED_FILE
+        logger.warning("تعذر ضبط صلاحيات الملف %s: %s", path, exc)
+    return path
 
 
 def _generate_dashboard_credentials() -> tuple[str, str]:
@@ -410,7 +416,10 @@ def _pagination(page: int, pages: int, base_path: str, params: dict) -> dict:
     }
 
 
-def _summary_month(db: Session, base: str, company_id: int | None = None) -> dict:
+_ALL_COMPANIES = object()
+
+
+def _summary_month(db: Session, base: str, company_id: int | None | object = None) -> dict:
     """مجموع الشهر الحالي (موحَّدًا بالعملة الأساسية).
 
     عزل المستأجرين: إن حُدد company_id يُفلتر عليه، وإلا فهو عرض مشغّل عالمي.
@@ -428,7 +437,11 @@ def _summary_month(db: Session, base: str, company_id: int | None = None) -> dic
         Transaction.deleted_at.is_(None),
         func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
     )
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Transaction.company_id.is_(None))
+    else:
         q = q.filter(Transaction.company_id == company_id)
     from app.database.crud.common import _cash_filter as _main_cash
     q = q.filter(_main_cash(Transaction))
@@ -445,7 +458,7 @@ def _summary_month(db: Session, base: str, company_id: int | None = None) -> dic
     return _convert_month_currency_groups(by_currency, base, stored=stored or None)
 
 
-def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | None = None) -> list[dict]:
+def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | None | object = None) -> list[dict]:
     """أعلى تصنيفات المصاريف هذا الشهر (موحَّدة بالعملة الأساسية).
 
     عزل المستأجرين: إن حُدد company_id يُفلتر عليه، وإلا يُعرض الكل
@@ -464,7 +477,11 @@ def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | Non
         Transaction.type == "expense",
         func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
     )
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Transaction.company_id.is_(None))
+    else:
         q = q.filter(Transaction.company_id == company_id)
     from app.database.crud.common import _cash_filter as _main_cash
     q = q.filter(_main_cash(Transaction))
@@ -498,7 +515,7 @@ def _category_tops(db: Session, base: str, limit: int = 6, company_id: int | Non
     return out[:limit]
 
 
-def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[dict]:
+def _party_rows(db: Session, base: str, company_id: int | None | object = None) -> list[dict]:
     """تجمع أسماء الأطراف (عملاء/موردون) عبر المعاملات والطلبيات والمهام.
 
     كل طرف = اسم نصي؛ المجاميع تُوحَّد بالعملة الأساسية (المخزَّنة عند
@@ -522,7 +539,11 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
         Note.person.isnot(None),
         Note.note_type == "order",
     )
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q_notes = q_notes.filter(Note.company_id.is_(None))
+    else:
         q_notes = q_notes.filter(Note.company_id == company_id)
     for cid, p, c in q_notes.group_by(Note.company_id, Note.person).all():
         key = (cid, (p or "").strip())
@@ -532,7 +553,11 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
     q_tasks = db.query(Task.company_id, Task.person, func.count(Task.id)).filter(
         Task.deleted_at.is_(None), Task.person.isnot(None)
     )
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q_tasks = q_tasks.filter(Task.company_id.is_(None))
+    else:
         q_tasks = q_tasks.filter(Task.company_id == company_id)
     for cid, p, c in q_tasks.group_by(Task.company_id, Task.person).all():
         key = (cid, (p or "").strip())
@@ -544,7 +569,11 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
     q_tx = db.query(Transaction.company_id, Transaction.person, func.count(Transaction.id)).filter(
         Transaction.deleted_at.is_(None), Transaction.person.isnot(None), _main_cash(Transaction)
     )
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q_tx = q_tx.filter(Transaction.company_id.is_(None))
+    else:
         q_tx = q_tx.filter(Transaction.company_id == company_id)
     for cid, p, c in q_tx.group_by(Transaction.company_id, Transaction.person).all():
         key = (cid, (p or "").strip())
@@ -560,7 +589,11 @@ def _party_rows(db: Session, base: str, company_id: int | None = None) -> list[d
         Transaction.amount_in_base_currency,
         Transaction.base_currency_at_creation,
     ).filter(Transaction.deleted_at.is_(None), Transaction.person.isnot(None), _main_cash(Transaction))
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q_rows = q_rows.filter(Transaction.company_id.is_(None))
+    else:
         q_rows = q_rows.filter(Transaction.company_id == company_id)
     # yield_per دون .all() — كان .yield_per(500).all() يبطل الفائدة (يجلب الكل مرة واحدة)
     tx_rows = q_rows.order_by(Transaction.created_at.desc()).yield_per(500)
@@ -732,9 +765,13 @@ NOTE_COLUMNS = [
 ]
 
 
-def _recent_transactions(db: Session, limit: int = 10, company_id: int | None = None):
+def _recent_transactions(db: Session, limit: int = 10, company_id: int | None | object = None):
     q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Transaction.company_id.is_(None))
+    else:
         q = q.filter(Transaction.company_id == company_id)
     rows = q.order_by(Transaction.created_at.desc()).limit(limit).all()
     out = []
@@ -754,9 +791,13 @@ def _recent_transactions(db: Session, limit: int = 10, company_id: int | None = 
     return out
 
 
-def _recent_tasks(db: Session, limit: int = 50, company_id: int | None = None):
+def _recent_tasks(db: Session, limit: int = 50, company_id: int | None | object = None):
     q = db.query(Task).filter(Task.deleted_at.is_(None))
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Task.company_id.is_(None))
+    else:
         q = q.filter(Task.company_id == company_id)
     rows = q.order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(limit).all()
 
@@ -775,9 +816,13 @@ def _recent_tasks(db: Session, limit: int = 50, company_id: int | None = None):
     return out
 
 
-def _recent_notes(db: Session, limit: int = 10, company_id: int | None = None):
+def _recent_notes(db: Session, limit: int = 10, company_id: int | None | object = None):
     q = db.query(Note).filter(Note.deleted_at.is_(None))
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Note.company_id.is_(None))
+    else:
         q = q.filter(Note.company_id == company_id)
     rows = q.order_by(Note.created_at.desc()).limit(limit).all()
     out = []
@@ -808,6 +853,23 @@ def dashboard(
     والرسوم والأطراف لتلك الشركة فقط، وإلا فهو عرض عالمي مع فصل حسب الشركة
     (لا دمج عابر لأسماء متطابقة).
     """
+    # دعم __all__/__none__ عبر query param (string) — FastAPI param int لا يقبلها
+    raw_cid = request.query_params.get("company_id")
+    scope_all = False
+    if raw_cid is not None and str(raw_cid).strip():
+        val = str(raw_cid).strip()
+        if val == "__all__":
+            scope_all = True
+            company_id = None
+        elif val == "__none__":
+            company_id = None
+        else:
+            try:
+                company_id = int(val)
+            except ValueError:
+                company_id = None
+    cid_for_helpers = _ALL_COMPANIES if scope_all else company_id
+
     # استخدم عملة الشركة إن حُددت، وإلا العملة العامة — يصلح استخدام
     # Company.base_currency الذي كان مُهمَلًا سابقًا
     if company_id is not None:
@@ -820,19 +882,23 @@ def dashboard(
         base = (settings.base_currency or "ILS").upper()
     # فلاتر اختيارية حسب الشركة
     def _add_company_filter(q, model):
-        if company_id is not None and hasattr(model, "company_id"):
-            return q.filter(model.company_id == company_id)
-        return q
+        if not hasattr(model, "company_id"):
+            return q
+        if scope_all:
+            return q
+        if company_id is None:
+            return q.filter(model.company_id.is_(None))
+        return q.filter(model.company_id == company_id)
 
     counts = {
         "transactions": _add_company_filter(db.query(func.count(Transaction.id)).filter(Transaction.deleted_at.is_(None)), Transaction).scalar(),
         "tasks": _add_company_filter(db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None)), Task).scalar(),
         "notes": _add_company_filter(db.query(func.count(Note.id)).filter(Note.deleted_at.is_(None)), Note).scalar(),
-        "users": _add_company_filter(db.query(Transaction.telegram_user_id).distinct(), Transaction).count() if company_id is not None else db.query(Transaction.telegram_user_id).distinct().count(),
+        "users": _add_company_filter(db.query(Transaction.telegram_user_id).distinct(), Transaction).count(),
         "overdue": _add_company_filter(db.query(func.count(Task.id)).filter(Task.deleted_at.is_(None), Task.status == "overdue"), Task).scalar(),
     }
 
-    summary = _summary_month(db, base, company_id=company_id)
+    summary = _summary_month(db, base, company_id=cid_for_helpers)
     expense = summary["expense"] or Decimal("0")
     income = summary["income"] or Decimal("0")
     month_cards = {
@@ -845,16 +911,9 @@ def dashboard(
 
     chart_url = None
     try:
-        # لوحة المشغّل: إن حُدد company_id تُفلتر الرسوم، وإلا فهو عرض عالمي
-        if company_id is not None:
-            # للتبسيط: الرسم العالمي يُبقى عالميًا حتى مع فلتر — يمكن توسيعه لاحقًا
-            buf = generate_global_monthly_chart(
-                db, months=settings.chart_months, base_currency=base, company_id=company_id
-            )
-        else:
-            buf = generate_global_monthly_chart(
-                db, months=settings.chart_months, base_currency=base, company_id=company_id
-            )
+        buf = generate_global_monthly_chart(
+            db, months=settings.chart_months, base_currency=base, company_id=company_id, include_all=scope_all
+        )
         if buf:
             chart_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
@@ -871,11 +930,11 @@ def dashboard(
             "counts": counts,
             "month_cards": month_cards,
             "summary_partial": summary_partial,
-            "top_categories": _category_tops(db, base, company_id=company_id),
-            "top_parties": _party_rows(db, base, company_id=company_id)[:6],
-            "transactions": _recent_transactions(db, limit=10, company_id=company_id),
-            "notes": _recent_notes(db, limit=10, company_id=company_id),
-            "overdue_tasks": [t for t in _recent_tasks(db, limit=100, company_id=company_id) if t["status"] == "overdue"],
+            "top_categories": _category_tops(db, base, company_id=cid_for_helpers),
+            "top_parties": _party_rows(db, base, company_id=cid_for_helpers)[:6],
+            "transactions": _recent_transactions(db, limit=10, company_id=cid_for_helpers),
+            "notes": _recent_notes(db, limit=10, company_id=cid_for_helpers),
+            "overdue_tasks": [t for t in _recent_tasks(db, limit=100, company_id=cid_for_helpers) if t["status"] == "overdue"],
         },
     )
 
@@ -964,15 +1023,21 @@ def dashboard_transactions(
     عزل المستأجرين: إن حُدد company_id يُفلتر عليه؛ اللوحة أداة مشغّل فقط.
     """
     # دعم company_id عبر query param (قد يأتي كـ string)
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            if str(q_cid).strip() == "__none__":
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
                 company_id = None
             else:
-                company_id = int(str(q_cid).strip())
+                company_id = int(val)
     except Exception:
         pass
+    cid_for_helpers = _ALL_COMPANIES if scope_all else company_id
     base_path = "/dashboard/transactions"
     params: dict = {}
     if period != "all_time":
@@ -981,11 +1046,19 @@ def dashboard_transactions(
         params["q"] = q
     if ttype:
         params["ttype"] = ttype
-    if company_id is not None:
+    if scope_all:
+        params["company_id"] = "__all__"
+    elif company_id is not None:
         params["company_id"] = str(company_id)
-
+    else:
+        # default NULL scope — keep explicit __none__ in links
+        params["company_id"] = "__none__"
     filters = [Transaction.deleted_at.is_(None)]
-    if company_id is not None:
+    if scope_all:
+        pass
+    elif company_id is None:
+        filters.append(Transaction.company_id.is_(None))
+    else:
         filters.append(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
@@ -1116,10 +1189,18 @@ def dashboard_tasks(
         logger.exception("فشل تحديث المهام المتأخرة في لوحة المهام — حالات التأخر لن تنعكس")
 
     # company_id filter
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
     base_path = "/dashboard/tasks"
@@ -1128,11 +1209,19 @@ def dashboard_tasks(
         params["status"] = status
     if q:
         params["q"] = q
-    if company_id is not None:
+    if scope_all:
+        params["company_id"] = "__all__"
+    elif company_id is not None:
         params["company_id"] = str(company_id)
-
+    else:
+        # default NULL scope — keep explicit __none__ in links
+        params["company_id"] = "__none__"
     filters = [Task.deleted_at.is_(None)]
-    if company_id is not None:
+    if scope_all:
+        pass
+    elif company_id is None:
+        filters.append(Task.company_id.is_(None))
+    else:
         filters.append(Task.company_id == company_id)
     if status in ("pending", "overdue", "done"):
         filters.append(Task.status == status)
@@ -1219,10 +1308,18 @@ def dashboard_notes(
     _auth: None = Depends(require_dashboard_auth),
 ):
     """جدول الطلبيات والملاحظات: تصفية بالنوع وبالشخص + ترقيم صفحات."""
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
     base_path = "/dashboard/notes"
@@ -1231,11 +1328,19 @@ def dashboard_notes(
         params["ntype"] = ntype
     if q:
         params["q"] = q
-    if company_id is not None:
+    if scope_all:
+        params["company_id"] = "__all__"
+    elif company_id is not None:
         params["company_id"] = str(company_id)
-
+    else:
+        # default NULL scope — keep explicit __none__ in links
+        params["company_id"] = "__none__"
     filters = [Note.deleted_at.is_(None)]
-    if company_id is not None:
+    if scope_all:
+        pass
+    elif company_id is None:
+        filters.append(Note.company_id.is_(None))
+    else:
         filters.append(Note.company_id == company_id)
     if ntype in ("order", "note"):
         filters.append(Note.note_type == ntype)
@@ -1321,11 +1426,19 @@ def dashboard_customers(
     عزل المستأجرين: اللوحة الآن تدعم فلتر company_id — بدون فلتر تُعرض كل
     الشركات لكن مع فصل حسب الشركة (لا دمج عابر لأسماء متطابقة).
     """
+    scope_all = False
     # دعم فلتر company_id عبر query param + استخدام عملة الشركة
     try:
         q_cid_early = request.query_params.get("company_id")
         if q_cid_early is not None and str(q_cid_early).strip():
-            company_id = int(str(q_cid_early).strip())
+            val = str(q_cid_early).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
     if company_id is not None:
@@ -1340,11 +1453,18 @@ def dashboard_customers(
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
     csrf_token = _csrf_token_or_new(request)
-    rows = _party_rows(db, base, company_id=company_id)
+    rows = _party_rows(db, base, company_id=_ALL_COMPANIES if scope_all else company_id)
     for row in rows:
         row["net_cls"] = "positive" if _to_pos(row["net"]) >= 0 else "negative"
     merged = request.query_params.get("merged")
@@ -1430,16 +1550,30 @@ def dashboard_export(
     _auth: None = Depends(require_dashboard_auth),
 ):
     """تقرير شامل لكل المستخدمين بتصدير Excel أو PDF (أزرار اللوحة الرئيسية)."""
+    scope_all = False
+    company_id = None
+    try:
+        q_cid = request.query_params.get("company_id")
+        if q_cid is not None and str(q_cid).strip():
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
+    except Exception:
+        pass
     if fmt == "pdf":
         from bot.exporters import generate_export_pdf
 
-        buf = generate_export_pdf(db, None)
+        buf = generate_export_pdf(db, None, company_id=company_id, scope_all=scope_all)
         media_type = "application/pdf"
         ext = "pdf"
     else:
         from bot.exporters import generate_export_excel
 
-        buf = generate_export_excel(db, None)
+        buf = generate_export_excel(db, None, company_id=company_id, scope_all=scope_all)
         media_type = EXCEL_MIME
         ext = "xlsx"
     filename = f"report_{datetime.now().strftime('%Y%m%d')}.{ext}"
@@ -1453,13 +1587,17 @@ def dashboard_export(
 # ---------- الميزانيات (لوحة التحكم + JSON) ----------
 
 
-def _budget_rows(db: Session, company_id: int | None = None) -> list[dict]:
+def _budget_rows(db: Session, company_id: int | None | object = None) -> list[dict]:
     from app.database.crud import budget_monthly_reset, budget_usage
     from app.exchange import CURRENCY_NAMES
 
     rows = []
     q = db.query(Budget).order_by(Budget.created_at.asc())
-    if company_id is not None:
+    if company_id is _ALL_COMPANIES:
+        pass
+    elif company_id is None:
+        q = q.filter(Budget.company_id.is_(None))
+    else:
         q = q.filter(Budget.company_id == company_id)
     budgets = q.all()
     for b in budgets:
@@ -1495,13 +1633,21 @@ def dashboard_budgets(
     _auth: None = Depends(require_dashboard_auth),
 ):
     """عرض الميزانيات الشهرية وحالة كل منها."""
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
-    budgets = _budget_rows(db, company_id=company_id)
+    budgets = _budget_rows(db, company_id=_ALL_COMPANIES if scope_all else company_id)
     return templates.TemplateResponse(
         request,
         "budgets.html",
@@ -1626,13 +1772,21 @@ def api_budgets(
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """الميزانيات الشهرية بصيغة JSON."""
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
-    return _budget_rows(db, company_id=company_id)
+    return _budget_rows(db, company_id=_ALL_COMPANIES if scope_all else company_id)
 
 
 # ---------- APIs للبيانات (JSON) ----------
@@ -1647,14 +1801,26 @@ def api_transactions(
     _auth: None = Depends(require_dashboard_auth),
 ):
     """معاملات مالية بصيغة JSON (أحدث 500)."""
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
     q = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
-    if company_id is not None:
+    if scope_all:
+        pass
+    elif company_id is None:
+        q = q.filter(Transaction.company_id.is_(None))
+    else:
         q = q.filter(Transaction.company_id == company_id)
     start = _period_start(period)
     if start:
@@ -1684,19 +1850,29 @@ def api_tasks(
     db: Session = Depends(get_db), _auth: None = Depends(require_dashboard_auth)
 ):
     """المهام بصيغة JSON."""
+    scope_all = False
     try:
         q_cid = request.query_params.get("company_id")
         if q_cid is not None and str(q_cid).strip():
-            company_id = int(str(q_cid).strip())
+            val = str(q_cid).strip()
+            if val == "__all__":
+                scope_all = True
+                company_id = None
+            elif val == "__none__":
+                company_id = None
+            else:
+                company_id = int(val)
     except Exception:
         pass
-    # إن حُدد company_id فلتره؛ وإلا نفس السلوك
-    if company_id is not None:
+    # إن حُدد company_id فلتره؛ وإلا نفس السلوك (NULL scope افتراضيًا)
+    if scope_all:
+        rows = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(500).all()
+    elif company_id is not None:
         rows = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id == company_id).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(500).all()
-        out = []
-        for r in rows:
-            due_str = to_local_naive(r.due_date).strftime("%Y-%m-%d %H:%M") if r.due_date else ""
-            out.append({"id": r.id, "description": r.description or "", "person": r.person or "", "due_date": due_str, "status": r.status})
-        return out
-    rows = _recent_tasks(db, limit=500)
-    return rows
+    else:
+        rows = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).limit(500).all()
+    out = []
+    for r in rows:
+        due_str = to_local_naive(r.due_date).strftime("%Y-%m-%d %H:%M") if r.due_date else ""
+        out.append({"id": r.id, "description": r.description or "", "person": r.person or "", "due_date": due_str, "status": r.status})
+    return out

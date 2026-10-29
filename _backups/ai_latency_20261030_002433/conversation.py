@@ -1,0 +1,1877 @@
+"""
+آلة الحالة لالتقاط التسجيلات: تحليل → (جمع النواقص) → تأكيد → حفظ.
+
+مبنية على ConversationHandler من python-telegram-bot بدل إدارة user_data يدويًا.
+يحل هذا بشكل طبيعي مشكلة الحالة المعلّقة: أي رسالة نصية/وسائط جديدة أثناء
+شاشة التأكيد تعيد بدء المحادثة (allow_reentry) مع مسح الحالة القديمة.
+"""
+
+import asyncio
+import logging
+import re
+from decimal import Decimal
+from decimal import InvalidOperation as DecimalInvalidOperation
+
+from sqlalchemy.orm import Session
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+from app.ai_queue import aiq
+from app.ai_service import analyze_message, analyze_receipt_image, transcribe_audio
+from app.database.crud import (
+    complete_task,
+    create_note,
+    create_task,
+    create_transaction,
+    find_pending_task,
+    get_record_by_id,
+    normalize_currency,
+    record_correction_feedback,
+    run_query,
+    update_note,
+    update_task,
+    update_transaction,
+)
+from app.database.db import SessionLocal
+from app.normalize import normalize_priority
+from bot.formatters import (
+    FIELD_LABELS,
+    TYPE_NAMES,
+    _build_confirm_keyboard,
+    _build_confirm_text,
+    format_query_result,
+    format_record_result,
+    safe_reply,
+)
+from bot.icons import BACK, SUCCESS
+from bot.ratelimit import (
+    check_and_increment_daily,
+    is_daily_limited,
+    is_rate_limited,
+    is_user_allowed,
+)
+
+CANCEL_KB = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ إلغاء", callback_data="confirm:no")]])
+
+logger = logging.getLogger(__name__)
+
+
+def _is_allowed_or_reply(update: Update) -> tuple[bool, str | None]:
+    """يتحقق من قائمة السماح للمستخدم.
+
+    يعيد (True, None) إذا مسموح، وإلا (False, رسالة_السبب).
+    الحصة اليومية تُفحص منفصلة قبل استدعاء Gemini.
+    """
+    try:
+        uid = update.effective_user.id if update.effective_user else None
+        if uid is None:
+            return False, "تعذر تحديد المستخدم."
+        if not is_user_allowed(uid):
+            try:
+                from app.config import settings
+                token_set = bool((getattr(settings, "registration_token", "") or "").strip())
+                allowed_set = bool(getattr(settings, "allowed_user_ids", []))
+            except Exception:
+                token_set, allowed_set = False, False
+            if token_set:
+                return False, (
+                    "عذرًا، ليس لديك صلاحية استخدام هذا البوت.\n"
+                    "أرسل رمز التسجيل عبر: /register <الرمز>\n"
+                    "تواصل مع الإدارة للحصول على الرمز."
+                )
+            elif allowed_set:
+                return False, "عذرًا، ليس لديك صلاحية استخدام هذا البوت. تواصل مع الإدارة لإضافتك إلى قائمة السماح."
+            else:
+                return False, "عذرًا، ليس لديك صلاحية استخدام هذا البوت."
+    except Exception as e:
+        logger.warning("فشل فحص الصلاحية: %s", e)
+    return True, None
+
+
+# حالات المحادثة
+COLLECT = 1  # ننتظر إكمال بيانات ناقصة
+CONFIRM = 2  # ننتظر تأكيد/إلغاء (أزرار InlineKeyboard)
+
+QUICK_ACTIONS = InlineKeyboardMarkup([
+    [InlineKeyboardButton("➕ تسجيل عملية", callback_data="menu:record")],
+    [InlineKeyboardButton("📊 أسئلة مالية", callback_data="menu:reports"), InlineKeyboardButton("💱 تحويل عملة", callback_data="tool:convert")],
+])
+
+_AMOUNT_RE = re.compile(r"(?P<num>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?P<cur>[\u0600-\u06FF\w]+)?")
+
+# النوع (من نتيجة التحليل) → نموذج /edit (نفس حقول محادثة /edit)
+_CONFIRM_TYPE_MODEL = {
+    "expense": "Transaction",
+    "income": "Transaction",
+    "task": "Task",
+    "order": "Note",
+    "note": "Note",
+}
+
+
+def _confirm_editable_fields(result: dict) -> list[str]:
+    from bot.editing import EDITABLE_FIELDS
+
+    model = _CONFIRM_TYPE_MODEL.get(result.get("type"), "Note")
+    fields = list(EDITABLE_FIELDS.get(model, []))
+    # النتيجة المؤقتة للسجل الجديد تخزّن موعد المهمة تحت مفتاح "date"
+    return ["date" if f == "due_date" else f for f in fields]
+
+
+def _confirm_value_preview(result: dict, field: str) -> str:
+    val = result.get(field)
+    if field == "amount" and val is not None:
+        return f"{val} {result.get('currency') or ''}".strip()
+    return val or "(فارغ)"
+
+
+def apply_confirm_edit(
+    result: dict, field: str, raw: str, telegram_user_id: int | None = None, update=None
+) -> tuple[dict, str | None]:
+    """يطبّق قيمة نصّية على حقل في نتائج التأكيد. يُعيد (result, خطأ|None)."""
+    value = raw.strip()
+    if field == "amount":
+        # توحيد الفواصل قبل المطابقة
+        arabic_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+        v_norm = value.translate(arabic_digits).replace("\u066c", ",").replace("٫", ".")
+        if re.search(r"\d{1,3}(,\d{3})+(\.\d+)?", v_norm):
+            v_norm = v_norm.replace(",", "")
+        elif "," in v_norm and "." not in v_norm:
+            v_norm = v_norm.replace(",", ".")
+        m = _AMOUNT_RE.match(v_norm)
+        if not m:
+            return result, "لم أتعرف على رقم صالح. مثال: 300 أو 300.5"
+        num = m.group("num").replace(",", "")
+        try:
+            amount = Decimal(num)
+        except DecimalInvalidOperation:
+            return result, "المبلغ غير صالح."
+        result["amount"] = amount
+        cur = m.group("cur")
+        if cur:
+            norm = normalize_currency(cur)
+            if norm:
+                result["currency"] = norm
+        return result, None
+    if field == "currency":
+        norm = normalize_currency(value)
+        if not norm:
+            return result, "عملة غير معروفة. جرّب: شيكل / دولار / دينار / يورو."
+        result["currency"] = norm
+        return result, None
+    if field == "priority":
+        result["priority"] = normalize_priority(value)
+        return result, None
+    if field == "date":
+        from app.database.crud import parse_date_local
+
+        if not value:
+            return result, FIELD_LABELS.get("date", "الموعد") + " لا يمكن أن يكون فارغًا."
+        parsed = parse_date_local(value)
+        if parsed is not None:
+            result["date"] = value
+            return result, None
+        # نص حر (غدًا/بكرة/بعد يومين...) — يُفسَّر بالذكاء الاصطناعي مثل مسار
+        # الإدخال الأصلي بدل إضاعته صامتًا (كان create_* يستدعي parse_date_local
+        # مباشرة على النص الخام فتضيع قيمة الموعد بلا تنبيه).
+        _uid = telegram_user_id
+        if _uid is None and update is not None:
+            _u = getattr(update, "effective_user", None)
+            _uid = getattr(_u, "id", None) if _u is not None else None
+        if _uid is None:
+            _consent_i = True
+        else:
+            try:
+                from app.database.crud.common import has_ai_consent
+                from app.database.db import SessionLocal as _SLi
+                _dbi = _SLi()
+                try:
+                    _consent_i = has_ai_consent(_dbi, _uid)
+                finally:
+                    _dbi.close()
+            except Exception:
+                _consent_i = False
+        if _consent_i:
+            import app.ai_service as ai_service
+
+            interpreted = ai_service.interpret_arabic_date(value)
+            if interpreted:
+                result["date"] = interpreted
+                return result, None
+        return result, "لم أتعرف على الموعد. جرّب مثلًا: 2026-09-10 10:00"
+    if not value:
+        return result, f"{FIELD_LABELS.get(field, field)} لا يمكن أن يكون فارغًا."
+    result[field] = value
+    return result, None
+
+
+_BUDGET_TEXT_RE = re.compile(r"^(?P<target>.+?)\s+(?P<amount>\d+(?:[.,]\d+)?)$", re.UNICODE)
+
+_CONVERT_CONNECTORS = ("إلى", "الي", "الى", "من", "بح", "to", "in")
+
+
+def parse_budget_text(scope: str, raw: str) -> dict | None:
+    """يقرأ "الهدف والمبلغ" بصيغة حرة: "ILS 2000" أو "محمد 1500". يعيد dict أو None."""
+    text = (raw or "").strip()
+    text = re.sub(r"^(شخص|عملة)\s*[:\-]", "", text, flags=re.UNICODE).strip()
+    m = _BUDGET_TEXT_RE.match(text)
+    if not m:
+        return None
+    amount = Decimal(m.group("amount").replace(",", "."))
+    target = m.group("target").strip()
+    if scope == "currency":
+        code = normalize_currency(target)
+        if not code:
+            return {"error": "عملة غير معروفة. جرّب رمزًا مثل ILS/USD/JOD أو شيكل/دولار/دينار"}
+        target = code
+    elif scope == "category" and not target:
+        return {"error": "أرسل اسم التصنيف والمبلغ (مثال: مشتريات 2000)"}
+    return {"scope": scope, "target": target, "monthly_limit": amount}
+
+
+def parse_convert_text(raw: str) -> dict | None:
+    """يقرأ "المبلغ من إلى" بصيغة حرة — بحدود كلمات للروابط."""
+    from app.database.crud import CURRENCY_ALIASES
+    from app.exchange import CURRENCY_NAMES
+
+    text = (raw or "").strip().strip("?؟")
+    # إزالة فواصل آلاف قبل التقاط الأرقام
+    tmp = text.replace("\u066c", ",")
+    if re.search(r"\d{1,3}(,\d{3})+", tmp):
+        tmp = tmp.replace(",", "")
+    nums = re.findall(r"\d+(?:\.\d+)?", tmp)
+    if not nums:
+        return None
+    amount = Decimal(nums[0])
+    stripped = re.sub(r"\d+(?:\.\d+)?", " ", tmp)
+    for connector in _CONVERT_CONNECTORS:
+        stripped = re.sub(r"\b" + re.escape(connector) + r"\b", " ", stripped)
+    tokens = [t for t in stripped.split() if t]
+
+    codes: list[str] = []
+    for token in tokens:
+        low = token.lower()
+        if low in CURRENCY_ALIASES:
+            code = CURRENCY_ALIASES[low]
+        elif token.upper() in CURRENCY_NAMES:
+            code = token.upper()
+        else:
+            continue
+        if code not in codes:
+            codes.append(code)
+        if len(codes) >= 2:
+            break
+
+    if len(codes) < 2:
+        return None
+    return {"amount": amount, "from": codes[0], "to": codes[1]}
+
+
+_RATE_KEYWORDS = re.compile(
+    r"(?:كم\s*صرف|كم\s*سعر|بكم|سعر\s*(?:ال)?صرف|كم\s*يساوي|كم\s*تساوي|كم\s*توازي|تحويل\s*(?:عملة)?\s*(?:من|الى|إلى))",
+    re.IGNORECASE,
+)
+_GREETING_RE = re.compile(
+    r"^(?:مرحبا|اهلا|أهلا|هلا|هاي|صباح الخير|مساء الخير|السلام عليكم|سلام|hi|hello|hey|yo)",
+    re.IGNORECASE,
+)
+
+
+def parse_rate_question(raw: str) -> dict | None:
+    """يكتشف سؤال سعر صرف بلا مبلغ — بمطابقة كلمات كاملة وتجاهل أسئلة الإنفاق."""
+    text = (raw or "").strip().strip("?؟!.")
+    if not text or len(text) < 4:
+        return None
+    # تجاهل أسئلة المصاريف "كم صرفت..." (فعل ماضٍ + عملات في نفس الجملة)
+    if re.search(r"كم\s*صرفت", text):
+        return None
+    if _RATE_KEYWORDS.search(text):
+        from app.database.crud import CURRENCY_ALIASES
+        from app.exchange import CURRENCY_NAMES
+
+        tokens = re.split(r"[\s,،!?.]+", text)
+        codes: list[str] = []
+        for t in tokens:
+            low = t.lower()
+            code = CURRENCY_ALIASES.get(low)
+            if code is None:
+                code = t.upper() if t.upper() in CURRENCY_NAMES else None
+            if code is None:
+                # مطابقة كلمة كاملة فقط بحدود كلمات، لا substring داخل "Sarah"
+                for alias, acode in CURRENCY_ALIASES.items():
+                    if len(alias) <= 3:
+                        if re.search(r"\b" + re.escape(alias) + r"\b", low):
+                            code = acode
+                            break
+                    elif alias == low or alias in low.split():
+                        code = acode
+                        break
+            if code and code not in codes:
+                codes.append(code)
+            if len(codes) >= 2:
+                break
+        if len(codes) >= 2:
+            return {"from": codes[0], "to": codes[1]}
+    return None
+
+
+def is_greeting(text: str) -> bool:
+    """يحدد إذا كان النص تحية (مرحبا/أهلا/هلا/hi/...)."""
+    return bool(_GREETING_RE.match((text or "").strip().strip("?؟!.")))
+
+
+async def budget_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """نص حر من زر "إضافة ميزانية" (عملة/شخص) → إنشاء الميزانية."""
+    pending = context.user_data.pop("pending_budget", None)
+    if not pending:
+        return await text_router(update, context)
+
+    scope = pending.get("scope", "currency")
+    parsed = parse_budget_text(scope, update.message.text)
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if parsed is None:
+        example = {
+            "currency": "ILS 2000",
+            "person": "محمد 1500",
+            "category": "مشتريات 2000",
+        }.get(scope, "ILS 2000")
+        await update.message.reply_text(f"لم أفهم الصيغة. أرسل مثل: {example}")
+        return None
+    if parsed.get("error"):
+        await update.message.reply_text(parsed["error"])
+        return None
+
+    from app.database.crud import create_budget
+
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        budget = create_budget(db, uid, scope, parsed["target"], str(parsed["monthly_limit"]))
+    finally:
+        db.close()
+
+    if not budget:
+        await update.message.reply_text(
+            "لم تُنشأ الميزانية. ربما ميزانية بنفس النطاق والهدف موجودة مسبقًا أو المبلغ غير صالح.",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+        return None
+
+    from app.formatting import fmt_amount
+
+    scope_txt = {
+        "currency": budget.currency,
+        "person": f"الشخص {budget.person}",
+        "category": f"التصنيف {budget.category}",
+    }.get(budget.scope, budget.scope)
+    await update.message.reply_text(
+        f"{SUCCESS} أُنشئت ميزانية شهرية: {scope_txt} — {fmt_amount(budget.monthly_limit)}\n"
+        "سأرسل تنبيهًا عند اقترابك من السقف وتجاوزه.",
+        reply_markup=MAIN_HOME_KEYBOARD,
+    )
+    return None
+
+
+async def convert_add_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """نص حر من زر "تحويل عملة" → تحويل وعرض الناتج."""
+    context.user_data.pop("pending_convert", None)
+    parsed = parse_convert_text(update.message.text)
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if parsed is None:
+        await update.message.reply_text(
+            "لم أفهم صيغة التحويل. أرسل مثل:\n• 300 ILS إلى USD\n• 500 دولار إلى شيكل"
+        )
+        return None
+
+    from app.exchange import CURRENCY_NAMES, convert
+
+    result = await asyncio.to_thread(
+        convert, parsed["amount"], parsed["from"], parsed["to"]
+    )
+    if "error" in result:
+        await update.message.reply_text(result["error"], reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+
+    from_name = CURRENCY_NAMES.get(result["from"], result["from"])
+    to_name = CURRENCY_NAMES.get(result["to"], result["to"])
+    await update.message.reply_text(
+        f"{result['amount']} {from_name} = {result['result']} {to_name}\n"
+        f"(سعر الصرف: 1 {result['from']} = {result['rate']} {result['to']})",
+        reply_markup=MAIN_HOME_KEYBOARD,
+    )
+    return None
+
+
+async def workspace_invite_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """نص حر من زر "إضافة عضو" → دعوة المعرّف الرقمي إلى المساحة المشتركة."""
+    context.user_data.pop("pending_ws_invite", None)
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    digits = re.sub(r"[^\d]", "", update.message.text or "")
+    if not digits:
+        await update.message.reply_text(
+            "أرسل المعرّف الرقمي فقط (أرقام مثل: 555666777).", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        return None
+
+    from app.database.crud import invite_to_workspace
+
+    db = SessionLocal()
+    try:
+        ok = invite_to_workspace(db, update.effective_user.id, int(digits))
+    finally:
+        db.close()
+    if ok:
+        await update.message.reply_text(
+            f"{SUCCESS} أُرسلت دعوة للعضو {digits} إلى مساحتك المشتركة.\n"
+            "لن تُدمج بياناتكما حتى يقبل الطرف الدعوة بنفسه "
+            "(سيراها في قائمة المساحة المشتركة أو عبر /work).",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+    else:
+        await update.message.reply_text(
+            "تعذّرت الدعوة: لست المرتكز (المالك)، أو أرسلت معرّفك الخاص، "
+            "أو الطرف عضو نشط في مساحة أخرى (لا سحب دون موافقته).",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+    return None
+
+
+# ---------- أدوات تنظيف الحالة المعلّقة ----------
+
+
+def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يمسح بيانات مرحلة جمع النواقص."""
+    for key in (
+        "pending_record",
+        "pending_type",
+        "pending_raw",
+        "pending_missing",
+        "pending_message_id",
+    ):
+        context.user_data.pop(key, None)
+
+
+def _clear_confirm_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يمسح حالة شاشة التأكيد المعلّقة."""
+    for key in ("confirm_result", "confirm_raw", "confirm_message_id", "confirm_editing_field", "_confirm_saved"):
+        context.user_data.pop(key, None)
+
+
+def _clear_seeds(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """يمسح "بذور" القوائم المعلّقة (تسجيل بنية، ميزانية، تحويل، تعديل مهمة، دعوة مساحة)."""
+    for key in (
+        "record_seed_type",
+        "pending_budget",
+        "pending_convert",
+        "pending_task_edit_id",
+        "pending_ws_invite",
+        "pending_record_edit_id",
+        "pending_record_edit_model",
+        "pending_record_edit_field",
+        "pending_search",
+        "pending_search_term",
+        "co_name",
+        "co_desc",
+        "co_type",
+        "co_currency",
+        "co_pending_invite",
+        "pending_company_edit",
+    ):
+        context.user_data.pop(key, None)
+
+
+def _clear_all_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_pending(context)
+    _clear_confirm_state(context)
+    _clear_seeds(context)
+    # تنظيف إضافي لمفاتيح onboarding المتناثرة
+    for key in ("co_name", "co_desc", "co_type", "co_currency", "co_pending_invite", "pending_company_edit"):
+        context.user_data.pop(key, None)
+
+
+# ---------- منطق التسجيل (مشترك بين النص والوسائط) ----------
+
+
+def can_save_record(result: dict) -> bool:
+    data_type = result.get("type")
+    if data_type in ("expense", "income"):
+        return result.get("amount") is not None
+    if data_type == "task":
+        return bool(result.get("description") or result.get("person"))
+    if data_type == "complete_task":
+        return bool(result.get("description"))
+    if data_type in ("order", "note"):
+        return bool(result.get("description") or result.get("person"))
+    return False
+
+
+def _do_save(
+    db: Session,
+    telegram_user_id: int,
+    result: dict,
+    raw_message: str | None,
+    telegram_message_id: int | None = None,
+) -> str | None:
+    from app.validation import sanitize_analysis_result
+
+    # بوابة أمان أخيرة قبل الحفظ: تُصرَّف أي قيمة خارجة عن القوائم البيضاء/حدود
+    # المدى (حتى لو أتت من تعديل حقل أو زر) — القيمة المخالفة تصبح None فيُطلب
+    # إكمالها من المستخدم بدل حفظ بيانات مشوّهة.
+    result = sanitize_analysis_result(dict(result))
+
+    data_type = result.get("type")
+
+    if not can_save_record(result):
+        return None
+
+    # طبقة صلاحيات موحّدة: record.create للإنشاء، و edit للعمليات
+    from app.audit import log_audit
+    from app.database.crud.company import has_permission
+
+    if data_type in ("expense", "income", "task", "order", "note"):
+        if not has_permission(db, telegram_user_id, "record.create"):
+            log_audit(telegram_user_id, "denied_record_create", data_type, detail="record.create required")
+            return "ليس لديك صلاحية إنشاء السجلات (دورك لا يسمح بالتسجيل)."
+    if data_type == "complete_task":
+        # إنجاز مهمة يتطلب صلاحية تعديل (edit_own/edit_any) عبر can_edit_record
+        from app.database.crud.company import can_edit_record
+        # نفحص لاحقًا بعد العثور على المهمة؛ إن لم توجد نترك رسالة عدم وجود
+        pass
+
+    if data_type in ("expense", "income"):
+        obj = create_transaction(db, telegram_user_id, result, raw_message, telegram_message_id)
+        if obj is None:
+            return "تم تسجيل هذه العملية مسبقًا (تكرار)."
+        return "تم حفظ العملية."
+
+    if data_type == "task":
+        obj = create_task(db, telegram_user_id, result, raw_message, telegram_message_id)
+        if obj is None:
+            return "تم تسجيل هذه المهمة مسبقًا (تكرار)."
+        return "تم حفظ المهمة."
+
+    if data_type == "complete_task":
+        description_hint = result.get("description")
+        if description_hint:
+            task = find_pending_task(db, telegram_user_id, description_hint)
+            if task:
+                from app.database.crud.company import can_edit_record
+                if not can_edit_record(db, telegram_user_id, task.telegram_user_id):
+                    log_audit(telegram_user_id, "denied_complete_task", f"task:{task.id}", detail="record.edit required")
+                    return "ليس لديك صلاحية إنجاز هذه المهمة."
+                complete_task(db, telegram_user_id, task.id)
+                return f"تم إنجاز المهمة: {task.description}"
+            return "لم أجد مهمة مطابقة ضمن مهامك المعلّقة."
+        return "حدد المهمة التي تريد إنجازها (مثلاً: أنجزت مهمة الاتصال بسامر)"
+
+    if data_type in ("order", "note"):
+        obj = create_note(db, telegram_user_id, result, raw_message, telegram_message_id)
+        if obj is None:
+            return "تم تسجيل هذا السجل مسبقًا (تكرار)."
+        type_ar = "الطلبية" if data_type == "order" else "الملاحظة"
+        return f"تم حفظ {type_ar}."
+
+    return None
+
+
+def save_record(
+    db: Session,
+    telegram_user_id: int,
+    result: dict,
+    raw_message: str | None,
+    telegram_message_id: int | None = None,
+) -> str | None:
+    return _do_save(db, telegram_user_id, result, raw_message, telegram_message_id)
+
+
+def missing_fields_for(result: dict) -> list[str]:
+    data_type = result.get("type")
+    missing = []
+
+    if data_type in ("expense", "income"):
+        if result.get("amount") is None:
+            missing.append("amount")
+        # العملة: لا نطلبها إن لم يذكرها المستخدم (تُستخدم عملة الأساس)، لكن إن ذكر عملة
+        # غير مفهومة (يوان/BTC/ريال المبهمة أو IQD خارج القائمة) يجب أن نطلبها.
+        # الكشف عبر: currency is None مع وجود خام محفوظ أو flag في missing_fields
+        if result.get("currency") is None:
+            raw = (
+                result.get("currency_raw")
+                or result.get("_raw_currency")
+                or result.get("raw_currency")
+            )
+            mf = result.get("missing_fields") or []
+            # حالة 1: خام محفوظ غير فارغ (يوان/BTC/ريال...) → غير معروف
+            if raw and str(raw).strip():
+                if "currency" not in missing:
+                    missing.append("currency")
+            # حالة 2: sanitize/schemas وضعت currency في missing_fields صراحةً
+            elif "currency" in mf:
+                if "currency" not in missing:
+                    missing.append("currency")
+            # لا نضيف currency إذا لم يكن هناك خام ولا flag (يعني المستخدم لم يذكر عملة أصلاً)
+    elif data_type == "task":
+        if not result.get("description") and not result.get("person"):
+            missing.append("description")
+    elif data_type == "complete_task":
+        if not result.get("description"):
+            missing.append("description")
+    elif data_type in ("order", "note"):
+        if not result.get("description") and not result.get("person"):
+            missing.append("description")
+
+    return missing
+
+
+_PROMPTS = {"amount": "المبلغ؟", "currency": "العملة؟", "person": "الشخص؟",
+            "date": "الموعد؟", "description": "الوصف؟"}
+
+def ask_for_field_prompt(data_type: str, field: str) -> str:
+    return _PROMPTS.get(field, f"{FIELD_LABELS.get(field, field)}؟")
+
+
+def fill_field_from_reply(partial: dict, reply_result: dict, field: str) -> None:
+    from app.validation import sanitize_analysis_result
+
+    # القيمة القادمة من تحليل ردّ المستخدم قد تحمل بيانات خارجة عن الحدود
+    # (مبالغ فاحشة/أسماء طويلة/عملات مجهولة) — تُقيَّد قبل دمجها في السجل.
+    reply_result = sanitize_analysis_result(dict(reply_result))
+
+    if field == "amount":
+        if reply_result.get("amount") is not None:
+            partial["amount"] = reply_result["amount"]
+        if reply_result.get("currency") and not partial.get("currency"):
+            partial["currency"] = reply_result["currency"]
+    elif field == "currency":
+        if reply_result.get("currency"):
+            partial["currency"] = reply_result["currency"]
+    elif field == "person":
+        if reply_result.get("person"):
+            partial["person"] = reply_result["person"]
+    elif field == "description":
+        if reply_result.get("description"):
+            partial["description"] = reply_result["description"]
+        elif reply_result.get("person"):
+            partial["person"] = reply_result["person"]
+    elif field == "date":
+        if reply_result.get("date"):
+            partial["date"] = reply_result["date"]
+
+
+def handle_query_intent(result: dict, telegram_user_id: int) -> str:
+    db = SessionLocal()
+    try:
+        query_result = run_query(db, telegram_user_id, result.get("query_details") or {})
+    finally:
+        db.close()
+    return format_query_result(query_result)
+
+
+async def _start_collect(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, raw_text: str, msg_id: int
+) -> None:
+    """يخزّن التسجيل الناقص في user_data ويسأل المستخدم عن أول حقل ناقص."""
+    data_type = result.get("type")
+    missing = missing_fields_for(result)
+
+    context.user_data["pending_record"] = result
+    context.user_data["pending_type"] = data_type
+    context.user_data["pending_raw"] = raw_text
+    context.user_data["pending_missing"] = missing
+    context.user_data["pending_message_id"] = msg_id
+
+    first = missing[0]
+    reply = ask_for_field_prompt(data_type, first)
+    await update.message.reply_text(reply, reply_markup=CANCEL_KB)
+
+
+def _send_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, raw_text: str, msg_id: int
+) -> int:
+    """يعرض شاشة التأكيد ويحوّل إلى حالة CONFIRM."""
+    context.user_data["confirm_result"] = result
+    context.user_data["confirm_raw"] = raw_text
+    context.user_data["confirm_message_id"] = msg_id
+    return CONFIRM
+
+
+async def _handle_record_result(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, raw_text: str, msg_id: int
+) -> int | None:
+    """يوجّه نتيجة record: إنجاز فوري، جمع نواقص، أو شاشة تأكيد."""
+    data_type = result.get("type")
+
+    if not data_type or data_type == "unknown" or data_type not in TYPE_NAMES:
+        await update.message.reply_text(format_record_result(result, False))
+        return None
+
+    if data_type == "complete_task":
+        from app.database.crud import find_pending_tasks
+        from bot.menus import MAIN_HOME_KEYBOARD
+
+        hint = (result.get("description") or "").strip()
+        # قصير جدًا → اطلب توضيح
+        if len(hint) < 3:
+            await update.message.reply_text(
+                "وصف المهمة قصير جدًا — أرسل وصفًا أدق (3 أحرف على الأقل) أو اختر من /menu → مهامي.",
+                reply_markup=MAIN_HOME_KEYBOARD,
+            )
+            return None
+        # تعدد المطابقات → اعرض قائمة اختيار بدل إنجاز أول تطابق (الأحدث) عشوائيًا
+        def _find_candidates():
+            db = SessionLocal()
+            try:
+                return find_pending_tasks(db, update.effective_user.id, hint)
+            finally:
+                db.close()
+
+        candidates = await asyncio.to_thread(_find_candidates)
+        if len(candidates) > 1:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            rows = [
+                [InlineKeyboardButton(f"✅ {c.description[:40]}", callback_data=f"tsk:done:{c.id}")]
+                for c in candidates[:8]
+            ]
+            rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="menu:main")])
+            await update.message.reply_text(
+                f"وجدت {len(candidates)} مهمة تطابق \"{hint}\" — اختر التي تريد إنجازها:",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return None
+        if len(candidates) == 0:
+            await update.message.reply_text(
+                "لم أجد مهمة مطابقة ضمن مهامك المعلّقة.", reply_markup=MAIN_HOME_KEYBOARD
+            )
+            return None
+        # مرشح واحد → إنجاز مباشر (مع صلاحية)
+        def _save():
+            db = SessionLocal()
+            try:
+                return save_record(db, update.effective_user.id, result, raw_text, msg_id)
+            finally:
+                db.close()
+
+        reply = await asyncio.to_thread(_save)
+        await update.message.reply_text(
+            reply or "لم أستطع فهم مهمة محددة لإنجازها.", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        return None
+
+    missing = missing_fields_for(result)
+    if missing:
+        await _start_collect(update, context, result, raw_text, msg_id)
+        return COLLECT
+
+    _clear_pending(context)
+    await update.message.reply_text(
+        _build_confirm_text(result),
+        reply_markup=_build_confirm_keyboard(result),
+    )
+    return _send_confirm(update, context, result, raw_text, msg_id)
+
+
+async def _handle_query(update: Update, result: dict) -> None:
+    reply = await asyncio.to_thread(handle_query_intent, result, update.effective_user.id)
+    await safe_reply(update.message, reply)
+    return None
+
+
+# ---------- دخول المحادثة ----------
+
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """نقطة دخول النصوص: تعديل حقل التأكيد → تعديل مهمة → ميزانية → تحويل → جمع نواقص → تسجيل/استعلام."""
+    # فحص السماح العام لجميع الرسائل النصية (يسمح لـ /register و /start حتى لو غير مسموح)
+    # text_router يستقبل TEXT فقط (لا أوامر)، لذا نفحص مباشرة
+    allowed, reason = _is_allowed_or_reply(update)
+    if not allowed:
+        await update.message.reply_text(reason)
+        return None
+    if context.user_data.get("confirm_editing_field"):
+        return await edit_confirm_field_value(update, context)
+    if context.user_data.get("pending_task_edit_id"):
+        return await task_edit_value(update, context)
+    if context.user_data.get("pending_record_edit_id"):
+        return await record_edit_value(update, context)
+    if context.user_data.get("pending_company_edit"):
+        return await company_edit_value(update, context)
+    if context.user_data.get("pending_search"):
+        return await search_value(update, context)
+    if context.user_data.get("pending_budget"):
+        return await budget_add_value(update, context)
+    if context.user_data.get("pending_convert"):
+        return await convert_add_value(update, context)
+    if context.user_data.get("pending_ws_invite"):
+        return await workspace_invite_value(update, context)
+    if context.user_data.get("pending_missing"):
+        return await collect_reply(update, context)
+    return await fresh_entry(update, context)
+
+
+def _company_dict_for_user(telegram_user_id: int) -> dict | None:
+    """يبني dict جاهز للـ AI (name/description) بلا كائن ORM."""
+    try:
+        db = SessionLocal()
+        try:
+            from app.database.crud.company import company_id_for_user, get_company
+
+            cid = company_id_for_user(db, telegram_user_id)
+            if cid is None:
+                return None
+            comp = get_company(db, cid)
+            if comp is None:
+                return None
+            return {"name": comp.name, "description": comp.description}
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def _company_info_reply(telegram_user_id: int) -> str:
+    """رد مباشر من DB عن شركتك (بلا Gemini)."""
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import (
+            company_id_for_user,
+            company_member_ids,
+            get_company,
+            get_company_member,
+        )
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, telegram_user_id)
+        if cid is None:
+            return "لست عضوًا في أي شركة بعد. أنشئ شركة عبر /start."
+        comp = get_company(db, cid)
+        if comp is None:
+            return "لم أجد بيانات شركتك."
+        m = get_company_member(db, telegram_user_id)
+        role_label = ROLE_LABELS.get(m.role, m.role) if m else "غير معروف"
+        members = company_member_ids(db, cid)
+        count = len(members)
+        lines = [
+            f"🏢 شركتك: {comp.name}",
+            f"📝 النشاط: {comp.description or '—'}",
+        ]
+        if getattr(comp, "business_type", None):
+            from app.permissions import BUSINESS_TYPES
+
+            btype = BUSINESS_TYPES.get(comp.business_type, comp.business_type)
+            lines.append(f"🏷️ النوع: {btype}")
+        if getattr(comp, "base_currency", None):
+            lines.append(f"💱 العملة: {comp.base_currency}")
+        lines.append(f"👥 الأعضاء: {count}")
+        lines.append(f"🎖️ دورك: {role_label}")
+        return "\n".join(lines)
+    finally:
+        db.close()
+
+
+async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """يحلّل رسالة نصية جديدة ويوجّهها (تسجيل/استعلام/محادثة)."""
+    # نوع صريح من زر "تسجيل عملية ← نوع" يُحتفظ به قبل مسح الحالة المعلّقة
+    seed = context.user_data.pop("record_seed_type", None)
+    _clear_all_pending(context)
+    user_text = update.message.text or ""
+    telegram_user_id = update.effective_user.id
+    msg_id = update.message.message_id
+
+    # --- حماية الحصة وقائمة السماح (البند 6) ---
+    # السماح لـ /register و /start حتى لو غير مسموح، ليتمكن من التسجيل
+    _txt_low = (user_text or "").strip().lower()
+    _is_register_cmd = _txt_low.startswith("/register") or _txt_low.startswith("/start")
+    if not _is_register_cmd:
+        allowed, reason = _is_allowed_or_reply(update)
+        if not allowed:
+            await update.message.reply_text(reason)
+            return None
+        # فحص الحصة اليومية قبل استهلاك Gemini
+        if is_daily_limited(telegram_user_id):
+            try:
+                from app.config import settings
+                per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+            except Exception:
+                per_user = 50
+            await update.message.reply_text(
+                f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+                "حاول غدًا بعد منتصف الليل بتوقيت Asia/Gaza."
+            )
+            return None
+
+    if is_rate_limited(telegram_user_id):
+        await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
+        return None
+
+    rate_q = parse_rate_question(user_text)
+    if rate_q:
+        from app.exchange import CURRENCY_NAMES, convert
+
+        rate_result = await asyncio.to_thread(convert, "1", rate_q["from"], rate_q["to"])
+        if "error" in rate_result:
+            await update.message.reply_text(rate_result["error"])
+        else:
+            from_name = CURRENCY_NAMES.get(rate_result["from"], rate_result["from"])
+            to_name = CURRENCY_NAMES.get(rate_result["to"], rate_result["to"])
+            await update.message.reply_text(
+                f"💱 سعر الصرف اليوم:\n"
+                f"1 {from_name} = {rate_result['rate']} {to_name}"
+            )
+        return None
+
+    company_dict = _company_dict_for_user(telegram_user_id)
+
+    def _safe_analyze(text, comp):
+        # احترام موافقة الخصوصية — إن عطّل المستخدم Gemini لا نرسل شيئًا
+        try:
+            from app.database.crud.common import has_ai_consent
+            from app.database.db import SessionLocal as _SL2
+            _db2 = _SL2()
+            try:
+                if not has_ai_consent(_db2, telegram_user_id):
+                    # تحليل محلي بلا شبكة: قواعد بسيطة تكفي للتسجيل اليدوي
+                    # محاولة تقسيم محلي بسيط (مبلغ+عملة) بدل Gemini
+                    import re as _re_loc
+
+                    from app.schemas import normalize_analysis as _norm
+                    low = (text or "").lower()
+                    # كشف استعلام
+                    _words = low.split()
+                    if any(w in _words for w in ("كم", "ما")) or any(w in low for w in ("كم صرفت", "كم استلمت", "كم دفعت", "show", "total")):
+                        metric = "total_expenses"
+                        if any(w in low for w in ("استلم", "إيراد", "دخل", "income")):
+                            metric = "total_income"
+                        period = "all_time"
+                        if "هذا الشهر" in text or "هذا الشهر" in low or "this month" in low:
+                            period = "this_month"
+                        elif "اليوم" in text or "today" in low:
+                            period = "today"
+                        elif "هذا الأسبوع" in text or "this week" in low:
+                            period = "this_week"
+                        return _norm({"intent": "query", "query_details": {"metric": metric, "period": period, "person": None}, "raw": text})
+                    # كشف محادثة
+                    if any(w in low for w in ("مرحبا", "هلا", "السلام", "hello", "hi", "شكرا", "thanks")):
+                        return _norm({"intent": "chat", "reply": "أهلاً! أنا مساعدك في إدارة أعمالك.", "raw": text})
+                    m = _re_loc.search(r"\d+(?:[.,]\d+)?", text)
+                    amt = None
+                    if m:
+                        try:
+                            amt = float(m.group(0).replace(",", "."))
+                        except Exception:
+                            amt = None
+                    return _norm({"intent": "record", "type": "expense", "amount": amt, "raw": text})
+            finally:
+                try:
+                    _db2.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            return analyze_message(text, comp)
+        except TypeError:
+            return analyze_message(text)
+
+    from app.ai_queue import aiq
+
+    # حصة يومية: كل رسالة تستهلك 1-3 استدعاءات Gemini، لذا نحصي قبل التحليل
+    if not check_and_increment_daily(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+            "حاول غدًا بعد منتصف الليل بتوقيت Asia/Gaza."
+        )
+        return None
+
+    result = await aiq.submit(lambda: _safe_analyze(user_text, company_dict))
+    # لا تسجّل محتوى الحقول الحساسة (amount/person/description) — سجّل الأسماء والمعرّفات فقط
+    logger.info(
+        "نتيجة التحليل: intent=%s type=%s user=%s missing=%s",
+        result.get("intent"),
+        result.get("type"),
+        telegram_user_id,
+        (result.get("missing_fields") or []) if isinstance(result.get("missing_fields"), list) else [],
+    )
+
+    if seed and result.get("intent") == "record":
+        result["type"] = seed
+
+    # إعادة تحقق بعد كل مسار (إصلاح/تعديل/زر): نوع غير معروف = لا يُحفظ
+    from app.validation import valid_record_type
+
+    if result.get("type") and not valid_record_type(result.get("type")):
+        result["type"] = None
+
+    intent = result.get("intent")
+
+    if intent == "company_info":
+        reply = _company_info_reply(telegram_user_id)
+        await update.message.reply_text(reply)
+        return None
+
+    if intent == "record":
+        return await _handle_record_result(update, context, result, user_text, msg_id)
+
+    if intent == "query":
+        return await _handle_query(update, result)
+
+    if intent == "chat":
+        chat_reply = (result or {}).get("reply") or (
+            "أهلًا! كيف أقدر أساعدك؟ سجّل عملية أو اسأل عن ميزانيتك."
+            if is_greeting(user_text)
+            else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
+        )
+        await update.message.reply_text(chat_reply, reply_markup=QUICK_ACTIONS)
+    else:
+        await update.message.reply_text(
+            "أعتذر، ما فهمت رسالتك. جرّب:\n"
+            "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
+            "• سؤال: \"كم لي عند محمد؟\"\n"
+            "• سعر صرف: \"كم صرف شيكل على دينار\""
+        )
+    return None
+
+
+async def collect_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """يملأ الحقل الناقص من ردّ المستخدم (حالة COLLECT)."""
+    # فحص السماح والحصة قبل معالجة رد الإكمال
+    _uid = update.effective_user.id if update.effective_user else None
+    if _uid is not None:
+        allowed, reason = _is_allowed_or_reply(update)
+        if not allowed:
+            await update.message.reply_text(reason)
+            return None
+        if is_daily_limited(_uid):
+            try:
+                from app.config import settings
+                per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+            except Exception:
+                per_user = 50
+            await update.message.reply_text(
+                f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+                "حاول غدًا."
+            )
+            return None
+    if is_rate_limited(update.effective_user.id):
+        await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
+        return None
+    partial = context.user_data.get("pending_record")
+    data_type = context.user_data.get("pending_type")
+    raw = context.user_data.get("pending_raw")
+    pending_msg_id = context.user_data.get("pending_message_id")
+
+    if not partial or not data_type:
+        await update.message.reply_text("أعتذر، انتهت جلسة الإكمال. أرسل العملية من جديد من فضلك.")
+        _clear_all_pending(context)
+        return None
+
+    # حصة يومية قبل استدعاء Gemini لإكمال الحقل
+    if _uid is not None and not check_and_increment_daily(_uid):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي ({per_user} طلب/يوم). حاول غدًا."
+        )
+        return None
+
+    missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
+    field = missing[0] if missing else None
+
+    # فحص موافقة Gemini: بديل محلي (لا Gemini)
+    try:
+        from app.database.crud.common import has_ai_consent
+        from app.database.db import SessionLocal as _SLc
+        _dbc = _SLc()
+        try:
+            _consent = has_ai_consent(_dbc, _uid)
+        finally:
+            _dbc.close()
+    except Exception:
+        _consent = True
+    if not _consent:
+        _txt = update.message.text or ""
+        _rr = {"intent": "record", "type": None}
+        if field == "amount":
+            import re as _re
+            m = _re.search(r"\d+(?:[.,]\d+)?", _txt)
+            if m:
+                try:
+                    _rr["amount"] = float(m.group(0).replace(",", "."))
+                except Exception:
+                    _rr["amount"] = None
+        elif field == "currency":
+            try:
+                from app.database.crud.common import normalize_currency
+                _rr["currency"] = normalize_currency(_txt)
+            except Exception:
+                _rr["currency"] = _txt.strip()
+        elif field == "person":
+            _rr["person"] = _txt.strip()
+        elif field == "description":
+            _rr["description"] = _txt.strip()
+        elif field == "category":
+            _rr["category"] = _txt.strip()
+        reply_result = _rr
+    else:
+        # تحليل محلي أولاً للأرقام
+        _txt = update.message.text or ""
+        import re as _re
+        if field == "amount" and _re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*", _txt):
+            reply_result = {"intent": "record", "type": None, "amount": float(_txt.replace(",", "."))}
+        else:
+            reply_result = await asyncio.to_thread(analyze_message, update.message.text)
+
+    missing = context.user_data.get("pending_missing") or missing_fields_for(partial)
+    field = missing[0] if missing else None
+    fill_field_from_reply(partial, reply_result, field)
+
+    remaining = missing_fields_for(partial)
+    context.user_data["pending_missing"] = remaining
+
+    if remaining:
+        first = remaining[0]
+        await update.message.reply_text(
+            "لا يزال يلزم:\n"
+            f"• {FIELD_LABELS.get(first, first)}\n" + ask_for_field_prompt(data_type, first)
+        )
+        return COLLECT
+
+    # اكتملت البيانات → شاشة تأكيد (قبلها نمسح بيانات الجمع لكي لا نخلطها بجمع جديد)
+    raw_confirm = raw if raw is not None else ""
+    _clear_pending(context)
+    await update.message.reply_text(
+        _build_confirm_text(partial),
+        reply_markup=_build_confirm_keyboard(partial),
+    )
+    return _send_confirm(update, context, partial, raw_confirm, pending_msg_id)
+
+
+# ---------- سجل التحليل الخاطئ (تحسين مستمر) ----------
+
+
+def _record_feedback(
+    context: ContextTypes.DEFAULT_TYPE, source: str, telegram_user_id: int
+) -> None:
+    """يسجّل رسالةً قرر المستخدم أنها خاطئة (إلغاء أو رفض تأكيد).
+
+    تُخزَّن النص الأصلي (مشفّر في قاعدة البيانات) في جدول correction_feedback
+    لمراجعتها يدويًا وتحسين الـ prompt — مع احترام feedback_consent وحد 500 حرف.
+    لا يحجب تدفق المحادثة أبدًا.
+    """
+    raw = context.user_data.get("pending_raw") or context.user_data.get("confirm_raw") or ""
+    data_type = (
+        (context.user_data.get("pending_record") or {}).get("type")
+        or (context.user_data.get("confirm_result") or {}).get("type")
+        or None
+    )
+    if not raw.strip():
+        return
+    db = SessionLocal()
+    try:
+        from app.database.crud.common import has_feedback_consent
+        if not has_feedback_consent(db, telegram_user_id):
+            return
+        record_correction_feedback(db, telegram_user_id, raw[:500], source, data_type)
+    except Exception:
+        logger.exception("فشل تسجيل التحليل الخاطئ (التدفق يستمر)")
+    finally:
+        db.close()
+
+
+# ---------- الوسائط (صوت/ملف/مقطع/صورة فاتورة) ----------
+
+
+class MediaTooLargeError(Exception):
+    """الملف الصوتي يتجاوز الحد الأقصى المسموح."""
+
+
+def _check_file_size(message: Message) -> None:
+    """يرمي MediaTooLargeError إذا حجم الملف يتجاوز الحد المسموح."""
+    from app.config import settings
+
+    limit_bytes = (settings.max_voice_file_mb or 20) * 1024 * 1024
+    file_size = 0
+    if message.voice:
+        file_size = message.voice.file_size or 0
+    elif message.audio:
+        file_size = message.audio.file_size or 0
+    elif message.video_note:
+        file_size = message.video_note.file_size or 0
+    elif message.photo:
+        file_size = (message.photo[-1].file_size or 0) if message.photo else 0
+    elif message.document:
+        file_size = message.document.file_size or 0
+    if file_size and file_size > limit_bytes:
+        raise MediaTooLargeError(
+            f"حجم الملف ({file_size // (1024 * 1024)}MB) يتجاوز الحد الأقصى "
+            f"({settings.max_voice_file_mb}MB)."
+        )
+
+
+async def _extract_media(update: Update) -> tuple[bytes | None, str | None, str]:
+    """ينزّل ملف الوسيط ويعيد (بايتات, mime, نوع الوسيط) — بدون تحليل AI.
+
+    فحص الحجم يتم قبله مباشرة (في media_router) كي نرفض الملفات الضخمة
+    قبل أي تنزيل. التحويل/التحليل يُنفَّذ لاحقًا عبر طابور الـ AI (اختياري).
+    """
+    message = update.message
+    if message.voice:
+        voice = await message.voice.get_file()
+        data = await voice.download_as_bytearray()
+        return bytes(data), "audio/ogg", "صوت"
+    if message.audio:
+        audio = message.audio
+        file = await audio.get_file()
+        data = await file.download_as_bytearray()
+        mime = audio.mime_type
+        if not mime:
+            name = audio.file_name or ""
+            mime = (
+                "audio/ogg"
+                if name.endswith(".ogg")
+                else "audio/mpeg"
+                if name.endswith(".mp3")
+                else "audio/mp4"
+                if name.endswith(".m4a")
+                else "audio/ogg"
+            )
+        return bytes(data), mime, "ملف صوتي"
+    if message.video_note:
+        file = await message.video_note.get_file()
+        data = await file.download_as_bytearray()
+        return bytes(data), "video/mp4", "مقطع مرئي"
+    if message.photo:
+        # أكبر نسخة من الصورة المرسلة = فاتورة/إيصال محتمل
+        photo = message.photo[-1]
+        file = await photo.get_file()
+        data = await file.download_as_bytearray()
+        return bytes(data), "image/jpeg", "فاتورة (صورة)"
+    if message.document:
+        # مستند PDF = فاتورة/إيصال رقمي محتمل
+        doc = message.document
+        file = await doc.get_file()
+        data = await file.download_as_bytearray()
+        mime = doc.mime_type or "application/pdf"
+        return bytes(data), mime, "فاتورة (PDF)"
+    return None, None, ""
+
+
+def _receipt_to_text(result: dict | None) -> str:
+    """يحوّل نتيجة قراءة الفاتورة إلى ملخص نصي (لعرضه في التأكيد/التسجيل)."""
+    if not result or result.get("type") == "unknown":
+        return ""
+    parts = []
+    if result.get("amount") is not None:
+        currency = result.get("currency") or ""
+        parts.append(f"المبلغ {result['amount']} {currency}".strip())
+    if result.get("person"):
+        parts.append(f"المورد: {result['person']}")
+    if result.get("date"):
+        parts.append(f"التاريخ: {result['date']}")
+    if result.get("description"):
+        parts.append(result["description"])
+    label = TYPE_NAMES.get(result.get("type"), "فاتورة")
+    return f"{label}: " + " — ".join(parts) if parts else label
+
+
+def _analyze_media_sync(
+    media_bytes: bytes, mime: str, media_kind: str
+) -> tuple[str, str, dict | None]:
+    """تعرف صوتي + تحليل نص، أو قراءة فاتورة (صورة) — دالة متزامنة للطابور.
+
+    يعيد (نص, نوع الوسيط, نتيجة التحليل أو None إن لم يُفهم).
+    """
+    if mime and (mime.startswith("image/") or mime == "application/pdf"):
+        result = analyze_receipt_image(media_bytes, mime_type=mime)
+        return media_kind, _receipt_to_text(result), result
+    text = transcribe_audio(media_bytes, mime_type=mime) if media_bytes else ""
+    if not text:
+        return media_kind, "", None
+    return media_kind, text, analyze_message(text)
+
+
+MEDIA_FILTER = filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.PHOTO | filters.Document.PDF
+
+
+async def media_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """نقطة دخول الوسائط: نسخ → تحليل → نفس مسار التسجيل/الاستعلام."""
+    _clear_all_pending(context)
+    telegram_user_id = update.effective_user.id
+
+    # فحص السماح والحصة اليومية
+    allowed, reason = _is_allowed_or_reply(update)
+    if not allowed:
+        await update.message.reply_text(reason)
+        return None
+    if is_daily_limited(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي لاستخدام الذكاء الاصطناعي ({per_user} طلب/يوم).\n"
+            "حاول غدًا."
+        )
+        return None
+
+    if is_rate_limited(telegram_user_id):
+        await update.message.reply_text("لقد أرسلت الكثير من الرسائل. انتظر قليلًا ثم حاول مجددًا.")
+        return None
+
+    try:
+        # فحص الحجم قبل أي تنزيل (حماية الموارد/التكلفة)
+        _check_file_size(update.message)
+        audio_bytes, mime, media_kind = await _extract_media(update)
+    except MediaTooLargeError:
+        logger.warning("ملف وسيط مرفوض الحجم")
+        await update.message.reply_text("الملف كبير جدًا لحد المعالجة. أرسل ملفًا أصغر أو استخدم تسجيلًا صوتيًا مختصرًا.")
+        return None
+    except Exception:
+        logger.exception("خطأ في تنزيل الملف الصوتي")
+        await update.message.reply_text("حدث خطأ أثناء تحميل الملف الصوتي، حاول مرة أخرى")
+        return None
+
+    # حصة يومية قبل استدعاء Gemini (قد يستهلك 2-3 استدعاءات)
+    # فحص موافقة Gemini
+    try:
+        from app.database.crud.common import has_ai_consent
+        from app.database.db import SessionLocal as _SLm
+        _dbm = _SLm()
+        try:
+            if not has_ai_consent(_dbm, telegram_user_id):
+                await update.message.reply_text("تم تعطيل Gemini. فعّله من /privacy.")
+                return None
+        finally:
+            _dbm.close()
+    except Exception:
+        pass
+
+    if not check_and_increment_daily(telegram_user_id):
+        try:
+            from app.config import settings
+            per_user = getattr(settings, "daily_ai_limit_per_user", 50)
+        except Exception:
+            per_user = 50
+        await update.message.reply_text(
+            f"بلغت الحد اليومي ({per_user} طلب/يوم). حاول غدًا."
+        )
+        return None
+
+    # التعرف + التحليل عبر طابور الـ AI (إذا مفعّل) — وإلا مباشرةً كالسابق
+    media_kind, text, result = await aiq.submit(
+        lambda: _analyze_media_sync(audio_bytes, mime, media_kind)
+    )
+
+    if (result or {}).get("injection_guard"):
+        await update.message.reply_text(
+            "هذه الصورة تحتوي على تعليمات مضمّنة داخل نصها؛ تجاهلتها حفاظًا على أمان حسابك."
+        )
+        return None
+
+    if not text:
+        await update.message.reply_text(f"لم أستطع فهم الـ{media_kind}، حاول مرة أخرى أو أرسل نصًا.")
+        return None
+
+    intent = (result or {}).get("intent")
+    msg_id = update.message.message_id
+
+    if intent == "record":
+        return await _handle_record_result(update, context, result, text, msg_id)
+
+    if intent == "query":
+        return await _handle_query(update, result)
+
+    rate_q = parse_rate_question(text)
+    if rate_q:
+        from app.exchange import CURRENCY_NAMES, convert
+
+        rate_result = await asyncio.to_thread(convert, "1", rate_q["from"], rate_q["to"])
+        if "error" in rate_result:
+            await update.message.reply_text(rate_result["error"])
+        else:
+            from_name = CURRENCY_NAMES.get(rate_result["from"], rate_result["from"])
+            to_name = CURRENCY_NAMES.get(rate_result["to"], rate_result["to"])
+            await update.message.reply_text(
+                f"💱 سعر الصرف اليوم:\n"
+                f"1 {from_name} = {rate_result['rate']} {to_name}"
+            )
+        return None
+
+    if intent == "chat":
+        chat_reply = (result or {}).get("reply") or (
+            "أهلًا! كيف أقدر أساعدك؟ سجّل عملية أو اسأل عن ميزانيتك."
+            if is_greeting(text)
+            else "أعتذر، ما فهمت رسالتك. سجّل عملية أو اسأل عن ميزانيتك."
+        )
+        await update.message.reply_text(chat_reply, reply_markup=QUICK_ACTIONS)
+    else:
+        await update.message.reply_text(
+            "أعتذر، ما فهمت رسالتك. جرّب:\n"
+            "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
+            "• سؤال: \"كم لي عند محمد؟\"\n"
+            "• سعر صرف: \"كم صرف شيكل على دينار\""
+        )
+    return None
+
+
+# ---------- التأكيد (أزرار InlineKeyboard) ----------
+
+
+async def _confirm_resolve(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, accept: bool
+) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if not accept:
+        _record_feedback(context, source="reject_confirm", telegram_user_id=query.from_user.id)
+        await query.edit_message_text("تم الإلغاء. لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD)
+    else:
+        # لا نعتمد على فلاغ في الجلسة لمنع التكرار — idempotency في DB
+        # (telegram_message_id) هي الحارس (create_transaction/create_task/create_note
+        # تعيد None عند التكرار). فلاغ "_confirm_saved" القديم (إن وُجد في ذاكرة
+        # جلسة سابقة) يُزال أدناه عبر _clear_confirm_state.
+        result = context.user_data.get("confirm_result")
+        raw = context.user_data.get("confirm_raw")
+        msg_id = context.user_data.get("confirm_message_id")
+        telegram_user_id = query.from_user.id
+        data_type = (result or {}).get("type")
+
+        if not data_type or data_type == "unknown" or data_type not in TYPE_NAMES:
+            await query.edit_message_text(
+                "لم أفهم نوع العملية بوضوح، لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD
+            )
+        else:
+            def _save():
+                db = SessionLocal()
+                try:
+                    return save_record(db, telegram_user_id, result, raw, msg_id)
+                finally:
+                    db.close()
+
+            reply = await asyncio.to_thread(_save)
+            await query.edit_message_text(
+                reply or "أعتذر، لم أستطع حفظ هذه العملية.", reply_markup=MAIN_HOME_KEYBOARD
+            )
+
+    _clear_all_pending(context)
+    return ConversationHandler.END
+
+
+async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    return await _confirm_resolve(update, context, accept=True)
+
+
+async def confirm_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    return await _confirm_resolve(update, context, accept=False)
+
+
+async def confirm_repeat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """زر «تكرار العملية» — يحفظ الحالي ثم يبدأ عملية جديدة بنفس التفاصيل.
+
+    يبقي النوع/العملة/الشخص/التصنيف من السجل المحفوظ ويسأل عن المبلغ فقط،
+    مفيد للمصاريف المتكررة (إيجار، اشتراكات).
+    """
+    query = update.callback_query
+    await query.answer()
+
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    result = context.user_data.get("confirm_result") or {}
+    raw = context.user_data.get("confirm_raw")
+    msg_id = context.user_data.get("confirm_message_id")
+    telegram_user_id = query.from_user.id
+    data_type = result.get("type")
+
+    if not data_type or data_type == "unknown" or data_type not in TYPE_NAMES:
+        await query.edit_message_text(
+            "لم أفهم نوع العملية بوضوح، لم يُحفظ شيء.", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        _clear_all_pending(context)
+        return None
+
+    # التكرار متاح فقط للعمليات المالية (له معنى «نفس التفاصيل بمبلغ جديد»)
+    if data_type not in ("expense", "income"):
+        await query.edit_message_text(
+            "زر التكرار متاح فقط للمصاريف والإيرادات.",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+        _clear_all_pending(context)
+        return None
+
+    def _save():
+        db = SessionLocal()
+        try:
+            return save_record(db, telegram_user_id, result, raw, msg_id)
+        finally:
+            db.close()
+
+    reply = await asyncio.to_thread(_save)
+    if not reply:
+        await query.edit_message_text(
+            "أعتذر، لم أستطع حفظ هذه العملية.", reply_markup=MAIN_HOME_KEYBOARD
+        )
+        _clear_all_pending(context)
+        return None
+
+    # نسخة مكررة بنفس النوع والعملة والشخص والتفاصيل، لكن بلا مبلغ
+    repeat = {k: v for k, v in result.items() if k in ("type", "currency", "person", "category", "description")}
+    repeat["intent"] = "record"
+
+    # احسب الحقول الناقصة فعليًا بدل تثبيتها على ["amount"]
+    missing = missing_fields_for(repeat)
+    # للمصاريف/الإيرادات يجب أن يكون المبلغ هو الناقص (repeat بلا amount)
+    if not missing:
+        # احتياطي: إن لم يكن هناك نقص (حالة نظرية)، اطلب المبلغ صراحة
+        missing = ["amount"]
+
+    context.user_data["pending_record"] = repeat
+    context.user_data["pending_type"] = data_type
+    context.user_data["pending_missing"] = missing
+    context.user_data["pending_raw"] = None
+    context.user_data["pending_message_id"] = None
+
+    # رسالة حسب الحقل الناقص
+    first_missing = missing[0] if missing else "amount"
+    prompt = f"✔️ حُفظت.\n{ask_for_field_prompt(data_type, first_missing)}"
+    await query.edit_message_text(
+        prompt, reply_markup=MAIN_HOME_KEYBOARD
+    )
+    return COLLECT
+
+
+async def confirm_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """زر تعديل حقل في شاشة التأكيد → يعرض قائمة الحقول القابلة للتعديل."""
+    query = update.callback_query
+    await query.answer()
+    result = context.user_data.get("confirm_result") or {}
+    fields = _confirm_editable_fields(result)
+    buttons = [
+        [InlineKeyboardButton(FIELD_LABELS.get(f, f), callback_data=f"confirm:edit:{f}")]
+        for f in fields
+    ]
+    buttons.append([InlineKeyboardButton(f"{BACK} رجوع للتأكيد", callback_data="confirm:edit:back")])
+    await query.edit_message_text(
+        "اختر الحقل الذي تريد تعديله:", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return CONFIRM
+
+
+async def _reshow_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> int:
+    result = context.user_data.get("confirm_result") or {}
+    await query.edit_message_text(
+        _build_confirm_text(result), reply_markup=_build_confirm_keyboard(result)
+    )
+    return CONFIRM
+
+
+async def confirm_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """اختيار حقل من شاشة تعديل التأكيد → يطلب القيمة الجديدة."""
+    query = update.callback_query
+    await query.answer()
+    field = query.data.replace("confirm:edit:", "").strip()
+    if field == "back":
+        return await _reshow_confirm(query, context)
+    result = context.user_data.get("confirm_result") or {}
+    if field not in _confirm_editable_fields(result):
+        return await _reshow_confirm(query, context)
+    context.user_data["confirm_editing_field"] = field
+    preview = _confirm_value_preview(result, field)
+    await query.edit_message_text(
+        f"أرسل القيمة الجديدة لـ {FIELD_LABELS.get(field, field)}:\n"
+        f"القيمة الحالية: {preview}\n\n(أرسل /cancel للإلغاء)",
+    )
+    return CONFIRM
+
+
+async def edit_confirm_field_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """قيمة حقل التعديل في شاشة التأكيد (رسالة نصية أثناء CONFIRM)."""
+    result = context.user_data.get("confirm_result") or {}
+    field = context.user_data.pop("confirm_editing_field", None)
+    if not field:
+        return await text_router(update, context)
+    new_result, err = apply_confirm_edit(result, field, update.message.text, telegram_user_id=update.effective_user.id)
+    if err:
+        await update.message.reply_text(f"{err}\nأعد المحاولة أو أرسل /cancel.")
+        return CONFIRM
+    context.user_data["confirm_result"] = new_result
+    await update.message.reply_text(
+        _build_confirm_text(new_result), reply_markup=_build_confirm_keyboard(new_result)
+    )
+    return CONFIRM
+
+
+async def task_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """تعديل وصف مهمة عبر زر القائمة (رسالة نصية خارج ConversationHandler)."""
+    task_id = context.user_data.pop("pending_task_edit_id", None)
+    if not task_id:
+        return await fresh_entry(update, context)
+    new_desc = (update.message.text or "").strip()
+    if not new_desc:
+        await update.message.reply_text("الوصف الجديد لا يمكن أن يكون فارغًا. أرسل قيمة أو /cancel.")
+        return None
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        row, _ = get_record_by_id(db, uid, "Task", task_id)
+        if row is None:
+            await update.message.reply_text("لم أجد المهمة (ربما حُذفت).")
+            return None
+        from app.database.crud import can_edit_record
+
+        if not can_edit_record(db, uid, row.telegram_user_id):
+            await update.message.reply_text("ليس لديك صلاحية تعديل هذه المهمة.")
+            return None
+        update_task(db, row, {"description": new_desc})
+        await update.message.reply_text(f"تم تحديث الوصف:\n{new_desc}")
+    finally:
+        db.close()
+    try:
+        from bot.menus import send_main_menu
+
+        await send_main_menu(update.message, context)
+    except Exception:
+        logger.exception("فشل عرض القائمة الرئيسية بعد تعديل المهمة")
+    return None
+
+
+def _normalize_edit_value(
+    field: str, raw: str, telegram_user_id: int | None = None, update=None
+) -> tuple[object, str | None]:
+    """يجعل قيمة إدخال الحقل صالحة للنوع حسب الحقل (عودة: قيمة, خطأ|None)."""
+    value = (raw or "").strip()
+    if field == "amount":
+        m = _AMOUNT_RE.match(value)
+        if not m:
+            return None, "لم أتعرف على رقم صالح. مثال: 300 أو 300.5"
+        num = m.group("num").replace(",", ".")
+        try:
+            return Decimal(num), None
+        except Exception:
+            return None, "المبلغ غير صالح."
+    if field == "currency":
+        norm = normalize_currency(value)
+        if not norm:
+            return None, "عملة غير معروفة. جرّب: شيكل / دولار / دينار / يورو."
+        return norm, None
+    if field == "priority":
+        return normalize_priority(value), None
+    if field in ("due_date", "date"):
+        from app.database.crud import parse_date_local
+
+        if parse_date_local(value) is not None:
+            return value, None
+        # نص حر (بكرة/غدًا/بعد يومين...) → يُفسَّر بالذكاء الاصطناعي (مثل apply_confirm_edit)
+        _uid2 = telegram_user_id
+        if _uid2 is None and update is not None:
+            _u2 = getattr(update, "effective_user", None)
+            _uid2 = getattr(_u2, "id", None) if _u2 is not None else None
+        if _uid2 is None:
+            _consent_i2 = True
+        else:
+            try:
+                from app.database.crud.common import has_ai_consent
+                from app.database.db import SessionLocal as _SLi2
+                _dbi2 = _SLi2()
+                try:
+                    _consent_i2 = has_ai_consent(_dbi2, _uid2)
+                finally:
+                    _dbi2.close()
+            except Exception:
+                _consent_i2 = False
+        if _consent_i2:
+            try:
+                import app.ai_service as ai_service
+
+                interpreted = ai_service.interpret_arabic_date(value)
+                if interpreted:
+                    return interpreted, None
+            except Exception:
+                pass
+        return None, "تاريخ غير صالح. مثال: 2026-09-10 10:00"
+    if not value:
+        return None, "القيمة لا يمكن أن تكون فارغة."
+    return value, None
+
+
+async def record_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """تعديل حقل آخر سجل عبر زر القائمة (رسالة نصية خارج ConversationHandler)."""
+    record_id = context.user_data.pop("pending_record_edit_id", None)
+    model_name = context.user_data.pop("pending_record_edit_model", None)
+    field = context.user_data.pop("pending_record_edit_field", None)
+    if not record_id or not model_name or not field:
+        return await fresh_entry(update, context)
+
+    value, error = _normalize_edit_value(field, update.message.text, telegram_user_id=update.effective_user.id)
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if error:
+        await update.message.reply_text(error, reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        row, _ = get_record_by_id(db, uid, model_name, record_id)
+        if row is None:
+            await update.message.reply_text("لم أجد السجل (ربما حُذف).")
+            return None
+        from app.database.crud import can_edit_record
+
+        if not can_edit_record(db, uid, row.telegram_user_id):
+            await update.message.reply_text(
+                "ليس لديك صلاحية تعديل هذا السجل.",
+                reply_markup=MAIN_HOME_KEYBOARD,
+            )
+            return None
+        fields = {field: value}
+        if model_name == "Transaction":
+            update_transaction(db, row, fields)
+        elif model_name == "Task":
+            update_task(db, row, fields)
+        else:
+            update_note(db, row, fields)
+    finally:
+        db.close()
+
+    from bot.editing import FIELD_LABELS_AR
+
+    label = FIELD_LABELS_AR.get(field, field)
+    await update.message.reply_text(f"تم تحديث {label} بنجاح {SUCCESS}", reply_markup=MAIN_HOME_KEYBOARD)
+    return None
+
+
+async def company_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    """تحرير اسم/وصف الشركة عبر /company."""
+    field = context.user_data.pop("pending_company_edit", None)
+    if not field:
+        return await fresh_entry(update, context)
+    new_value = (update.message.text or "").strip()
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    if not new_value:
+        await update.message.reply_text("القيمة فارغة. أرسل قيمة صالحة أو /cancel.", reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+    uid = update.effective_user.id
+    from app.validation import clean_free_text
+
+    cleaned = clean_free_text(new_value, 150 if field == "name" else 500)
+    if not cleaned:
+        await update.message.reply_text("القيمة غير صالحة.", reply_markup=MAIN_HOME_KEYBOARD)
+        return None
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, update_company
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await update.message.reply_text("لست عضوًا في شركة.", reply_markup=MAIN_HOME_KEYBOARD)
+            return None
+        kwargs = {"name": cleaned} if field == "name" else {"description": cleaned}
+        comp = update_company(db, uid, cid, **kwargs)
+        if comp is None:
+            await update.message.reply_text("تعذر التحديث. تأكد من صلاحياتك.", reply_markup=MAIN_HOME_KEYBOARD)
+            return None
+        await update.message.reply_text(f"✅ تم تحديث {'الاسم' if field=='name' else 'الوصف'} بنجاح.", reply_markup=MAIN_HOME_KEYBOARD)
+    finally:
+        db.close()
+    return None
+
+
+async def search_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """بحث في السجلات (رسالة نصية بعد زر "🔍 بحث"): يرد بنتائج صفحات بأزرار."""
+    term = (update.message.text or "").strip()
+    context.user_data.pop("pending_search", None)
+    if not term:
+        from bot.menus import MAIN_HOME_KEYBOARD
+
+        await update.message.reply_text(
+            "أرسل كلمة البحث (شخص، تصنيف، وصف، قيمة أو نوع) أو /cancel.",
+            reply_markup=MAIN_HOME_KEYBOARD,
+        )
+        return None
+
+    uid = update.effective_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import search_records
+
+        recs, meta = search_records(db, uid, term, limit=50, return_meta=True)
+    finally:
+        db.close()
+
+    context.user_data["pending_search_term"] = term
+    from bot.menus import _records_page_payload, _search_partial_hint
+
+    hint = _search_partial_hint(meta)
+    text, markup = _records_page_payload(recs, term, 1, "sr", search_hint=hint)
+    await update.message.reply_text(text, reply_markup=markup)
+    return None
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _record_feedback(context, source="cancel", telegram_user_id=update.effective_user.id)
+    _clear_all_pending(context)
+    from bot.menus import MAIN_HOME_KEYBOARD
+
+    await update.message.reply_text(
+        "أُلغيت العملية. يمكنك إرسال عملية جديدة متى شئت.",
+        reply_markup=MAIN_HOME_KEYBOARD,
+    )
+    return None
+
+
+# ---------- تعريف المحادثة ----------
+
+TEXT_FILTER = filters.TEXT & ~filters.COMMAND
+
+conversation_handler = ConversationHandler(
+    entry_points=[
+        MessageHandler(TEXT_FILTER, text_router),
+        MessageHandler(MEDIA_FILTER, media_router),
+    ],
+    states={
+        COLLECT: [
+            # عند الجمع نجيب على ردّ المستخدم (حالة المحادثة تُفحص قبل الـ entry)
+            MessageHandler(TEXT_FILTER, collect_reply),
+            MessageHandler(MEDIA_FILTER, media_router),
+            CallbackQueryHandler(confirm_no, pattern="^confirm:no$"),
+        ],
+        CONFIRM: [
+            CallbackQueryHandler(confirm_yes, pattern="^confirm:yes$"),
+            CallbackQueryHandler(confirm_no, pattern="^confirm:no$"),
+            CallbackQueryHandler(confirm_repeat, pattern="^confirm:repeat$"),
+            CallbackQueryHandler(confirm_edit, pattern="^confirm:edit$"),
+            CallbackQueryHandler(confirm_edit_field, pattern=r"^confirm:edit:.+$"),
+            # رسالة جديدة خلال التأكيد → إعادة بدء المحادثة (allow_reentry) بمسح الحالة
+            MessageHandler(TEXT_FILTER, text_router),
+            MessageHandler(MEDIA_FILTER, media_router),
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel),
+    ],
+    allow_reentry=True,
+    name="record_flow",
+)

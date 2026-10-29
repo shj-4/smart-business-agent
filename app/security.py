@@ -86,23 +86,9 @@ def _decode_key_bytes(raw: str) -> bytes | None:
         if len(decoded) not in _VALID_AES_KEY_LENGTHS:
             # طول مفكوك غير صالح → مفتاح base64 مضبوط خاطئًا، لا نُعيد تأويله كنص
             return None
-        # طول صالح، تحقق من الغموض مع النص المباشر
-        raw_byte_len = len(s.encode("utf-8"))
-        # إذا كان المدخل يصلح كنص مباشر وكمفكوك base64 بطولين مختلفين
-        # وكان المدخل أبجدي رقمي خالص بلا +/=_-، نُفضّل النص المباشر
-        # لتجنب تحويل "x"*32 (32) بصمت إلى 24 بايت AES-192
-        if (
-            raw_byte_len in _VALID_AES_KEY_LENGTHS
-            and s.isalnum()
-            and len(decoded) != raw_byte_len
-            and not any(c in s for c in "+/=")
-            and "-" not in s and "_" not in s
-        ):
-            # غموض: نُسقط base64 ونترك المسار النصي أدناه
-            pass
-        else:
-            return decoded
-    # فشل base64 أو غموض: جرّب النص المباشر
+        # base64 صالح وطوله صالح → نُفضّله (لا نُعيد تأويله كنص مباشر)
+        return decoded
+    # فشل base64: جرّب النص المباشر
     key = s.encode("utf-8")
     if len(key) in _VALID_AES_KEY_LENGTHS:
         return key

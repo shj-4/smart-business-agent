@@ -84,29 +84,18 @@ def _cache_get(user_id: int) -> str | None:
 
 def remember_lang(telegram_user_id: int, lang: str) -> None:
     """يحدّث كاش اللغة في الذاكرة بعد أي تبديل."""
-    _cache_put(telegram_user_id, "en" if lang == "en" else "ar")
+    _cache_put(telegram_user_id, "ar")
 
 
 def user_lang(telegram_user_id: int) -> str:
-    """لغة الواجهة من الكاش (ar افتراضي). يُحمَّل من قاعدة البيانات عند أول طلب."""
+    """لغة واجهة البوت الثابتة: العربية."""
     if telegram_user_id is None:
         return "ar"
     cached = _cache_get(telegram_user_id)
     if cached is not None:
-        return cached
-    try:
-        from app.database.crud import get_user_lang
-        from app.database.db import SessionLocal
-
-        db = SessionLocal()
-        try:
-            lang = get_user_lang(db, telegram_user_id)
-        finally:
-            db.close()
-    except Exception:  # noqa: BLE001 — غياب الجدول/أخطاء مؤقتة لا تُسقط القوائم
-        lang = "ar"
-    _cache_put(telegram_user_id, lang)
-    return lang
+        return "ar"
+    _cache_put(telegram_user_id, "ar")
+    return "ar"
 
 
 def t(key: str, lang: str = "ar") -> str:
@@ -114,4 +103,4 @@ def t(key: str, lang: str = "ar") -> str:
     entry = _STRINGS.get(key)
     if not entry:
         return key
-    return entry.get(lang, entry.get("ar", key))
+    return entry.get("ar", key)

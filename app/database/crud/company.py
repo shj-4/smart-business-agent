@@ -377,7 +377,11 @@ def redeem_invite(
     try:
         from app.security import hash_token
         h = hash_token(token)
-        inv = db.query(InviteLink).filter((InviteLink.token_hash == h) | (InviteLink.token == token)).first()
+        # تحقق عبر الهاش أولًا؛ fallback للرمز الخام فقط للدعوات القديمة (token_hash IS NULL)
+        inv = db.query(InviteLink).filter(
+            (InviteLink.token_hash == h)
+            | ((InviteLink.token_hash.is_(None)) & (InviteLink.token == token))
+        ).first()
     except Exception:
         inv = db.query(InviteLink).filter(InviteLink.token == token).first()
     if inv is None or inv.revoked:
@@ -415,7 +419,19 @@ def redeem_invite(
     )
     # لا ننقل سجلات المنضم (company_id IS NULL) تلقائيًا — تبقى شخصية (خصوصية).
     # النقل (إن لزم) يتطلب موافقة صريحة.
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        # أعد uses إلى ما كان عليه (أفضل جهد)
+        try:
+            db.query(InviteLink).filter(InviteLink.id == inv.id).update(
+                {InviteLink.uses: InviteLink.uses - 1}
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+        return False, "فشل انضمام العضو (قد تكون عضوًا بالفعل)."
     _invalidate_caches(db, telegram_user_id)
     from app.database.crud.company import invalidate_company_cache
 
@@ -559,6 +575,28 @@ def delete_company(db: Session, actor_id: int, company_id: int, confirm: bool = 
         return False
     if not confirm:
         return False
+    # منع حذف شركة تملك سجلات مالية/تشغيلية: وإلا يصبح company_id = NULL
+    # (SET NULL) فتتحول بيانات الشركة إلى "بيانات شخصية" (تسريب بيانات).
+    from app.database.models import (
+        Budget,
+        CreditLimit,
+        EmployeeBonusPlan,
+        Invoice,
+        LoyaltyAccount,
+        Note,
+        Task,
+        Transaction,
+    )
+
+    for model in (Transaction, Note, Task, Budget, CreditLimit, Invoice, EmployeeBonusPlan, LoyaltyAccount):
+        if not hasattr(model, "company_id"):
+            continue
+        try:
+            if db.query(model).filter(model.company_id == company_id).count() > 0:
+                return False
+        except Exception:
+            # جداول قد لا تكون موجودة قبل الهجرة — تجاهل
+            pass
     # حذف الدعوات
     db.query(InviteLink).filter(InviteLink.company_id == company_id).delete()
     # حذف العضويات

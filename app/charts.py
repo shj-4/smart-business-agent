@@ -227,7 +227,7 @@ def _render_monthly_png(
         return buf
 
 
-def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None, company_id: int | None = None):
+def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None, company_id: int | None = None, include_all: bool = False):
     """مجموع الشهور الستة الأخيرة لجميع المستخدمين (لوحة التحكم) بعملاتها الخام.
 
     يعيد (buckets, base) حيث كل صندوق: {ym, by_currency, stored, stored_base}.
@@ -270,7 +270,7 @@ def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None, c
             Transaction.deleted_at.is_(None),
             func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start,
             _chart_cash(Transaction),
-            *([Transaction.company_id == company_id] if company_id is not None else []),
+            *([] if include_all else ([Transaction.company_id.is_(None)] if company_id is None else [Transaction.company_id == company_id])),
         )
         .all()
     )
@@ -312,12 +312,12 @@ def _global_monthly_raw(db, months: int = 6, base_currency: str | None = None, c
     return buckets, base
 
 
-def generate_global_monthly_chart(db, months: int | None = None, base_currency: str | None = None, company_id: int | None = None):
+def generate_global_monthly_chart(db, months: int | None = None, base_currency: str | None = None, company_id: int | None = None, include_all: bool = False):
     """مثل generate_monthly_chart لكن لكل المستخدمين (لوحة التحكم) — لا فلتر معرّف."""
     from app.config import settings
 
     months = months or settings.chart_months
-    buckets, base = _global_monthly_raw(db, months, base_currency, company_id=company_id)
+    buckets, base = _global_monthly_raw(db, months, base_currency, company_id=company_id, include_all=include_all)
 
     converted = []
     all_zero = True

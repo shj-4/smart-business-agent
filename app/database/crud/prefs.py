@@ -11,13 +11,12 @@ from app.timeutil import now_utc
 
 
 def get_user_lang(db: Session, telegram_user_id: int) -> str:
-    """لغة الواجهة المحفوظة للمستخدم (ar افتراضي)."""
-    row = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
-    return row.lang if row and row.lang else "ar"
+    """لغة واجهة البوت الثابتة."""
+    return "ar"
 
 def set_user_lang(db: Session, telegram_user_id: int, lang: str) -> str:
-    """يحفظ لغة الواجهة ويعيدها (يقنّن إلى ar/en)."""
-    lang = "en" if (lang or "").strip().lower() == "en" else "ar"
+    """يحفظ اللغة العربية كتفضيل الواجهة الوحيد."""
+    lang = "ar"
     row = db.query(UserPref).filter(UserPref.telegram_user_id == telegram_user_id).first()
     if row is None:
         row = UserPref(telegram_user_id=telegram_user_id, lang=lang, updated_at=now_utc())

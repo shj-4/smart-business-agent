@@ -17,6 +17,14 @@ from app.money import (
     _unified_totals_for_rows,
 )
 
+from .active_menus import (
+    clear_active_menu,
+    clear_obsolete_menu,
+    get_active_menu,
+    is_obsolete_menu,
+    mark_obsolete_menu,
+    set_active_menu,
+)
 from .bonus import (
     BONUS_ALIASES,
     BONUS_CATEGORY,

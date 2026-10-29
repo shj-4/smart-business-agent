@@ -260,7 +260,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/undo تراجع · /redo استعادة\n"
         "/report تقرير · /export تصدير\n"
         "/budget الميزانيات · /debts الديون\n"
-        "/lang اللغة · /privacy الخصوصية"
+        "/lang العربية · /privacy الخصوصية"
     )
     await send_main_menu(update.message, context, text=guide)
 
@@ -322,7 +322,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """أمر /lang — تبديل لغة الواجهة بين العربية والإنجليزية."""
+    """أمر /lang — تثبيت واجهة البوت باللغة العربية."""
     from bot.menus import send_lang_menu
 
     await send_lang_menu(update.message)
@@ -1709,7 +1709,7 @@ async def requirements_command(update: Update, context: ContextTypes.DEFAULT_TYP
     from app.config import settings
 
     uid = update.effective_user.id if update.effective_user else None
-    if uid is None or (settings.admin_user_ids and uid not in settings.admin_user_ids):
+    if uid is None or not settings.admin_user_ids or uid not in settings.admin_user_ids:
         await update.message.reply_text("غير مسموح.")
         return
     import os
@@ -1725,6 +1725,12 @@ async def requirements_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def register_handlers(app: Application) -> None:
+    from bot.callback_guard import callback_deduplication_guard
+
+    # This must run before conversations and menu actions to make rapid double
+    # clicks harmless across all inline buttons, including confirmation flows.
+    app.add_handler(CallbackQueryHandler(callback_deduplication_guard), group=-2)
+
     # فلتر السماح (ALLOWED_USER_IDS / registration_token) على كل الرسائل والأزرار
     try:
         from bot.ratelimit import is_user_allowed

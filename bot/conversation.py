@@ -1038,12 +1038,18 @@ async def fresh_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         await update.message.reply_text(chat_reply, reply_markup=QUICK_ACTIONS)
     else:
-        await update.message.reply_text(
-            "أعتذر، ما فهمت رسالتك. جرّب:\n"
-            "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
-            "• سؤال: \"كم لي عند محمد؟\"\n"
-            "• سعر صرف: \"كم صرف شيكل على دينار\""
-        )
+        if (result or {}).get("error") == "gemini_unavailable":
+            await update.message.reply_text(
+                "تعذّر الاتصال بخدمة الذكاء الاصطناعي الآن، لذلك لم أُسجّل أو أغيّر أي بيانات. "
+                "حاول مرة أخرى بعد قليل، أو استخدم أزرار القائمة للعمليات والتقارير."
+            )
+        else:
+            await update.message.reply_text(
+                "أعتذر، ما فهمت رسالتك. جرّب:\n"
+                "• تسجيل عملية: \"دفعت 300 شيكل لمحمد\"\n"
+                "• سؤال: \"كم لي عند محمد؟\"\n"
+                "• سعر صرف: \"كم صرف شيكل على دينار\""
+            )
     return None
 
 

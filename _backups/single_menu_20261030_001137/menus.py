@@ -1,0 +1,2213 @@
+"""
+قوائم InlineKeyboard للبوت: القائمة الرئيسية + القوائم الفرعية + Router موحّد.
+
+نظام موحّد للـ callback_data بصيغة: action:target:extra
+  menu:main | menu:record | menu:reports | menu:tasks | menu:settings
+  rec:expense | rec:income | rec:order | rec:note | rec:task
+  tsk:list:pending | tsk:list:overdue | tsk:list:done
+  tsk:done:<id> | tsk:del:<id> | tsk:edit:<id>
+  rpt:period | rpt:p:<period> | rpt:m:<metric>:<period>
+  set:on | set:off
+
+أزرار شاشة التأكيد (confirm:*) وحقول التعديل (edit:*/editfield:*) تُدار من
+ConversationHandlers الخاصة بها (record_flow / edit_flow) — يقع الـ router هنا في
+نهاية سلسلة المعالجات كي لا يعترض ما تديره المحادثات.
+"""
+
+import asyncio
+import io
+import logging
+from collections.abc import Coroutine
+from typing import Any
+
+from sqlalchemy.orm import Session
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.error import BadRequest, TelegramError
+from telegram.ext import ContextTypes
+
+from app.database.crud import (
+    complete_task,
+    delete_record_by_id,
+    delete_task_by_id,
+    get_record_by_id,
+    list_done_tasks,
+    list_overdue_tasks,
+    list_pending_tasks,
+    list_recent_records,
+    mark_overdue_tasks,
+    run_query,
+    search_records,
+)
+from app.database.db import SessionLocal
+from app.database.models import Budget, Note, Task, Transaction
+from app.timeutil import to_local_naive
+from bot.conversation import _clear_all_pending
+from bot.formatters import format_query_result
+from bot.i18n import remember_lang, t, user_lang
+from bot.icons import BACK, EXPENSE, FORWARD, HOME, INCOME, NEW, SUCCESS, TASK, WARNING
+
+logger = logging.getLogger(__name__)
+
+
+def build_menu(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
+    """يبني لوحة أزرار من صفوف [(النص, callback_data)] — أداة قياسية لكل القوائم."""
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=cb) for label, cb in row] for row in rows
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ---------- القوائم (تصميم صوتي) ----------
+
+MAIN_MENU_TEXT = "القائمة الرئيسية"
+
+MAIN_MENU = [
+    [(f"{NEW} تسجيل عملية", "menu:record")],
+    [("📊 التقارير", "menu:reports")],
+    [(f"{TASK} مهامي", "menu:tasks")],
+    [("🧰 أدوات", "menu:tools")],
+    [("⚙️ الإعدادات", "menu:settings")],
+]
+
+MAIN_HOME_KEYBOARD = build_menu(MAIN_MENU)
+
+RECORD_MENU = [
+    [(f"{EXPENSE} مصروف", "rec:expense"), (f"{INCOME} إيراد", "rec:income")],
+    [("🛒 طلبية", "rec:order"), ("📝 ملاحظة", "rec:note")],
+    [(f"{TASK} مهمة جديدة", "rec:task")],
+    [(f"{BACK} رجوع", "menu:main")],
+]
+
+RECORD_HINTS = {
+    "expense": f"{EXPENSE} مصروف — اكتب التفاصيل",
+    "income":  f"{INCOME} إيراد — اكتب التفاصيل",
+    "order":   "🛒 طلبية — اكتب التفاصيل",
+    "note":    "📝 ملاحظة — اكتب التفاصيل",
+    "task":    f"{TASK} مهمة — اكتب التفاصيل",
+}
+
+TASK_STATUS_MENU = [
+    [(f"{TASK} المعلّقة", "tsk:list:pending")],
+    [(f"{WARNING} المتأخرة", "tsk:list:overdue")],
+    [(f"{SUCCESS} المنجزة", "tsk:list:done")],
+    [(f"{BACK} رجوع", "menu:main")],
+]
+
+PERIOD_LABELS = {
+    "today": "اليوم 📅",
+    "this_week": "هذا الأسبوع 🗓",
+    "this_month": "هذا الشهر 🗓",
+    "this_year": "هذه السنة 🗓",
+    "all_time": "كل الفترات 🌐",
+}
+
+REPORT_PERIODS = [
+    [("📅 اليوم", "rpt:p:today"), ("🗓 هذا الأسبوع", "rpt:p:this_week")],
+    [("🗓 هذا الشهر", "rpt:p:this_month"), ("🗓 هذه السنة", "rpt:p:this_year")],
+    [("🌐 كل الفترات", "rpt:p:all_time")],
+    [(f"{BACK} رجوع", "menu:main")],
+]
+
+REPORT_METRICS = [
+    [(f"{EXPENSE} المصاريف", "rpt:m:total_expenses:__PERIOD__")],
+    [(f"{INCOME} الإيرادات", "rpt:m:total_income:__PERIOD__")],
+    [("🔢 عدد العمليات", "rpt:m:count_transactions:__PERIOD__")],
+    [(f"{BACK} فترة أخرى", "rpt:period")],
+]
+
+METRIC_LABELS = {
+    "total_expenses": f"المصاريف {EXPENSE}",
+    "total_income": f"الإيرادات {INCOME}",
+    "count_transactions": "عدد العمليات 🔢",
+}
+
+SETTINGS_MENU = [
+    [("📅 تفعيل التقرير الدوري", "set:on")],
+    [("🔕 إيقاف التقرير الدوري", "set:off")],
+    [(f"{BACK} رجوع", "menu:main")],
+]
+
+SETTINGS_DOCS = {
+    "on": "لتفعيل التقرير الدوري أرسل أحد الأوامر:\n"
+    "• /report_on daily — تلخيص يومي\n"
+    "• /report_on weekly — تقرير أسبوعي\n"
+    "• /report_on monthly — تقرير شهري\n"
+    "مثال: /report_on monthly — تقرير في أول كل شهر",
+    "off": "لإيقاف التقارير الدورية أرسل: /report_off",
+}
+
+TOOLS_MENU = [
+    [("✏️ تعديل آخر سجل", "el:last"), ("🕘 السجل", "his:p:1")],
+    [("🔍 بحث", "sb:start"), ("💸 الميزانيات", "bg:list")],
+    [("💳 الذمم", "tool:finance"), ("🧾 الفواتير", "tool:invoices")],
+    [("🛒 الطلبيات", "tool:orders"), ("⚠️ الحدود", "tool:credit")],
+    [("📈 رسم", "tool:chart"), ("🧭 مؤشرات", "tool:kpi")],
+    [("📦 Excel", "ex:menu"), ("📄 PDF", "tool:pdf")],
+    [("💱 تحويل", "tool:convert"), ("🎁 بونس", "bn:overview")],
+    [("🏢 المساحة", "ws:status"), (f"{BACK} رجوع", "menu:main")],
+]
+
+EXPORT_MENU = [
+    [("🌐 كل السجلات", "ex:p:all")],
+    [("📅 اليوم", "ex:p:today")],
+    [("🗓 الأسبوع", "ex:p:week")],
+    [("🗓 الشهر", "ex:p:month")],
+    [(f"{BACK} رجوع", "menu:tools")],
+]
+
+EXPORT_CAPTIONS = {
+    "all": "تصدير (كل السجلات)",
+    "today": "تصدير (اليوم)",
+    "week": "تصدير (الأسبوع)",
+    "month": "تصدير (الشهر)",
+}
+
+
+def _main_menu_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [(t("btn_record", lang), "menu:record")],
+        [(t("btn_reports", lang), "menu:reports")],
+        [(_tasks_button_label(lang, uid), "menu:tasks")],
+        [(t("btn_tools", lang), "menu:tools")],
+        [(t("btn_settings", lang), "menu:settings")],
+    ]
+    return build_menu(rows)
+
+
+def _tasks_button_label(lang: str = "ar", uid: int | None = None) -> str:
+    """نص زر «مهامي» مع شارة عددية: (N متأخرة) عند تأخّر، وإلا (N معلّقة)."""
+    label = t("btn_tasks", lang)
+    try:
+        db = SessionLocal()
+        try:
+            from app.database.crud.workspace import accessible_user_ids as _acc
+            from app.database.models import Task
+
+            try:
+                uids = _acc(db, uid) if uid is not None else [uid]
+            except Exception:
+                uids = [uid] if uid is not None else []
+            overdue = (
+                db.query(Task)
+                .filter(
+                    Task.telegram_user_id.in_(uids),
+                    Task.status == "overdue",
+                    Task.deleted_at.is_(None),
+                )
+                .count()
+            )
+            if overdue:
+                return f"{label} ({overdue} {WARNING} متأخرة)"
+            pending = (
+                db.query(Task)
+                .filter(
+                    Task.telegram_user_id.in_(uids),
+                    Task.status == "pending",
+                    Task.deleted_at.is_(None),
+                )
+                .count()
+            )
+            if pending:
+                return f"{label} ({pending})"
+            return label
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("تعذّر حساب شارة المهام للمستخدم %s", uid)
+        return label
+
+
+def _tools_keyboard(lang: str = "ar", uid: int | None = None) -> InlineKeyboardMarkup:
+    # تصميم شبكي 2×N — أسلس وممتع، يقلّل طول القائمة من 17 سطرًا عموديًا إلى 9 صفوف
+    base = [
+        [("el:last", t("btn_edit_last", lang)), ("his:p:1", t("btn_history", lang))],
+        [("sb:start", t("btn_search", lang)), ("bg:list", t("btn_budget", lang))],
+        [("tool:finance", t("btn_finance", lang)), ("tool:debts", t("btn_debts", lang))],
+        [("tool:invoices", t("btn_invoices", lang)), ("tool:orders", t("btn_orders", lang))],
+        [("tool:credit", t("btn_credit", lang)), ("tool:kpi", t("btn_kpi", lang))],
+        [("tool:chart", t("btn_chart", lang)), ("tool:summary", t("btn_summary", lang))],
+        [("tool:pdf", t("btn_export_pdf", lang)), ("ex:menu", t("btn_export", lang))],
+        [("tool:convert", t("btn_convert", lang)), ("ws:status", t("btn_workspace", lang))],
+        [("bn:overview", t("btn_bonus", lang)), ("menu:main", t("btn_back", lang))],
+    ]
+    # زر الفريق — يظهر فقط لمن عنده members.manage
+    if uid is not None:
+        try:
+            from app.database.crud import has_permission
+            from app.database.db import SessionLocal as _SL
+
+            db = _SL()
+            try:
+                if has_permission(db, uid, "members.manage"):
+                    # إدراج قبل زر الرجوع
+                    base.insert(-1, [("team:menu", "👥 الفريق")])
+            finally:
+                db.close()
+        except Exception:
+            pass
+    return build_menu([[(label, cb) for cb, label in row] for row in base])
+
+
+def _report_metrics_keyboard(period: str) -> InlineKeyboardMarkup:
+    rows = [
+        [(label, cb.replace("__PERIOD__", period)) for label, cb in row] for row in REPORT_METRICS
+    ]
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    return build_menu(rows)
+
+
+def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [list(row) for row in extra_rows]
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    return build_menu(rows)
+
+
+async def send_main_menu(
+    message: Message, context: ContextTypes.DEFAULT_TYPE, text: str = "", uid: int | None = None
+) -> None:
+    """يعيد استخدام القائمة المحفوظة أو ينشئ قائمة واحدة للمستخدم والمحادثة."""
+    _clear_all_pending(context)
+    # uid can be passed explicitly (required for callback queries where
+    # message.from_user is the bot, not the user).
+    if uid is None:
+        from_user = getattr(message, "from_user", None)
+        if from_user and getattr(from_user, "id", None):
+            uid = from_user.id
+        else:
+            # محاولة من context (قد يحمل user_data مع _user_id)
+            try:
+                if hasattr(context, "_user_id") and context._user_id:
+                    uid = context._user_id
+                elif getattr(context, "user_data", None) and isinstance(context.user_data, dict):
+                    # لا يوجد user_id هنا، جرّب من message.chat
+                    chat = getattr(message, "chat", None)
+                    if chat and getattr(chat, "id", None):
+                        uid = chat.id
+            except Exception:
+                pass
+    lang = user_lang(uid) if uid else "ar"
+    body = text or t("main_title", lang)
+    from_user = getattr(message, "from_user", None)
+    # إن كان uid مستنتج من chat، استخدمه
+    if not uid and from_user:
+        uid = from_user.id
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        logger.warning("تعذر تحديد المحادثة لعرض القائمة الرئيسية")
+        return
+    if uid is None:
+        uid = chat_id
+    markup = _main_menu_keyboard(lang, uid=uid)
+    db = SessionLocal()
+    try:
+        from app.database.crud.active_menus import get_active_menu, set_active_menu
+
+        old_message_id = get_active_menu(db, chat_id, uid)
+    finally:
+        db.close()
+
+    if old_message_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_message_id,
+                text=body,
+                reply_markup=markup,
+            )
+            return
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            logger.info("تعذر تحديث القائمة الحالية؛ سيتم استبدالها: %s", type(exc).__name__)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+            except TelegramError:
+                logger.debug("تعذر حذف القائمة القديمة للمحادثة %s", chat_id)
+                db = SessionLocal()
+                try:
+                    from app.database.crud.active_menus import mark_obsolete_menu
+
+                    mark_obsolete_menu(db, chat_id, uid, old_message_id)
+                finally:
+                    db.close()
+        except TelegramError:
+            logger.exception("فشل تحديث القائمة الحالية للمحادثة %s", chat_id)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+            except TelegramError:
+                db = SessionLocal()
+                try:
+                    from app.database.crud.active_menus import mark_obsolete_menu
+
+                    mark_obsolete_menu(db, chat_id, uid, old_message_id)
+                finally:
+                    db.close()
+
+    replacement = await message.reply_text(body, reply_markup=markup)
+    db = SessionLocal()
+    try:
+        set_active_menu(db, chat_id, uid, replacement.message_id)
+    finally:
+        db.close()
+
+
+# ---------- رصف القوائم إداريًا ----------
+
+PAGES = {
+    "record": ("تسجيل", RECORD_MENU),
+    "reports": ("التقارير", REPORT_PERIODS),
+    "tasks": ("المهام", TASK_STATUS_MENU),
+    "tools": ("🧰 الأدوات", TOOLS_MENU),
+    "settings": ("الإعدادات", SETTINGS_MENU),
+}
+
+
+async def _handle_menu(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    lang = user_lang(query.from_user.id)
+    target = parts[0] if parts else "main"
+    if target == "main":
+        _clear_all_pending(context)
+        await _safe_edit_menu_message(
+            query,
+            t("main_title", lang),
+            _main_menu_keyboard(lang, uid=query.from_user.id),
+        )
+        return
+    if target == "tools":
+        title = t("tools_title", lang)
+        # لمسة ممتعة: تلميح صغير يوضّح الشبكة الجديدة
+        tip = "💡 شبكة سريعة ٢×٢ — كل أدواتك في صفحة واحدة!" if lang == "ar" else "💡 2×2 grid — all tools in one view!"
+        await _safe_edit_menu_message(query, f"{title}\n{tip}", _tools_keyboard(lang, uid=query.from_user.id))
+        return
+    title, rows = PAGES.get(target, ("القائمة الرئيسية", MAIN_MENU))
+    await _safe_edit_menu_message(query, title, build_menu(rows))
+
+
+async def _safe_edit_menu_message(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+    """يتعامل مع إعادة الضغط وأخطاء تحرير رسائل القوائم دون إرسال نسخ إضافية."""
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except BadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.info("تعذر تحرير رسالة قائمة %s: %s", query.message.message_id, type(exc).__name__)
+        await query.answer("تعذر تحديث القائمة. افتح /menu مجددًا.", show_alert=False)
+
+
+async def _handle_record(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    rtype = parts[0] if parts else ""
+    if rtype not in RECORD_HINTS:
+        await query.edit_message_text("اختر نوع العملية:", reply_markup=build_menu(RECORD_MENU))
+        return
+    _clear_all_pending(context)
+    context.user_data["record_seed_type"] = rtype
+    await query.edit_message_text(
+        RECORD_HINTS[rtype],
+        reply_markup=_home_keyboard(),
+    )
+
+
+# ---------- مهامي: قائمة + أزرار لكل عنصر ----------
+
+TASK_STATUS_TITLES = {
+    "pending": f"المعلّقة {TASK}",
+    "overdue": f"المتأخرة {WARNING}",
+    "done": f"المنجزة {SUCCESS}",
+}
+
+
+def _task_line(task: Task) -> str:
+    parts = [task.description or "(بدون وصف)"]
+    if getattr(task, "person", None):
+        parts.append(f"👤 {task.person}")
+    if getattr(task, "due_date", None):
+        parts.append(f"🕒 {to_local_naive(task.due_date).strftime('%Y-%m-%d %H:%M')}")
+    if getattr(task, "priority", "normal") == "high":
+        parts.append("⚡ عاجلة")
+    if getattr(task, "recurrence_rule", None):
+        badge = {"daily": "🔁 يومي", "weekly": "🔁 أسبوعي", "monthly": "🔁 شهري"}.get(
+            task.recurrence_rule, "🔁"
+        )
+        parts.append(badge)
+    if getattr(task, "status", None) == "done":
+        parts.append(SUCCESS)
+    return " — ".join(parts)
+
+
+def build_task_list(
+    tasks: list[Task], status: str
+) -> tuple[str, InlineKeyboardMarkup]:
+    """يبني (نص, لوحة أزرار) لقائمة مهام — كل مهمة بصف أزرار [إنجاز|تعديل|حذف]."""
+    if not tasks:
+        text = f"لا توجد مهام {TASK_STATUS_TITLES.get(status, '')} 🎉"
+        return text, _home_keyboard()
+
+    lines = [f"{TASK} المهام {TASK_STATUS_TITLES.get(status, '')}:"]
+    rows = []
+    for i, task in enumerate(tasks[:10], start=1):
+        lines.append(f"{i}. {_task_line(task)}")
+        buttons = [
+            InlineKeyboardButton(SUCCESS, callback_data=f"tsk:done:{task.id}"),
+            InlineKeyboardButton("✏️", callback_data=f"tsk:edit:{task.id}"),
+            InlineKeyboardButton("🗑️", callback_data=f"tsk:del:{task.id}"),
+        ]
+        if status == "done":
+            buttons = [InlineKeyboardButton("🗑️", callback_data=f"tsk:del:{task.id}")]
+        rows.append(buttons)
+
+    rows.append([InlineKeyboardButton(f"{BACK} رجوع للقائمة", callback_data="menu:tasks")])
+    return "\n".join(lines) + f"\n\n({SUCCESS} إنجاز • ✏️ تعديل • 🗑️ حذف)", InlineKeyboardMarkup(rows)
+
+
+async def _handle_task_list(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, status: str
+) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        mark_overdue_tasks(db, uid)
+        if status == "overdue":
+            tasks = list_overdue_tasks(db, uid, limit=10)
+        elif status == "done":
+            tasks = list_done_tasks(db, uid, limit=10)
+        else:
+            tasks = list_pending_tasks(db, uid, limit=10)
+    finally:
+        db.close()
+    text, kb = build_task_list(tasks, status)
+    await query.edit_message_text(text, reply_markup=kb)
+    _clear_all_pending(context)
+
+
+async def _task_save_ack(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    prefix: str,
+    task: Task,
+) -> None:
+    text = f"{prefix}{task.description}"
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_task_done(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
+    from app.database.crud.company import has_permission
+    from app.database.db import SessionLocal as _SL
+
+    uid = query.from_user.id
+    db_perm = _SL()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية إنجاز المهام (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
+    db = SessionLocal()
+    try:
+        task = complete_task(db, uid, int(task_id))
+    finally:
+        db.close()
+    if task:
+        await _task_save_ack(query, context, f"{SUCCESS} تم إنجاز المهمة:\n", task)
+    else:
+        await query.edit_message_text(
+            "لم أجد هذه المهمة (ربما حُذفت) أو ليس لديك صلاحية.", reply_markup=_home_keyboard()
+        )
+
+
+async def _handle_task_delete(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        task = delete_task_by_id(db, uid, int(task_id))
+    finally:
+        db.close()
+    if task:
+        await _task_save_ack(query, context, "🗑️ حُذفت المهمة:\n", task)
+    else:
+        await query.edit_message_text("لا يمكن حذف هذه المهمة الآن.", reply_markup=_home_keyboard())
+
+
+async def _handle_task_edit(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, task_id: str
+) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        task, _ = get_record_by_id(db, uid, "Task", int(task_id))
+    finally:
+        db.close()
+    if task is None:
+        await query.edit_message_text(
+            "لم أجد هذه المهمة (ربما حُذفت).", reply_markup=_home_keyboard()
+        )
+        return
+    _clear_all_pending(context)
+    context.user_data["pending_task_edit_id"] = task.id
+    await query.edit_message_text(
+        f"أرسل الوصف الجديد للمهمة:\nالوصف الحالي: {task.description}\n\n(أرسل /cancel للإلغاء)"
+    )
+
+
+async def _handle_task(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    if not parts:
+        await query.edit_message_text(
+            "مهامي — اختر الحالة:", reply_markup=build_menu(TASK_STATUS_MENU)
+        )
+        return
+    act = parts[0]
+    if act == "list":
+        await _handle_task_list(query, context, parts[1] if len(parts) > 1 else "pending")
+    elif act == "done" and len(parts) > 1:
+        await _handle_task_done(query, context, parts[1])
+    elif act == "del" and len(parts) > 1:
+        await _handle_task_delete(query, context, parts[1])
+    elif act == "edit" and len(parts) > 1:
+        await _handle_task_edit(query, context, parts[1])
+
+
+# ---------- التقارير: فترة ← نوع ----------
+
+
+async def _handle_report(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    if not parts or parts[0] == "period":
+        await query.edit_message_text(
+            "التقارير — اختر الفترة:", reply_markup=build_menu(REPORT_PERIODS)
+        )
+        return
+    if parts[0] == "p":
+        period = parts[1] if len(parts) > 1 else "all_time"
+        title = f"التقارير — {PERIOD_LABELS.get(period, period)}:\nاختر نوع التقرير:"
+        await query.edit_message_text(title, reply_markup=_report_metrics_keyboard(period))
+        return
+    if parts[0] == "m" and len(parts) > 2:
+        metric, period = parts[1], parts[2]
+        uid = query.from_user.id
+        metric_label = METRIC_LABELS.get(metric, metric)
+        header = f"📊 {metric_label} — {PERIOD_LABELS.get(period, period)}:\n"
+
+        def _report_payload() -> str:
+            db = SessionLocal()
+            try:
+                result = run_query(db, uid, {"metric": metric, "period": period})
+            finally:
+                db.close()
+            return header + format_query_result(result)
+
+        await query.edit_message_text(
+            await asyncio.to_thread(_report_payload),
+            reply_markup=_home_keyboard([(f"{BACK} فترة أخرى", "rpt:period")]),
+        )
+        return
+    await query.edit_message_text(
+        "التقارير — اختر الفترة:", reply_markup=build_menu(REPORT_PERIODS)
+    )
+
+
+async def _handle_settings(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    key = parts[0] if parts else ""
+    if key not in SETTINGS_DOCS:
+        await query.edit_message_text("الإعدادات:", reply_markup=build_menu(SETTINGS_MENU))
+        return
+    await query.edit_message_text(SETTINGS_DOCS[key], reply_markup=_home_keyboard())
+
+
+# ---------- أدوات: ميزانيات / رسم / تصدير / تحويل ----------
+
+
+def export_period_start(period: str) -> tuple[object | None, str]:
+    """حدود فترة التصدير (بحسب الآن المحلي، بلغة UTC). يعيد (start_datetime, label)."""
+    from datetime import timedelta
+
+    from app.timeutil import first_day_of_week, now_local, to_utc_naive
+
+    local_now = now_local()
+    if period == "today":
+        local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return to_utc_naive(local), "today"
+    if period == "week":
+        fd = first_day_of_week()
+        local = local_now - timedelta(days=(local_now.weekday() - fd) % 7)
+        local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        return to_utc_naive(local), "week"
+    if period == "month":
+        local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return to_utc_naive(local), "month"
+    return None, "all"
+
+
+def _budget_list_payload(
+    db: Session, telegram_user_id: int
+) -> tuple[list[str], list[Budget]]:
+    """سطور ميزانيات المستخدم (مع الاستخدام الشهري الحالي) + كائناتها للزر لكل عنصر."""
+    from app.database.crud import budget_monthly_reset, budget_usage, list_budgets
+    from app.exchange import CURRENCY_NAMES
+
+    budgets = list_budgets(db, telegram_user_id)
+    lines = ["ميزانياتك الشهرية:\n"]
+    if not budgets:
+        return ["لا توجد ميزانيات بعد.\nلمزيد: /budget إضافة عملة ILS 2000"], budgets
+
+    for b in budgets:
+        budget_monthly_reset(db, b)
+        usage = budget_usage(db, b)
+        from app.formatting import fmt_amount
+
+        target_txt = {
+            "currency": CURRENCY_NAMES.get(b.currency, b.currency),
+            "person": f"الشخص {b.person}",
+            "category": f"التصنيف {b.category}",
+        }.get(b.scope, str(getattr(b, b.scope, "")))
+        if usage["over"]:
+            status = "⚠️ تجاوزت"
+        elif usage["percent"] >= 80:
+            status = "⚠️ قريب من السقف"
+        else:
+            status = "ضمن الحدود"
+        lines.append(
+            f"#{b.id} {target_txt}: {fmt_amount(usage['spent'])} / {fmt_amount(usage['limit'])} "
+            f"({usage['percent']}%) — {status}"
+        )
+    return lines, budgets
+
+
+async def _handle_budget_list(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
+
+    def _payload() -> tuple[list[str], list[Budget]]:
+        db = SessionLocal()
+        try:
+            return _budget_list_payload(db, uid)
+        finally:
+            db.close()
+
+    lines, budgets = await asyncio.to_thread(_payload)
+
+    rows = [
+        [("➕ إضافة (عملة)", "bg:add:currency"), ("➕ إضافة (شخص)", "bg:add:person")],
+        [("➕ إضافة (تصنيف)", "bg:add:category")],
+    ]
+    for b in budgets:
+        rows.append([("🗑️ حذف #" + str(b.id), f"bg:del:{b.id}")])
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
+
+
+async def _handle_budget_add(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, scope: str
+) -> None:
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
+    _clear_all_pending(context)
+    context.user_data["pending_budget"] = {"scope": scope}
+    if scope == "person":
+        prompt = "أرسل اسم الشخص والمبلغ:\nمثال — محمد 1500\n\n(أرسل /cancel للإلغاء)"
+    elif scope == "category":
+        prompt = "أرسل اسم التصنيف والمبلغ:\nمثال — مشتريات 2000\n\n(أرسل /cancel للإلغاء)"
+    else:
+        prompt = (
+            "أرسل رمز العملة والمبلغ:\nمثال — ILS 2000 (أو: شيكل 2000)\n\n(أرسل /cancel للإلغاء)"
+        )
+    await query.edit_message_text(prompt, reply_markup=_home_keyboard())
+
+
+async def _handle_budget_delete(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, budget_id: str
+) -> None:
+    from app.database.crud import delete_budget
+
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        try:
+            if not has_permission(db_perm, uid, "budget.manage"):
+                await query.edit_message_text("ليس لديك صلاحية إدارة الميزانيات.", reply_markup=_home_keyboard())
+                return
+        except Exception:
+            pass
+    finally:
+        try:
+            db_perm.close()
+        except Exception:
+            pass
+    db = SessionLocal()
+    try:
+        ok = delete_budget(db, uid, int(budget_id))
+    finally:
+        db.close()
+    text = f"🗑️ حُذفت الميزانية {budget_id}." if ok else "لم أجد هذه الميزانية."
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_budget(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    act = parts[0] if parts else "list"
+    if act == "add" and len(parts) > 1:
+        await _handle_budget_add(query, context, parts[1])
+    elif act == "del" and len(parts) > 1:
+        await _handle_budget_delete(query, context, parts[1])
+    else:
+        await _handle_budget_list(query, context)
+
+
+# ---------- المساحة المشتركة (Workspace) ----------
+
+
+async def _workspace_status(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    from app.database.crud import list_workspace, pending_workspace_invite
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        info = list_workspace(db, uid)
+        invite_wid = pending_workspace_invite(db, uid)
+        if info is None and invite_wid is not None:
+            text = (
+                f"📩 لديك دعوة انضمام إلى مساحة عمل #{invite_wid}.\n\n"
+                "بقبولك تُدمج بيانات الطرفين (ترى بيانات المالك ويراها هو). "
+                "لا يُنفَّذ أي دمج قبل موافقتك الصريحة."
+            )
+            rows = [
+                [(f"{SUCCESS} قبول الدعوة", f"ws:accept:{invite_wid}")],
+                [("❌ رفض الدعوة", f"ws:decline:{invite_wid}")],
+            ]
+        elif info is None:
+            text = (
+                "لا تملك مساحة مشتركة بعد.\n\n"
+                "مع المساحة المشتركة يرى جميع الأعضاء نفس الأرقام "
+                "(حساب واحد للشركة أو العائلة).\n"
+                "أنشئ مساحتك ثم ادعُ الشركاء بمعرّفاتهم الرقمية."
+            )
+            rows = [[("🆕 إنشاء المساحة", "ws:new")]]
+        else:
+            members = "\n".join(f"• {m}" for m in info["members"])
+            role = " (المرتكز)" if info["owner"] else " (عضو)"
+            text = (
+                f"🏢 مساحة العمل الحالية: #{info['workspace_id']} — {role}\n"
+                f"الأعضاء ({len(info['members'])}):\n{members}\n\n"
+                "يعمل الجميع على سجل واحد مشترك."
+            )
+            if info["owner"] and info["pending"]:
+                text += (
+                    "\n\n⏳ دعوات بانتظار القبول:\n"
+                    + "\n".join(f"• {m}" for m in info["pending"])
+                )
+            rows = [
+                [("👥 إدارة الأعضاء", "ws:members")],
+                [("➕ إضافة عضو", "ws:add")],
+            ]
+            if not info["owner"]:
+                rows.append([("🚪 مغادرة المساحة", "ws:leave")])
+    finally:
+        db.close()
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _workspace_members(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    from app.database.crud import list_workspace
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        info = list_workspace(db, uid)
+        if info is None:
+            text = "لا توجد مساحة مشتركة بعد."
+            rows = [[("🆕 إنشاء المساحة", "ws:new")]]
+        else:
+            text = f"الأعضاء ({len(info['members'])}):\n" + "\n".join(
+                f"• {m}" for m in info["members"]
+            )
+            rows = []
+            if info["owner"]:
+                rows = [[("❌ إخراج " + str(m), f"ws:rm:{m}")] for m in info["members"] if m != uid]
+                if info["pending"]:
+                    text += (
+                        "\n\n⏳ دعوات معلّقة بانتظار القبول:\n"
+                        + "\n".join(f"• {m}" for m in info["pending"])
+                    )
+                    rows += [[("🕒 إلغاء " + str(m), f"ws:rm:{m}")] for m in info["pending"]]
+            rows.append([(f"{BACK} رجوع للمساحة", "ws:status")])
+    finally:
+        db.close()
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _workspace_create(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    from app.database.crud import create_workspace
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        create_workspace(db, uid)
+        await query.answer(f"{SUCCESS} أُنشئت المساحة المشتركة.")
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
+async def _workspace_add(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    _clear_all_pending(context)
+    context.user_data["pending_ws_invite"] = True
+    await query.edit_message_text(
+        "أرسل المعرّف الرقمي (Telegram ID) للشريك الذي تريد مشاركته:\n"
+        "مثال — 555666777\n\n(أرسل /cancel للإلغاء)",
+        reply_markup=_home_keyboard(),
+    )
+
+
+async def _workspace_leave(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    from app.database.crud import leave_workspace
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = leave_workspace(db, uid)
+        await query.answer("غادرت المساحة المشتركة." if ok else "لا يمكنك مغادرة مساحة تملكها.")
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
+async def _workspace_remove(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target: str
+) -> None:
+    from app.database.crud import remove_from_workspace
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = remove_from_workspace(db, uid, int(target))
+        await query.answer("أُخرج العضو." if ok else "تعذّر إخراج هذا العضو.")
+    finally:
+        db.close()
+    await _workspace_members(query, context)
+
+
+async def _workspace_accept(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, workspace_id: str
+) -> None:
+    from app.database.crud import accept_workspace_invite
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = accept_workspace_invite(db, uid, int(workspace_id))
+        await query.answer(
+            f"{SUCCESS} انضممت إلى المساحة المشتركة — بياناتكما أصبحت مشتركة الآن."
+            if ok
+            else "لا توجد دعوة بهذا المعرّف."
+        )
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
+async def _workspace_decline(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, workspace_id: str
+) -> None:
+    from app.database.crud import decline_workspace_invite
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        ok = decline_workspace_invite(db, uid, int(workspace_id))
+        await query.answer("تم رفض الدعوة." if ok else "لا توجد دعوة بهذا المعرّف.")
+    finally:
+        db.close()
+    await _workspace_status(query, context)
+
+
+async def _handle_workspace(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    act = parts[0] if parts else "status"
+    if act == "new":
+        await _workspace_create(query, context)
+    elif act == "add":
+        await _workspace_add(query, context)
+    elif act == "leave":
+        await _workspace_leave(query, context)
+    elif act == "members":
+        await _workspace_members(query, context)
+    elif act == "accept" and len(parts) > 1:
+        await _workspace_accept(query, context, parts[1])
+    elif act == "decline" and len(parts) > 1:
+        await _workspace_decline(query, context, parts[1])
+    elif act == "rm" and len(parts) > 1:
+        await _workspace_remove(query, context, parts[1])
+    else:
+        await _workspace_status(query, context)
+
+
+async def _handle_tool_chart(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    from app.charts import generate_monthly_chart
+
+    uid = query.from_user.id
+
+    def _gen_chart() -> io.BytesIO | None:
+        db = SessionLocal()
+        try:
+            return generate_monthly_chart(db, uid)
+        finally:
+            db.close()
+
+    try:
+        buf = await asyncio.to_thread(_gen_chart)
+    except Exception:
+        logger.exception("خطأ في توليد الرسم البياني")
+        await query.edit_message_text("حدث خطأ أثناء توليد الرسم البياني، حاول لاحقًا.")
+        return
+
+    if buf is None:
+        await query.edit_message_text(
+            "لا توجد بيانات للرسم بعد، أو تعذر جلب أسعار الصرف لتوحيد العملات.",
+            reply_markup=_home_keyboard(),
+        )
+        return
+
+    await query.message.reply_chat_action("upload_photo")
+    await query.message.reply_photo(
+        photo=buf,
+        caption="📈 الإيرادات مقابل المصاريف — آخر 6 أشهر",
+    )
+    await query.edit_message_text(f"تم إرسال الرسم البياني {SUCCESS}", reply_markup=_home_keyboard())
+
+
+async def _handle_tool_convert(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    _clear_all_pending(context)
+    context.user_data["pending_convert"] = True
+    await query.edit_message_text(
+        "أرسل التحويل بصيغة:\n"
+        "مثال 1: 300 ILS إلى USD\n"
+        "مثال 2: 500 دولار إلى شيكل\n\n"
+        "(أرسل /cancel للإلغاء)"
+    )
+
+
+async def _handle_tool(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    act = parts[0] if parts else ""
+    if act == "chart":
+        await _handle_tool_chart(query, context)
+    elif act == "summary":
+        await _handle_tool_summary(query, context)
+    elif act == "pdf":
+        await _handle_tool_pdf(query, context)
+    elif act == "convert":
+        await _handle_tool_convert(query, context)
+    elif act in ("debts", "invoices", "orders", "credit"):
+        await _tool_lists(query, context, act)
+    elif act == "finance":
+        await _handle_tool_finance(query, context)
+    elif act == "kpi":
+        await _handle_tool_kpi(query, context)
+    else:
+        await query.edit_message_text(PAGES["tools"][0], reply_markup=build_menu(TOOLS_MENU))
+
+
+async def _handle_tool_summary(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """تقرير شامل نصي: إحصاءات عامة + خلاصة الشهر بالعملة الأساس."""
+    from decimal import Decimal
+
+    from sqlalchemy import func
+
+    from app.config import settings
+    from app.exchange import convert_totals_to_base
+    from app.timeutil import now_local, to_utc_naive
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import report_company_filter, report_scope_ids
+
+        # يحترم report.view_all: staff يرى نفسه فقط، manager يرى الشركة
+        report_scope_ids(db, uid)
+        # استخدم فلتر الشركة/النطاق بدل accessible_user_ids العام
+        # للعدّ استخدم company_filter المتوافق مع report
+        # لكن للاختصار نحافظ على in_(ids) حيث ids هو نطاق التقرير الصحيح
+        from app.database.crud.common import _cash_filter as _menu_cash
+        filters_tx = (
+            report_company_filter(db, uid, Transaction),
+            Transaction.deleted_at.is_(None),
+            _menu_cash(Transaction),
+        )
+        # العدّ عبر report_company_filter مباشرة لضمان العزل
+        # نحتاج base count بنفس الفلتر؛ in_(ids) كان يتجاوز view_all
+        tx_count = db.query(func.count(Transaction.id)).filter(*filters_tx).scalar()
+        task_count = (
+            db.query(func.count(Task.id))
+            .filter(report_company_filter(db, uid, Task), Task.deleted_at.is_(None))
+            .scalar()
+        )
+        overdue = (
+            db.query(func.count(Task.id))
+            .filter(
+                report_company_filter(db, uid, Task),
+                Task.deleted_at.is_(None),
+                Task.status == "overdue",
+            )
+            .scalar()
+        )
+        order_count = (
+            db.query(func.count(Note.id))
+            .filter(
+                report_company_filter(db, uid, Note),
+                Note.deleted_at.is_(None),
+                Note.note_type == "order",
+            )
+            .scalar()
+        )
+        from app.database.crud.company import get_user_base_currency as _gubc
+        base = (_gubc(db, uid) or settings.base_currency or "ILS").upper()
+        local_now = now_local()
+        start = to_utc_naive(
+            local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        agg: dict = {}
+        for rtype, currency, amount in db.query(
+            Transaction.type,
+            Transaction.currency,
+            Transaction.amount,
+        ).filter(*filters_tx, func.coalesce(Transaction.occurred_at, Transaction.created_at) >= start).all():
+            c = (currency or "").upper()
+            entry = agg.setdefault(
+                c, {"expense": Decimal("0"), "income": Decimal("0")}
+            )
+            kind = "expense" if rtype == "expense" else "income"
+            entry[kind] += amount or Decimal("0")
+        exp_conv = convert_totals_to_base(
+            {c: agg[c]["expense"] for c in agg if agg[c]["expense"]}, base
+        )
+        inc_conv = convert_totals_to_base(
+            {c: agg[c]["income"] for c in agg if agg[c]["income"]}, base
+        )
+        total_expense = exp_conv.get("total")
+        total_income = inc_conv.get("total")
+        expense = total_expense if total_expense is not None else Decimal("0")
+        income = total_income if total_income is not None else Decimal("0")
+    finally:
+        db.close()
+
+    text = (
+        f"🧾 التقرير الشامل — {local_now.strftime('%Y-%m-%d')}\n"
+        "──────────\n"
+        f"📊 المعاملات: {tx_count}\n"
+        f"📝 المهام: {task_count} ({overdue} متأخرة)\n"
+        f"🛒 الطلبيات: {order_count}\n"
+        "──────────\n"
+        f"🧾 خلاصة الشهر ({base}):\n"
+        f"المصروفات: {float(expense):,.2f}\n"
+        f"الإيرادات: {float(income):,.2f}\n"
+        f"الصافي: {float(income - expense):,.2f}"
+    )
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_tool_pdf(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """يولّد ملف PDF شامل (معاملات + مهام + طلبيات/ملاحظات) ويرسله كملف."""
+    from bot.exporters import generate_export_pdf
+
+    uid = query.from_user.id
+
+    def _gen() -> io.BytesIO | None:
+        db = SessionLocal()
+        try:
+            return generate_export_pdf(db, uid)
+        finally:
+            db.close()
+
+    try:
+        buf = await asyncio.to_thread(_gen)
+    except Exception:
+        logger.exception("خطأ في توليد PDF من قائمة الأدوات")
+        await query.edit_message_text(
+            "حدث خطأ أثناء توليد ملف PDF (reportlab غير متوفر؟). جرّب تصدير Excel.",
+            reply_markup=_home_keyboard(),
+        )
+        return
+
+    if buf is None:
+        await query.edit_message_text("لم يُولَّد الملف.", reply_markup=_home_keyboard())
+        return
+
+    await query.message.reply_chat_action("upload_document")
+    await query.message.reply_document(
+        document=buf,
+        filename="تقرير شامل.pdf",
+        caption="📄 تقرير PDF شامل — معاملات + مهام + طلبيات وملاحظات",
+    )
+    await query.edit_message_text(f"تم إرسال ملف PDF {SUCCESS}", reply_markup=_home_keyboard())
+
+
+async def _tool_lists(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, which: str
+) -> None:
+    """يعرض الديون/الفواتير/الطلبيات/الحدود الائتمانية كنصوص + أزرار إجراء."""
+    uid = query.from_user.id
+    from app.database.crud import (
+        credit_usage,
+        list_credit_limits,
+        list_invoices,
+        list_orders,
+        person_debts,
+    )
+    from bot.formatters import (
+        format_credit_limits,
+        format_debts,
+        format_invoices,
+        format_orders,
+    )
+
+    db = SessionLocal()
+    try:
+        if which == "debts":
+            text = format_debts(person_debts(db, uid))
+            rows = [[(f"{HOME} القائمة الرئيسية", "menu:main")]]
+        elif which == "invoices":
+            invoices = list_invoices(db, uid, status=None, limit=30)
+            text = format_invoices(invoices)
+            rows = [
+                [
+                    (f"{EXPENSE} سداد #" + str(inv.id), f"inv:pay:{inv.id}")
+                    for inv in invoices[:6]
+                ]
+            ] if invoices else []
+            rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+        elif which == "orders":
+            orders = list_orders(db, uid, status="open", limit=30)
+            text = format_orders(orders)
+            rows = [[(f"{SUCCESS} إنجاز #" + str(o.id), f"ord:done:{o.id}") for o in orders[:6]]]
+            if not rows or not rows[0]:
+                rows = []
+            rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+        else:  # credit
+            limits = list_credit_limits(db, uid)
+            payload = [{"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits]
+            text = format_credit_limits(payload)
+            rows = [[(f"{HOME} القائمة الرئيسية", "menu:main")]]
+    finally:
+        db.close()
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _handle_tool_finance(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """بطاقة الذمم الموحّدة: ديون + فواتير + حدود ائتمانية."""
+    from app.database.crud import (
+        credit_usage,
+        list_credit_limits,
+        list_invoices,
+        person_debts,
+    )
+    from bot.formatters import format_finance_card
+
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        debts = person_debts(db, uid)
+        invoices = list_invoices(db, uid, status=None, limit=50)
+        limits = list_credit_limits(db, uid)
+        credit_payload = [
+            {"person": lim.person, "usage": credit_usage(db, lim)} for lim in limits
+        ]
+        text = format_finance_card(debts, invoices, credit_payload)
+    finally:
+        db.close()
+    rows = [
+        [(f"{EXPENSE} سداد فاتورة", "tool:invoices")],
+        [("💳 الديون والأرصدة", "tool:debts")],
+        [(f"{WARNING} الحدود الائتمانية", "tool:credit")],
+        [(f"{HOME} القائمة الرئيسية", "menu:main")],
+    ]
+    await query.edit_message_text(text, reply_markup=build_menu(rows))
+
+
+async def _handle_tool_kpi(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """لوحة مؤشرات الأداء (/kpi) عبر زر القائمة."""
+    from app.database.crud import kpi_dashboard
+    from bot.formatters import format_kpi_dashboard
+
+    db = SessionLocal()
+    try:
+        text = format_kpi_dashboard(kpi_dashboard(db, query.from_user.id))
+    finally:
+        db.close()
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_invoice_pay(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    from app.database.crud import mark_invoice_paid
+    from app.database.crud.company import has_permission
+
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية تسديد الفواتير (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
+    invoice_id = int(parts[-1]) if parts else 0
+    db = SessionLocal()
+    try:
+        ok = mark_invoice_paid(db, uid, invoice_id)
+    except ValueError:
+        ok = False
+    finally:
+        db.close()
+    text = (
+        f"{SUCCESS} سُدّدت الفاتورة {invoice_id}."
+        if ok
+        else "لم أجد هذه الفاتورة أو سُدّدت مسبقًا أو ليس لديك صلاحية."
+    )
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_order_done(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    from app.database.crud import set_order_status
+    from app.database.crud.company import has_permission
+
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        if not has_permission(db_perm, uid, "record.create"):
+            await query.edit_message_text("ليس لديك صلاحية إنجاز الطلبيات (record.create).", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
+    note_id = int(parts[-1]) if parts else 0
+    db = SessionLocal()
+    try:
+        ok = set_order_status(db, uid, note_id, "done")
+    except ValueError:
+        ok = False
+    finally:
+        db.close()
+    text = f"{SUCCESS} أُنجز الطلبية {note_id}." if ok else "لم أجد هذه الطلبية أو ليس لديك صلاحية."
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _handle_export(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    uid = query.from_user.id
+    db_perm = SessionLocal()
+    try:
+        from app.database.crud import has_permission
+
+        if not has_permission(db_perm, uid, "export"):
+            await query.edit_message_text("ليس لديك صلاحية التصدير.", reply_markup=_home_keyboard())
+            return
+    finally:
+        db_perm.close()
+    if not parts or parts[0] not in EXPORT_CAPTIONS:
+        await query.edit_message_text(
+            "تصدير Excel — اختر الفترة:", reply_markup=build_menu(EXPORT_MENU)
+        )
+        return
+
+    from bot.exporters import generate_export_excel
+
+    period = parts[0]
+    start, label = export_period_start(period)
+    db = SessionLocal()
+    try:
+        buf = generate_export_excel(db, uid, start_utc=start)
+    finally:
+        db.close()
+
+    from app.timeutil import now_local
+
+    now_str = now_local().strftime("%Y-%m-%d")
+    await query.message.reply_chat_action("upload_document")
+    await query.message.reply_document(
+        document=buf,
+        filename=f"export_{label}_{now_str}.xlsx",
+        caption=f"{EXPORT_CAPTIONS.get(period, 'تصدير')}\nيحتوي: معاملات + مهام + طلبيات وملاحظات",
+    )
+    await query.edit_message_text(f"تم إرسال ملف التصدير {SUCCESS}", reply_markup=_home_keyboard())
+
+
+# ---------- تعديل السجلات (el / rf) ----------
+
+
+async def _start_record_edit(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    model_name: str,
+    record_id: int,
+) -> None:
+    """يعرض حقول سجل محدد كأزرار تعديل (يُستخدم لآخر سجل ولملفات التاريخ)."""
+    from bot.editing import EDITABLE_FIELDS, FIELD_LABELS_AR, _get_current_value
+
+    _clear_all_pending(context)
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        record, _ = get_record_by_id(db, uid, model_name, record_id)
+    finally:
+        db.close()
+
+    if record is None:
+        await query.edit_message_text("لم أجد السجل (ربما حُذف).", reply_markup=_home_keyboard())
+        return
+
+    context.user_data["pending_record_edit_id"] = record.id
+    context.user_data["pending_record_edit_model"] = model_name
+
+    lines = ["✏️ تعديل السجل — اختر الحقل:\n"]
+    if model_name == "Transaction":
+        lines.append(f"• المبلغ: {_get_current_value(record, 'amount')}")
+        lines.append(f"• العملة: {_get_current_value(record, 'currency')}")
+        lines.append(f"• الشخص: {_get_current_value(record, 'person')}")
+        lines.append(f"• التصنيف: {_get_current_value(record, 'category')}")
+        lines.append(f"• الوصف: {_get_current_value(record, 'description')}")
+    elif model_name == "Task":
+        lines.append(f"• الوصف: {_get_current_value(record, 'description')}")
+        lines.append(f"• الشخص: {_get_current_value(record, 'person')}")
+        lines.append(f"• الموعد: {_get_current_value(record, 'due_date')}")
+        lines.append(f"• الأولوية: {_get_current_value(record, 'priority')}")
+        if getattr(record, "recurrence_rule", None):
+            lines.append(f"• التكرار: {record.recurrence_rule}")
+    else:
+        lines.append(f"• الوصف: {_get_current_value(record, 'description')}")
+        lines.append(f"• الشخص: {_get_current_value(record, 'person')}")
+        lines.append(f"• التصنيف: {_get_current_value(record, 'category')}")
+
+    rows = [
+        [(FIELD_LABELS_AR.get(f, f), f"rf:{model_name}:{f}")]
+        for f in EDITABLE_FIELDS.get(model_name, [])
+    ]
+    rows.append([("🚫 إنهاء التعديل", "rf:end")])
+    await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
+
+
+async def _handle_edit_last(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    parts: list[str] | None = None,
+) -> None:
+    """زر "تعديل آخر سجل": يعرض حقول آخر سجل محفوظ كأزرار تعديل."""
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs = list_recent_records(db, uid, limit=1)
+        model_name = recs[0]["model"] if recs else None
+        record_id = recs[0]["id"] if recs else None
+    finally:
+        db.close()
+
+    if record_id is None or model_name is None:
+        await query.edit_message_text(
+            "لا توجد سجلات محفوظة لتعديلها.", reply_markup=_home_keyboard()
+        )
+        return
+    await _start_record_edit(query, context, model_name, record_id)
+
+
+async def _handle_record_field(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    """زر حقل تعديل سجل (rf:Model:Field أو rf:end)."""
+    from bot.editing import FIELD_LABELS_AR, _get_current_value
+
+    if not parts or parts[0] == "end":
+        _clear_all_pending(context)
+        await query.edit_message_text(
+            MAIN_MENU_TEXT, reply_markup=_main_menu_keyboard(uid=query.from_user.id)
+        )
+        return
+    field = parts[-1]
+    uid = query.from_user.id
+    model_name = context.user_data.get("pending_record_edit_model")
+    record_id = context.user_data.get("pending_record_edit_id")
+    db = SessionLocal()
+    try:
+        record, _ = get_record_by_id(db, uid, model_name, record_id)
+    finally:
+        db.close()
+    if record is None:
+        await query.edit_message_text(
+            "انتهت الجلسة — أعد فتح من القائمة.", reply_markup=_home_keyboard()
+        )
+        return
+    label = FIELD_LABELS_AR.get(field, field)
+    context.user_data["pending_record_edit_field"] = field
+    current = _get_current_value(record, field)
+    await query.edit_message_text(
+        f"أرسل القيمة الجديدة للحقل {label}:\nالقيمة الحالية: {current}\n\n(أرسل /cancel للإلغاء)",
+        reply_markup=_home_keyboard(),
+    )
+
+
+# ---------- آخر العمليات + البحث (his / rb / sb / sr) ----------
+
+PAGE_SIZE = 5
+
+
+def _records_page_payload(
+    recs: list[dict], term: str | None, page: int, prefix: str, search_hint: str | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    """يرجّع (نص, لوحة أزرار) لصفحة سجلات — يعرض التعديل/الحذف وتنقّل الصفحات."""
+    total = len(recs)
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 1), pages)
+    start = (page - 1) * PAGE_SIZE
+    chunk = recs[start : start + PAGE_SIZE]
+
+    heading = "🕘 آخر العمليات — " if not term else "🔍 نتائج البحث — "
+    lines = [f"{heading}صفحة {page}/{pages}"]
+    if search_hint:
+        lines.append(search_hint)
+    if not chunk:
+        lines.append("لا توجد سجلات بعد." if not term else "لا توجد نتائج مطابقة.")
+    for r in chunk:
+        lines.append(f"• {r['date'] or '—'} | {r['kind']}: {r['label']}")
+        if r["person"]:
+            lines.append(f"   👤 {r['person']}")
+
+    rows: list[list[tuple[str, str]]] = []
+    for r in chunk:
+        rows.append(
+            [
+                (f"✏️ تعديل #{r['id']}", f"rb:e:{r['model']}:{r['id']}"),
+                (f"🗑️ حذف #{r['id']}", f"rb:d:{r['model']}:{r['id']}"),
+            ]
+        )
+    nav: list[tuple[str, str]] = []
+    if page > 1:
+        nav.append((f"{BACK} ص{page - 1}", f"{prefix}:p:{page - 1}"))
+    if page < pages:
+        nav.append((f"ص{page + 1} {FORWARD}", f"{prefix}:p:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+    return "\n".join(lines), build_menu(rows)
+
+
+def _records_page_number(parts: list[str]) -> int:
+    """يستخرج رقم الصفحة من callback (p:2 أو 2)."""
+    if not parts:
+        return 1
+    raw = parts[-1]
+    return int(raw) if raw.isdigit() else 1
+
+
+async def _handle_history(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    page = _records_page_number(parts)
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs = list_recent_records(db, uid, limit=50)
+    finally:
+        db.close()
+    text, markup = _records_page_payload(recs, None, page, "his")
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def _handle_record_action(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    """أزرار سريعة في صفحات السجلات: rb:e:Model:id (تعديل) / rb:d:Model:id (حذف)."""
+    act = parts[0] if parts else ""
+    if act == "e" and len(parts) == 3 and parts[2].isdigit():
+        await _start_record_edit(query, context, parts[1], int(parts[2]))
+        return
+    if act == "d" and len(parts) == 3 and parts[2].isdigit():
+        uid = query.from_user.id
+        db = SessionLocal()
+        try:
+            deleted = delete_record_by_id(db, uid, parts[1], int(parts[2]))
+        finally:
+            db.close()
+        if deleted:
+            await query.answer(f"حُذف السجل {SUCCESS}")
+        else:
+            await query.answer("تعذّر الحذف (صلاحيات أو سجل غير موجود).")
+        await _handle_history(query, context, ["p", "1"])
+        return
+    await _handle_history(query, context, ["p", "1"])
+
+
+async def _handle_search_start(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    _clear_all_pending(context)
+    context.user_data["pending_search"] = True
+    await query.edit_message_text(
+        "🔍 اكتب كلمة البحث (شخص، تصنيف، وصف، قيمة أو نوع):\nمثال: محمد أو فاتورة",
+        reply_markup=_home_keyboard(),
+    )
+
+
+def _search_partial_hint(meta: dict | None) -> str | None:
+    """تنبيه صريح بأن البحث محدود بنافذة السجلات الأحدث (تشفير يمنع LIKE في SQL)."""
+    if meta and meta.get("saturated"):
+        return f"⚠️ بحثتُ في آخر {meta['per_model']} سجلًا لكل نوع — قد توجد نتائج أقدم غير ظاهرة."
+    return None
+
+
+async def _handle_search_page(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    term = context.user_data.get("pending_search_term")
+    if not term:
+        await _handle_search_start(query, context, parts)
+        return
+    page = _records_page_number(parts)
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        recs, meta = search_records(db, uid, term, limit=50, return_meta=True)
+    finally:
+        db.close()
+    hint = _search_partial_hint(meta)
+    text, markup = _records_page_payload(recs, term, page, "sr", search_hint=hint)
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+# ---------- اللغة (ln) ----------
+
+
+def _lang_keyboard() -> InlineKeyboardMarkup:
+    return build_menu(
+        [
+            [("🌐 العربية", "ln:ar")],
+            [(f"{HOME} القائمة الرئيسية", "menu:main")],
+        ]
+    )
+
+
+def send_lang_menu(message: Message, text: str = "") -> Coroutine[Any, Any, Message]:
+    """يرسل شاشة اختيار اللغة كرسالة جديدة (لأمر /lang)."""
+    return message.reply_text(text or "اختر لغة الواجهة:", reply_markup=_lang_keyboard())
+
+
+async def _handle_lang(
+    query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
+) -> None:
+    lang = "ar"
+    uid = query.from_user.id
+    from app.database.crud import set_user_lang
+
+    db = SessionLocal()
+    try:
+        set_user_lang(db, uid, lang)
+    finally:
+        db.close()
+    remember_lang(uid, lang)
+    await query.edit_message_text(
+        t("lang_done_ar", lang),
+        reply_markup=_lang_keyboard(),
+    )
+
+
+# ---------- الفريق / الدعوات (team) ----------
+
+
+def _team_assignable_roles(actor_role: str) -> list[str]:
+    from app.permissions import ASSIGNABLE_BY_MANAGER, ROLE_PERMISSIONS
+
+    if actor_role == "owner":
+        return [r for r in ROLE_PERMISSIONS if r != "owner"]
+    if actor_role == "manager":
+        return sorted(ASSIGNABLE_BY_MANAGER)
+    return []
+
+
+def _team_role_keyboard(kind: str, actor_role: str) -> InlineKeyboardMarkup:
+    from app.permissions import ROLE_LABELS
+
+    roles = _team_assignable_roles(actor_role)
+    rows = [[(f"{ROLE_LABELS.get(r, r)} ({r})", f"team:role:{kind}:{r}")] for r in roles]
+    rows.append([(f"{BACK} رجوع", "team:menu")])
+    return build_menu(rows)
+
+
+async def _team_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user, get_company_member, has_permission
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في أي شركة بعد. أنشئ شركة عبر /start.", reply_markup=_home_keyboard())
+            return
+        if not has_permission(db, uid, "members.manage"):
+            await query.edit_message_text("عذرًا، ليس لديك صلاحية إدارة الفريق.", reply_markup=_home_keyboard())
+            return
+        get_company_member(db, uid)
+        company = db.query(__import__("app.database.models", fromlist=["Company"]).Company).filter_by(id=cid).first()
+        cname = company.name if company else f"#{cid}"
+        text = f"👥 فريق {cname} — اختر إجراءً:"
+        rows = [
+            [("🔗 رابط دعوة", "team:pick:link"), ("🔢 كود مؤقت", "team:pick:code")],
+            [("📋 الأعضاء", "team:members")],
+            [("🚫 دعوات نشطة", "team:invites")],
+            [(f"{BACK} رجوع", "menu:tools")],
+        ]
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_pick_role(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, kind: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import get_company_member
+
+        m = get_company_member(db, uid)
+        if m is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        label = "رابط دعوة" if kind == "link" else "كود مؤقت"
+        await query.edit_message_text(f"اختر دور {label}:", reply_markup=_team_role_keyboard(kind, m.role))
+    finally:
+        db.close()
+
+
+async def _team_create_invite(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, kind: str, role: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import create_invite
+
+        inv = create_invite(db, uid, role, kind=kind)
+        if inv is None:
+            await query.edit_message_text("تعذر إنشاء الدعوة. تأكد من صلاحياتك والدور المطلوب.", reply_markup=_home_keyboard([(f"{BACK} رجوع", "team:menu")]))
+            return
+        bot_username = (getattr(context.bot, "username", None) or getattr(query, "_bot_username", None) or "bot").lstrip("@")
+        if kind == "link":
+            link = f"https://t.me/{bot_username}/?start=inv_{inv.token}"
+            # لا Markdown — الرابط يحوي _ و =
+            text = f"رابط الدعوة ({role}):\n{link}\n\nصالح حتى {inv.expires_at or 'غير محدد'} — استخدامات: {inv.max_uses}"
+        else:
+            text = f"كود الدعوة ({role}):\n{inv.token}\n\nأرسل للموظف: /join {inv.token}\nصالح لساعة واحدة."
+        rows = [[("🚫 إلغاء الدعوة", f"team:revoke:{inv.id}")], [(f"{BACK} رجوع", "team:menu")]]
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_members(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user
+        from app.database.models import CompanyMember
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        members = db.query(CompanyMember).filter(CompanyMember.company_id == cid, CompanyMember.status == "active").all()
+        if not members:
+            await query.edit_message_text("لا يوجد أعضاء.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:menu")]]))
+            return
+        lines = ["📋 أعضاء الفريق:"]
+        rows = []
+        for m in members:
+            label = ROLE_LABELS.get(m.role, m.role)
+            lines.append(f"• {m.telegram_user_id} — {label}" + (f" ({m.display_name})" if m.display_name else ""))
+            if m.telegram_user_id != uid:
+                rows.append([(f"⚙️ {m.telegram_user_id}", f"team:member:{m.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "team:menu")])
+        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_member_detail(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user, get_company_member
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        target = get_company_member(db, int(target_id))
+        if target is None or target.company_id != cid:
+            await query.edit_message_text("لم أجد هذا العضو.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:members")]]))
+            return
+        label = ROLE_LABELS.get(target.role, target.role)
+        text = f"👤 العضو {target.telegram_user_id}\nالدور الحالي: {label}"
+        # أزرار تغيير الدور
+
+        actor = get_company_member(db, uid)
+        assignable = _team_assignable_roles(actor.role if actor else "")
+        rows = []
+        for r in assignable:
+            if r != target.role:
+                rows.append([(f"→ {ROLE_LABELS.get(r, r)}", f"team:setrole:{target.telegram_user_id}:{r}")])
+        rows.append([("🗑️ إزالة من الشركة", f"team:remove:{target.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "team:members")])
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_set_role(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str, role: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import set_member_role
+
+        ok = set_member_role(db, uid, int(target_id), role)
+        await query.answer("تم تغيير الدور." if ok else "تعذر تغيير الدور.")
+    finally:
+        db.close()
+    await _team_members(query, context)
+
+
+async def _team_remove_member(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    target = int(target_id)
+    db = SessionLocal()
+    try:
+        from app.database.crud import remove_company_member
+
+        ok = remove_company_member(db, uid, target)
+    finally:
+        db.close()
+    if ok:
+        try:
+            await context.bot.send_message(chat_id=target, text="تمت إزالتك من الشركة.")
+        except Exception:
+            pass
+        await query.answer("تمت إزالة العضو.")
+    else:
+        await query.answer("تعذر إزالة العضو.")
+    await _team_members(query, context)
+
+
+async def _team_invites(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import company_id_for_user
+        from app.database.models import InviteLink
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        invites = db.query(InviteLink).filter(InviteLink.company_id == cid, InviteLink.revoked == False).order_by(InviteLink.created_at.desc()).limit(20).all()  # noqa: E712
+        if not invites:
+            await query.edit_message_text("لا توجد دعوات نشطة.", reply_markup=build_menu([[(f"{BACK} رجوع", "team:menu")]]))
+            return
+        lines = ["🚫 دعوات نشطة:"]
+        rows = []
+        for inv in invites:
+            status = "🔗" if inv.kind == "link" else "🔢"
+            exp = inv.expires_at.strftime("%m-%d %H:%M") if inv.expires_at else "—"
+            lines.append(f"{status} #{inv.id} {inv.role} — {inv.uses}/{inv.max_uses} — ينتهي {exp}")
+            rows.append([(f"🚫 إلغاء #{inv.id}", f"team:revoke:{inv.id}")])
+        rows.append([(f"{BACK} رجوع", "team:menu")])
+        await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _team_revoke(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, invite_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud import revoke_invite
+
+        ok = revoke_invite(db, uid, int(invite_id))
+        await query.answer("تم إلغاء الدعوة." if ok else "تعذر الإلغاء.")
+    finally:
+        db.close()
+    await _team_invites(query, context)
+
+
+async def _handle_team(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    act = parts[0] if parts else "menu"
+    if act == "menu":
+        await _team_menu(query, context)
+    elif act == "pick" and len(parts) > 1:
+        await _team_pick_role(query, context, parts[1])
+    elif act == "role" and len(parts) > 2:
+        await _team_create_invite(query, context, parts[1], parts[2])
+    elif act == "members":
+        await _team_members(query, context)
+    elif act == "member" and len(parts) > 1:
+        await _team_member_detail(query, context, parts[1])
+    elif act == "setrole" and len(parts) > 2:
+        await _team_set_role(query, context, parts[1], parts[2])
+    elif act == "remove" and len(parts) > 1:
+        await _team_remove_member(query, context, parts[1])
+    elif act == "invites":
+        await _team_invites(query, context)
+    elif act == "revoke" and len(parts) > 1:
+        await _team_revoke(query, context, parts[1])
+    else:
+        await _team_menu(query, context)
+
+
+# ---------- الشركة /company ----------
+
+
+async def _company_info(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import (
+            company_id_for_user,
+            company_member_ids,
+            get_company,
+            get_company_member,
+        )
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في أي شركة.", reply_markup=_home_keyboard())
+            return
+        comp = get_company(db, cid)
+        m = get_company_member(db, uid)
+        members = company_member_ids(db, cid)
+        role_label = ROLE_LABELS.get(m.role, m.role) if m else "—"
+        text = (
+            f"🏢 {comp.name}\n📝 {comp.description or '—'}\n"
+            f"🏷️ {comp.business_type or '—'} | 💱 {comp.base_currency or '—'}\n"
+            f"👥 {len(members)} عضو | 🎖️ دورك: {role_label}\n🆔 #{comp.id}"
+        )
+        rows = []
+        if m and m.role == "owner":
+            rows.append([("✏️ تعديل الاسم", "company:edit_name"), ("📝 تعديل الوصف", "company:edit_desc")])
+            rows.append([("👥 الفريق", "team:menu")])
+            rows.append([("🔑 نقل الملكية", "company:transfer"), ("🗑️ حذف الشركة", "company:delete")])
+        else:
+            rows.append([("👥 الفريق", "team:menu")])
+        rows.append([(f"{HOME} القائمة الرئيسية", "menu:main")])
+        await query.edit_message_text(text, reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _company_edit_prompt(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, field: str) -> None:
+    from bot.conversation import _clear_all_pending
+
+    _clear_all_pending(context)
+    context.user_data["pending_company_edit"] = field
+    label = "الاسم" if field == "name" else "الوصف"
+    # احفظ الرسالة الحالية لمحاولة التعديل
+    text = f"أرسل {label} الجديد للشركة:\n(أرسل /cancel للإلغاء)"
+    await query.edit_message_text(text, reply_markup=_home_keyboard())
+
+
+async def _company_transfer_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, get_company_member
+        from app.database.models import CompanyMember
+        from app.permissions import ROLE_LABELS
+
+        cid = company_id_for_user(db, uid)
+        m = get_company_member(db, uid)
+        if not m or m.role != "owner":
+            await query.edit_message_text("نقل الملكية متاح للمالك فقط.", reply_markup=_home_keyboard())
+            return
+        members = db.query(CompanyMember).filter(CompanyMember.company_id == cid, CompanyMember.status == "active").all()
+        rows = []
+        for mem in members:
+            if mem.telegram_user_id == uid:
+                continue
+            label = ROLE_LABELS.get(mem.role, mem.role)
+            rows.append([(f"{mem.telegram_user_id} ({label})", f"company:transfer_pick:{mem.telegram_user_id}")])
+        rows.append([(f"{BACK} رجوع", "company:info")])
+        await query.edit_message_text("اختر العضو لنقل الملكية إليه:", reply_markup=build_menu(rows))
+    finally:
+        db.close()
+
+
+async def _company_transfer_pick(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    target = int(target_id)
+    # تأكيد مزدوج
+    rows = [
+        [(f"✅ تأكيد نقل الملكية إلى {target}", f"company:transfer_confirm:{target}")],
+        [(f"{BACK} رجوع", "company:transfer")],
+    ]
+    await query.edit_message_text(f"هل أنت متأكد من نقل ملكية الشركة إلى {target}؟", reply_markup=build_menu(rows))
+
+
+async def _company_transfer_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, target_id: str) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import transfer_company_ownership
+
+        ok = transfer_company_ownership(db, uid, int(target_id))
+        await query.answer("تم نقل الملكية." if ok else "تعذر نقل الملكية.")
+    finally:
+        db.close()
+    await _company_info(query, context)
+
+
+async def _company_delete_prompt(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    rows = [
+        [("⚠️ تأكيد حذف الشركة", "company:delete_confirm")],
+        [(f"{BACK} رجوع", "company:info")],
+    ]
+    await query.edit_message_text("⚠️ حذف الشركة سيحذف كل العضويات والدعوات (السجلات المالية تبقى). هل أنت متأكد؟", reply_markup=build_menu(rows))
+
+
+async def _company_delete_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # تأكيد مزدوج ثانٍ
+    rows = [
+        [("🗑️ حذف نهائي", "company:delete_do")],
+        [(f"{BACK} إلغاء", "company:info")],
+    ]
+    await query.edit_message_text("تأكيد نهائي: سيتم حذف الشركة نهائيًا. متابعة؟", reply_markup=build_menu(rows))
+
+
+async def _company_delete_do(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = query.from_user.id
+    db = SessionLocal()
+    try:
+        from app.database.crud.company import company_id_for_user, delete_company
+
+        cid = company_id_for_user(db, uid)
+        if cid is None:
+            await query.edit_message_text("لست عضوًا في شركة.", reply_markup=_home_keyboard())
+            return
+        ok = delete_company(db, uid, cid, confirm=True)
+        await query.answer("تم حذف الشركة." if ok else "تعذر حذف الشركة.")
+        await query.edit_message_text("تم حذف الشركة." if ok else "تعذر حذف الشركة.", reply_markup=_home_keyboard())
+    finally:
+        db.close()
+
+
+async def _handle_company(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]) -> None:
+    act = parts[0] if parts else "info"
+    if act == "info":
+        await _company_info(query, context)
+    elif act == "edit_name":
+        await _company_edit_prompt(query, context, "name")
+    elif act == "edit_desc":
+        await _company_edit_prompt(query, context, "desc")
+    elif act == "transfer":
+        await _company_transfer_menu(query, context)
+    elif act == "transfer_pick" and len(parts) > 1:
+        await _company_transfer_pick(query, context, parts[1])
+    elif act == "transfer_confirm" and len(parts) > 1:
+        await _company_transfer_confirm(query, context, parts[1])
+    elif act == "delete":
+        await _company_delete_prompt(query, context)
+    elif act == "delete_confirm":
+        await _company_delete_confirm(query, context)
+    elif act == "delete_do":
+        await _company_delete_do(query, context)
+    else:
+        await _company_info(query, context)
+
+
+# ---------- Router موحّد ----------
+
+HANDLERS = {
+    "menu": _handle_menu,
+    "team": _handle_team,
+    "company": _handle_company,
+    "rec": _handle_record,
+    "tsk": _handle_task,
+    "rpt": _handle_report,
+    "set": _handle_settings,
+    "tool": _handle_tool,
+    "bg": _handle_budget,
+    "ex": _handle_export,
+    "ws": _handle_workspace,
+    "el": _handle_edit_last,
+    "rf": _handle_record_field,
+    "his": _handle_history,
+    "rb": _handle_record_action,
+    "sb": _handle_search_start,
+    "sr": _handle_search_page,
+    "ln": _handle_lang,
+    "inv": _handle_invoice_pay,
+    "ord": _handle_order_done,
+}
+
+
+async def menu_callback_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """يقفز حسب أول جزء من callback_data (action:target:extra).
+
+    ما لا يخص القوائم (confirm:* و edit:* و editfield:*) يمرّ دون اعتراض
+    إلى ConversationHandlers المسجّلة قبله.
+    """
+    query = update.callback_query
+    data = query.data or ""
+    action, *parts = data.split(":")
+    handler = HANDLERS.get(action)
+    if handler is None:
+        if action in {"confirm", "edit", "editfield"}:
+            return
+        try:
+            await query.answer("انتهت صلاحية هذا الخيار. افتح القائمة الرئيسية.", show_alert=False)
+        except TelegramError:
+            pass
+        return
+    chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    uid = query.from_user.id
+    previous_message_id = None
+    obsolete = False
+    if chat_id is not None:
+        db = SessionLocal()
+        try:
+            from app.database.crud.active_menus import get_active_menu, is_obsolete_menu
+
+            previous_message_id = get_active_menu(db, chat_id, uid)
+            obsolete = bool(
+                message_id is not None
+                and is_obsolete_menu(db, chat_id, uid, message_id)
+            )
+        finally:
+            db.close()
+    wrong_user_menu = (
+        message_id is not None
+        and previous_message_id is not None
+        and message_id != previous_message_id
+    )
+    if wrong_user_menu:
+        try:
+            await query.answer("هذه القائمة تخص جلسة أخرى. افتح /start لعرض قائمتك.", show_alert=False)
+        except TelegramError:
+            pass
+        return
+    if obsolete and data != "menu:main":
+        try:
+            await query.answer("انتهت صلاحية هذا الخيار. افتح القائمة الرئيسية.", show_alert=False)
+        except TelegramError:
+            pass
+        return
+
+    try:
+        await handler(query, context, [p for p in parts if p != ""])
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.info("تعذر تنفيذ زر القائمة %s: %s", action, type(exc).__name__)
+            try:
+                await query.answer("تعذر تحديث هذه الشاشة. افتح /menu مجددًا.", show_alert=False)
+            except TelegramError:
+                pass
+    except TelegramError:
+        logger.exception("فشل طلب تيليجرام أثناء تنفيذ زر القائمة %s", action)
+        try:
+            await query.answer("تعذر تنفيذ الطلب مؤقتًا. حاول مرة أخرى.", show_alert=False)
+        except TelegramError:
+            pass
+    finally:
+        # أقرّ الاستعلام بعد المعالجة؛ بعض الإجراءات ترسل تنبيهًا خاصًا بها أولًا.
+        try:
+            await query.answer()
+        except TelegramError:
+            pass
+
+    if chat_id is not None and message_id is not None and (message_id == previous_message_id or data == "menu:main"):
+        db = SessionLocal()
+        try:
+            from app.database.crud.active_menus import set_active_menu
+
+            set_active_menu(db, chat_id, uid, message_id)
+        finally:
+            db.close()
+        if data == "menu:main" and previous_message_id not in (None, message_id):
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=previous_message_id,
+                    reply_markup=None,
+                )
+            except TelegramError:
+                logger.debug("تعذر تعطيل أزرار القائمة المستبدلة للمحادثة %s", chat_id)
+        if obsolete:
+            db = SessionLocal()
+            try:
+                from app.database.crud.active_menus import clear_obsolete_menu
+
+                clear_obsolete_menu(db, chat_id, uid, message_id)
+            finally:
+                db.close()

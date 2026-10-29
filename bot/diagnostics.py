@@ -164,14 +164,14 @@ def run_health_checks(db_session: Session | None = None) -> list[dict]:
 
 
 def _try_auto_migrate() -> None:
-    """يحاول ترقية الهجرات تلقائيًا عند الإقلاع إن كان AUTO_MIGRATE=1 أو في production.
+    """يرقي الهجرات عند الإقلاع فقط عند تفعيل AUTO_MIGRATE صراحةً.
 
     لا يوقف التشغيل عند الفشل — يسجل فقط، لكن يمنع أخطاء وقت التشغيل بعد ترقية الكود.
     """
     import os
     auto = os.getenv("AUTO_MIGRATE", "").strip().lower() in ("1", "true", "yes")
     from app.config import settings
-    if not auto and (settings.app_env or "").lower() != "production":
+    if not auto:
         return
     try:
         from alembic import command

@@ -18,41 +18,46 @@ if (-not (Test-Path "$ROOT\start_api.cmd")){ Write-Error "start_api.cmd not foun
 if (-not (Test-Path "$ROOT\logs")) { New-Item -ItemType Directory -Path "$ROOT\logs" | Out-Null; Write-Host "  Created logs\" }
 if (-not (Test-Path "$ROOT\data\backups")) { New-Item -ItemType Directory -Path "$ROOT\data\backups" | Out-Null; Write-Host "  Created data\backups\" }
 
-Write-Host "== Removing old services (if any) =="
-foreach ($svc in 'SmartBusinessBot','SmartBot','SmartBotAPI') {
-    $existing = Get-Service -Name $svc -ErrorAction SilentlyContinue
-    if ($existing) {
-        Write-Host "  Stopping and removing $svc"
-        & $NSSM stop $svc | Out-Null
-        Start-Sleep -Milliseconds 800
-        & $NSSM remove $svc confirm | Out-Null
-        Write-Host "  Removed: $svc"
-    } else {
-        Write-Host "  Not present: $svc"
-    }
-}
-
 Write-Host "== Creating bot service: SmartBot =="
-& $NSSM install SmartBot "$ROOT\start_bot.cmd" | Out-Null
+if (-not (Get-Service -Name SmartBot -ErrorAction SilentlyContinue)) {
+    & $NSSM install SmartBot "$ROOT\start_bot.cmd" | Out-Null
+}
+& $NSSM set SmartBot Application "$ROOT\start_bot.cmd"
 & $NSSM set SmartBot AppDirectory "$ROOT"
 & $NSSM set SmartBot AppStdout  "$ROOT\logs\bot_out.log"
 & $NSSM set SmartBot AppStderr  "$ROOT\logs\bot_err.log"
 & $NSSM set SmartBot AppRotateFiles 1
 & $NSSM set SmartBot AppRotateBytes 1048576
 & $NSSM set SmartBot Start SERVICE_AUTO_START
+& $NSSM set SmartBot AppRestartDelay 15000
+& $NSSM set SmartBot AppExit Default Restart
+& $NSSM set SmartBot AppExit 0 Exit
+& $NSSM set SmartBot AppExit 1 Exit
+& $NSSM set SmartBot AppExit 78 Exit
 # لا تشغّل كـ LocalSystem مع مدخلات غير موثوقة (صور/PDF) — استخدم حسابًا محدودًا إن وجد
-try { $svcAccount = if ($env:SMART_BOT_SERVICE_ACCOUNT) { $env:SMART_BOT_SERVICE_ACCOUNT } else { "NT AUTHORITY\NetworkService" }; & $NSSM set SmartBot ObjectName $svcAccount | Out-Null; Write-Host "  SmartBot account: $svcAccount" } catch { & $NSSM set SmartBot ObjectName LocalSystem | Out-Null }
+if ($env:SMART_BOT_SERVICE_ACCOUNT) {
+    & $NSSM set SmartBot ObjectName $env:SMART_BOT_SERVICE_ACCOUNT
+}
 Write-Host "  Created SmartBot"
 
 Write-Host "== Creating API service: SmartBotAPI =="
-& $NSSM install SmartBotAPI "$ROOT\start_api.cmd" | Out-Null
+if (-not (Get-Service -Name SmartBotAPI -ErrorAction SilentlyContinue)) {
+    & $NSSM install SmartBotAPI "$ROOT\start_api.cmd" | Out-Null
+}
+& $NSSM set SmartBotAPI Application "$ROOT\start_api.cmd"
 & $NSSM set SmartBotAPI AppDirectory "$ROOT"
 & $NSSM set SmartBotAPI AppStdout  "$ROOT\logs\api_out.log"
 & $NSSM set SmartBotAPI AppStderr  "$ROOT\logs\api_err.log"
 & $NSSM set SmartBotAPI AppRotateFiles 1
 & $NSSM set SmartBotAPI AppRotateBytes 1048576
 & $NSSM set SmartBotAPI Start SERVICE_AUTO_START
-try { $svcAccount2 = if ($env:SMART_BOT_SERVICE_ACCOUNT) { $env:SMART_BOT_SERVICE_ACCOUNT } else { "NT AUTHORITY\NetworkService" }; & $NSSM set SmartBotAPI ObjectName $svcAccount2 | Out-Null; Write-Host "  SmartBotAPI account: $svcAccount2" } catch { & $NSSM set SmartBotAPI ObjectName LocalSystem | Out-Null }
+& $NSSM set SmartBotAPI AppRestartDelay 15000
+& $NSSM set SmartBotAPI AppExit Default Restart
+& $NSSM set SmartBotAPI AppExit 1 Exit
+& $NSSM set SmartBotAPI AppExit 78 Exit
+if ($env:SMART_BOT_SERVICE_ACCOUNT) {
+    & $NSSM set SmartBotAPI ObjectName $env:SMART_BOT_SERVICE_ACCOUNT
+}
 Write-Host "  Created SmartBotAPI"
 
 Write-Host "== Creating daily backup task: SmartBotBackup =="

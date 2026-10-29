@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, ContextTypes
 
 from app.database.crud import mark_overdue_tasks
@@ -790,6 +791,16 @@ async def deviation_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(chat_id=member, text=msg)
                 sent_any = True
+            except Forbidden as exc:
+                # Recipient blocked the bot or the bot lost access to the chat.
+                logger.warning("تعذر إرسال تنبيه الانحراف إلى المستخدم %s (لا يمكن الوصول للمحادثة): %s", member, exc)
+            except BadRequest as exc:
+                # Telegram reports unknown/deleted recipient chats as BadRequest.
+                # Keep processing other members; unexpected BadRequest errors remain visible.
+                if str(exc).strip().casefold() == "chat not found":
+                    logger.warning("تعذر إرسال تنبيه الانحراف إلى المستخدم %s (المحادثة غير موجودة).", member)
+                else:
+                    logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
             except Exception:
                 logger.exception("فشل إرسال تنبيه الانحراف للمستخدم %s", member)
         if sent_any:

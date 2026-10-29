@@ -35,7 +35,6 @@ INJECTION_PATTERNS = (
     "ignore all previous",
     "ignore previous",
     "ignore the above",
-    "disregard",
     "don't follow",
     "do not follow",
     "forget your",
@@ -63,7 +62,6 @@ INJECTION_PATTERNS = (
     "اشرح البرومبت",
     "ما هي تعليماتك",
     "استخرج تعليماتك",
-    "jailbreak",
 )
 
 # الأنماط مطويّة مرّة واحدة عند التحميل (نفس معيار الطيّ المطبَّق على كلام
@@ -93,7 +91,9 @@ def _get_client():
     # لا تنشئ Client عند الاستيراد في CI بلا مفتاح — أنشئ عند أول استخدام
     key = GEMINI_API_KEY or getattr(settings, "gemini_api_key", "") or "dummy-key-for-ci"
     try:
-        _client = genai.Client(api_key=key, http_options={"timeout": 30000})
+        # Keep a slow upstream request from occupying the bot's serialized
+        # update loop for an entire minute (or more after retries).
+        _client = genai.Client(api_key=key, http_options={"timeout": 12000})
     except Exception:
         import unittest.mock as _mock
 
@@ -114,11 +114,11 @@ except Exception:
 # نموذج Gemini المستخدم للتحليل ونسخ الصوت — قابل للضبط من .env عبر Settings.gemini_model
 GEMINI_MODEL = getattr(settings, "gemini_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
 
-# إعدادات retry:最多 3 محاولات، انتظار تصاعدي، مع تمييز أخطاء الفترة (quota) عن
+# إعدادات retry: محاولتان كحد أقصى، انتظار تصاعدي قصير، مع تمييز أخطاء الفترة (quota) عن
 # أخطاء الشبكة العابرة: نعيد المحاولة فقط على (شبكة/مهلة/5xx/429) ونحترم
 # Retry-After إن وُجد — بدل تكرار كل استثناء أعمى (كان ذلك يضاعف ضغط الحصة).
-_RETRY_STOP = stop_after_attempt(3)
-_RETRY_AFTER_CAP = 60  # حد أقصى ثوانٍ للانتظار خلف 429
+_RETRY_STOP = stop_after_attempt(2)
+_RETRY_AFTER_CAP = 3  # لا نعلّق تحديثات البوت طويلًا على Retry-After من Gemini
 
 
 def _extract_status_code(exc: Exception) -> int | None:
@@ -324,7 +324,7 @@ def analyze_message(text: str, company=None) -> dict:
             )
         )()
     except RetryError as exc:
-        logger.error("فشل Gemini بعد 3 محاولات لتحليل الرسالة: %s", exc)
+        logger.error("فشل Gemini بعد محاولتين لتحليل الرسالة: %s", exc)
         return {"intent": "unknown", "error": "gemini_unavailable", "raw": text}
     except Exception as exc:  # noqa: BLE001
         logger.error("خطأ غير متوقع في analyze_message: %s", exc)
@@ -477,7 +477,7 @@ def analyze_receipt_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
             )
         )()
     except RetryError as exc:
-        logger.error("فشل Gemini بعد 3 محاولات لقراءة الفاتورة: %s", exc)
+        logger.error("فشل Gemini بعد محاولتين لقراءة الفاتورة: %s", exc)
         return {"intent": "record", "type": "unknown", "error": "gemini_unavailable"}
     except Exception as exc:  # noqa: BLE001
         logger.error("خطأ غير متوقع في analyze_receipt_image: %s", exc)
@@ -559,7 +559,7 @@ def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
             )
         )()
     except RetryError as exc:
-        logger.error("فشل Gemini بعد 3 محاولات لنسخ الصوت: %s", exc)
+        logger.error("فشل Gemini بعد محاولتين لنسخ الصوت: %s", exc)
         return ""
     except Exception as exc:
         logger.error("خطأ غير متوقع في transcribe_audio: %s", exc)

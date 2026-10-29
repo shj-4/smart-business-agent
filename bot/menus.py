@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import ContextTypes
 
 from app.database.crud import (
@@ -264,7 +265,7 @@ def _home_keyboard(*extra_rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 async def send_main_menu(
     message: Message, context: ContextTypes.DEFAULT_TYPE, text: str = "", uid: int | None = None
 ) -> None:
-    """يرسل القائمة الرئيسية كرسالة جديدة (لأوامر /start و /menu)."""
+    """يعيد استخدام القائمة المحفوظة أو ينشئ قائمة واحدة للمستخدم والمحادثة."""
     _clear_all_pending(context)
     # uid can be passed explicitly (required for callback queries where
     # message.from_user is the bot, not the user).
@@ -290,7 +291,149 @@ async def send_main_menu(
     # إن كان uid مستنتج من chat، استخدمه
     if not uid and from_user:
         uid = from_user.id
-    await message.reply_text(body, reply_markup=_main_menu_keyboard(lang, uid=uid))
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        logger.warning("تعذر تحديد المحادثة لعرض القائمة الرئيسية")
+        return
+    if uid is None:
+        uid = chat_id
+    markup = _main_menu_keyboard(lang, uid=uid)
+    db = SessionLocal()
+    try:
+        from app.database.crud.active_menus import get_active_menu, list_obsolete_menus
+
+        old_message_id = get_active_menu(db, chat_id, uid)
+        obsolete_ids = list_obsolete_menus(db, chat_id, uid)
+    finally:
+        db.close()
+
+    # Telegram has no API for listing a chat's message history. Clean only
+    # menu IDs that this bot previously recorded for this user and chat.
+    from app.database.crud.active_menus import clear_obsolete_menu
+
+    for obsolete_id in obsolete_ids:
+        if obsolete_id == old_message_id:
+            continue
+        forget_reference = False
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=obsolete_id)
+            logger.info("حُذفت قائمة قديمة %s من المحادثة %s", obsolete_id, chat_id)
+            forget_reference = True
+        except (BadRequest, Forbidden) as exc:
+            # These are definitive Telegram rejections (missing/old message or
+            # insufficient rights). Drop the retry reference after one attempt.
+            logger.warning(
+                "تعذر حذف القائمة القديمة %s من المحادثة %s؛ لن تتكرر المحاولة: %s",
+                obsolete_id,
+                chat_id,
+                exc,
+            )
+            forget_reference = True
+        except TelegramError:
+            # The result may be uncertain (for example, a network timeout).
+            # Retain this reference for one later /start cleanup attempt.
+            logger.warning("تعذر حذف القائمة القديمة %s مؤقتًا من المحادثة %s", obsolete_id, chat_id, exc_info=True)
+        if forget_reference:
+            db = SessionLocal()
+            try:
+                clear_obsolete_menu(db, chat_id, uid, obsolete_id)
+            finally:
+                db.close()
+
+    permanently_undeletable_ids: list[int] = []
+    if old_message_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_message_id,
+                text=body,
+                reply_markup=markup,
+            )
+            logger.info("تم تحديث القائمة الرئيسية %s للمحادثة %s", old_message_id, chat_id)
+            return
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            if not _menu_message_cannot_be_edited(exc):
+                logger.warning("تعذر تحرير القائمة الحالية بسبب طلب غير صالح؛ لم تُنشأ نسخة بديلة: %s", exc)
+                return
+            if await _replace_active_menu(context.bot, chat_id, uid, old_message_id):
+                permanently_undeletable_ids.append(old_message_id)
+        except Forbidden as exc:
+            if await _replace_active_menu(context.bot, chat_id, uid, old_message_id):
+                permanently_undeletable_ids.append(old_message_id)
+        except TelegramError:
+            # Avoid duplicate menus when an edit may have succeeded but its
+            # response was lost; let the next /start safely retry the edit.
+            logger.warning("تعذر التحقق من تحديث القائمة للمحادثة %s؛ لن تُرسل نسخة أخرى", chat_id, exc_info=True)
+            return
+
+    try:
+        replacement = await message.reply_text(body, reply_markup=markup)
+    except TelegramError:
+        logger.exception("تعذر إنشاء القائمة الرئيسية للمحادثة %s", chat_id)
+        return
+    db = SessionLocal()
+    try:
+        from app.database.crud.active_menus import set_active_menu
+
+        set_active_menu(db, chat_id, uid, replacement.message_id)
+        for permanently_undeletable_id in permanently_undeletable_ids:
+            clear_obsolete_menu(db, chat_id, uid, permanently_undeletable_id)
+    finally:
+        db.close()
+    logger.info("أُنشئت القائمة الرئيسية %s للمحادثة %s", replacement.message_id, chat_id)
+
+
+def _menu_message_cannot_be_edited(exc: BadRequest) -> bool:
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "message to edit not found",
+            "message can't be edited",
+            "message_id_invalid",
+            "there is no text in the message to edit",
+        )
+    )
+
+
+async def _replace_active_menu(
+    bot, chat_id: int, uid: int, message_id: int
+) -> bool:
+    """Attempt to remove one known old menu before its replacement is sent."""
+    db = SessionLocal()
+    try:
+        from app.database.crud.active_menus import mark_obsolete_menu
+
+        mark_obsolete_menu(db, chat_id, uid, message_id)
+    finally:
+        db.close()
+
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.info("حُذفت القائمة المستبدلة %s من المحادثة %s", message_id, chat_id)
+        db = SessionLocal()
+        try:
+            from app.database.crud.active_menus import clear_obsolete_menu
+
+            clear_obsolete_menu(db, chat_id, uid, message_id)
+        finally:
+            db.close()
+        return False
+    except (BadRequest, Forbidden) as exc:
+        logger.warning("تعذر حذف القائمة المستبدلة %s من المحادثة %s: %s", message_id, chat_id, exc)
+        try:
+            edit_markup = getattr(bot, "edit_message_reply_markup", None)
+            if edit_markup is not None:
+                await edit_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except TelegramError:
+            logger.warning("تعذر تعطيل أزرار القائمة القديمة %s", message_id)
+        return True
+    except TelegramError:
+        logger.warning("تعذر حذف القائمة المستبدلة %s مؤقتًا من المحادثة %s", message_id, chat_id, exc_info=True)
+        return False
 
 
 # ---------- رصف القوائم إداريًا ----------
@@ -311,18 +454,31 @@ async def _handle_menu(
     target = parts[0] if parts else "main"
     if target == "main":
         _clear_all_pending(context)
-        await query.edit_message_text(
-            t("main_title", lang), reply_markup=_main_menu_keyboard(lang, uid=query.from_user.id)
+        await _safe_edit_menu_message(
+            query,
+            t("main_title", lang),
+            _main_menu_keyboard(lang, uid=query.from_user.id),
         )
         return
     if target == "tools":
         title = t("tools_title", lang)
         # لمسة ممتعة: تلميح صغير يوضّح الشبكة الجديدة
         tip = "💡 شبكة سريعة ٢×٢ — كل أدواتك في صفحة واحدة!" if lang == "ar" else "💡 2×2 grid — all tools in one view!"
-        await query.edit_message_text(f"{title}\n{tip}", reply_markup=_tools_keyboard(lang, uid=query.from_user.id))
+        await _safe_edit_menu_message(query, f"{title}\n{tip}", _tools_keyboard(lang, uid=query.from_user.id))
         return
     title, rows = PAGES.get(target, ("القائمة الرئيسية", MAIN_MENU))
-    await query.edit_message_text(title, reply_markup=build_menu(rows))
+    await _safe_edit_menu_message(query, title, build_menu(rows))
+
+
+async def _safe_edit_menu_message(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+    """يتعامل مع إعادة الضغط وأخطاء تحرير رسائل القوائم دون إرسال نسخ إضافية."""
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except BadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.info("تعذر تحرير رسالة قائمة %s: %s", query.message.message_id, type(exc).__name__)
+        await query.answer("تعذر تحديث القائمة. افتح /menu مجددًا.", show_alert=False)
 
 
 async def _handle_record(
@@ -1576,7 +1732,7 @@ async def _handle_search_page(
 def _lang_keyboard() -> InlineKeyboardMarkup:
     return build_menu(
         [
-            [("🌐 العربية", "ln:ar"), ("🌐 English", "ln:en")],
+            [("🌐 العربية", "ln:ar")],
             [(f"{HOME} القائمة الرئيسية", "menu:main")],
         ]
     )
@@ -1590,7 +1746,7 @@ def send_lang_menu(message: Message, text: str = "") -> Coroutine[Any, Any, Mess
 async def _handle_lang(
     query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, parts: list[str]
 ) -> None:
-    lang = "en" if (parts and parts[0] == "en") else "ar"
+    lang = "ar"
     uid = query.from_user.id
     from app.database.crud import set_user_lang
 
@@ -1601,7 +1757,7 @@ async def _handle_lang(
         db.close()
     remember_lang(uid, lang)
     await query.edit_message_text(
-        t("lang_done_en" if lang == "en" else "lang_done_ar", lang),
+        t("lang_done_ar", lang),
         reply_markup=_lang_keyboard(),
     )
 
@@ -1807,7 +1963,7 @@ async def _team_invites(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE
         for inv in invites:
             status = "🔗" if inv.kind == "link" else "🔢"
             exp = inv.expires_at.strftime("%m-%d %H:%M") if inv.expires_at else "—"
-            lines.append(f"{status} #{inv.id} {inv.role} — {inv.uses}/{inv.max_uses} — ينتهي {exp} — `{inv.token[:12]}...`")
+            lines.append(f"{status} #{inv.id} {inv.role} — {inv.uses}/{inv.max_uses} — ينتهي {exp}")
             rows.append([(f"🚫 إلغاء #{inv.id}", f"team:revoke:{inv.id}")])
         rows.append([(f"{BACK} رجوع", "team:menu")])
         await query.edit_message_text("\n".join(lines), reply_markup=build_menu(rows))
@@ -2050,5 +2206,92 @@ async def menu_callback_router(
     action, *parts = data.split(":")
     handler = HANDLERS.get(action)
     if handler is None:
+        if action in {"confirm", "edit", "editfield"}:
+            return
+        try:
+            await query.answer("انتهت صلاحية هذا الخيار. افتح القائمة الرئيسية.", show_alert=False)
+        except TelegramError:
+            pass
         return
-    await handler(query, context, [p for p in parts if p != ""])
+    chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    uid = query.from_user.id
+    previous_message_id = None
+    obsolete = False
+    if chat_id is not None:
+        db = SessionLocal()
+        try:
+            from app.database.crud.active_menus import get_active_menu, is_obsolete_menu
+
+            previous_message_id = get_active_menu(db, chat_id, uid)
+            obsolete = bool(
+                message_id is not None
+                and is_obsolete_menu(db, chat_id, uid, message_id)
+            )
+        finally:
+            db.close()
+    wrong_user_menu = (
+        message_id is not None
+        and previous_message_id is not None
+        and message_id != previous_message_id
+    )
+    if wrong_user_menu:
+        try:
+            await query.answer("هذه القائمة تخص جلسة أخرى. افتح /start لعرض قائمتك.", show_alert=False)
+        except TelegramError:
+            pass
+        return
+    if obsolete:
+        try:
+            await query.answer("انتهت صلاحية هذا الخيار. افتح القائمة الرئيسية.", show_alert=False)
+        except TelegramError:
+            pass
+        return
+
+    try:
+        await handler(query, context, [p for p in parts if p != ""])
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.info("تعذر تنفيذ زر القائمة %s: %s", action, type(exc).__name__)
+            try:
+                await query.answer("تعذر تحديث هذه الشاشة. افتح /menu مجددًا.", show_alert=False)
+            except TelegramError:
+                pass
+    except TelegramError:
+        logger.exception("فشل طلب تيليجرام أثناء تنفيذ زر القائمة %s", action)
+        try:
+            await query.answer("تعذر تنفيذ الطلب مؤقتًا. حاول مرة أخرى.", show_alert=False)
+        except TelegramError:
+            pass
+    finally:
+        # أقرّ الاستعلام بعد المعالجة؛ بعض الإجراءات ترسل تنبيهًا خاصًا بها أولًا.
+        try:
+            await query.answer()
+        except TelegramError:
+            pass
+
+    if chat_id is not None and message_id is not None and (message_id == previous_message_id or data == "menu:main"):
+        db = SessionLocal()
+        try:
+            from app.database.crud.active_menus import set_active_menu
+
+            set_active_menu(db, chat_id, uid, message_id)
+        finally:
+            db.close()
+        if data == "menu:main" and previous_message_id not in (None, message_id):
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=previous_message_id,
+                    reply_markup=None,
+                )
+            except TelegramError:
+                logger.debug("تعذر تعطيل أزرار القائمة المستبدلة للمحادثة %s", chat_id)
+        if obsolete:
+            db = SessionLocal()
+            try:
+                from app.database.crud.active_menus import clear_obsolete_menu
+
+                clear_obsolete_menu(db, chat_id, uid, message_id)
+            finally:
+                db.close()

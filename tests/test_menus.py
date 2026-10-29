@@ -130,11 +130,24 @@ class TestBuildMenu:
 
 
 class TestCallbackRouter:
+    def test_user_cannot_navigate_another_users_menu(self, db_session, monkeypatch):
+        from app.database.crud.active_menus import set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 123, USER_B, 101)
+        q, edited = _build_query("menu:tools", user_id=USER_B)
+        q.message = SimpleNamespace(chat_id=123, message_id=100)
+
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+
+        assert q.answered
+        assert edited == []
+
     def test_unknown_action_passes_through(self):
         q, _ = _build_query("confirm:yes")
         out = _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
         assert out is None
-        assert not q.answered  # router لا يعترض callbacks المحادثة
+        assert not q.answered  # تأكيدات المحادثة تملك هذه الأزرار
 
     def test_menu_main_navigation_clears_pending(self):
         q, edited = _build_query("menu:main")
@@ -143,6 +156,13 @@ class TestCallbackRouter:
         assert edited and "القائمة الرئيسية" in edited[0][0]
         assert edited[0][1] is not None
         assert ctx.user_data.get("confirm_result") is None
+
+    def test_submenu_navigation_edits_the_existing_message(self):
+        q, edited = _build_query("menu:tasks")
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert len(edited) == 1
+        assert "المهام" in edited[0][0]
+        assert q.answered
 
     def test_record_sets_seed_and_hints(self):
         q, edited = _build_query("rec:expense")
@@ -849,19 +869,214 @@ class TestHistorySearchAndLang:
         assert text.count("👤 محمد") == 3
         assert _find_button(edited[0][1], "rb:d:Task:1")
 
-    def test_lang_toggle_to_english(self, db_session, monkeypatch):
+    def test_language_is_always_arabic(self, db_session, monkeypatch):
         from bot import i18n
 
         monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
         q, edited = _build_query("ln:en")
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
-        assert "English" in edited[0][0]
-        assert i18n.user_lang(USER_A) == "en"
+        assert "العربية" in edited[0][0]
+        assert i18n.user_lang(USER_A) == "ar"
 
         q2, edited2 = _build_query("menu:main")
         _run(menus.menu_callback_router(SimpleNamespace(callback_query=q2), _context()))
-        assert "Main menu" in edited2[0][0]
-        assert _find_button(edited2[0][1], "ln:ar") or _find_button(edited2[0][1], "menu:settings")
+        assert "القائمة الرئيسية" in edited2[0][0]
+        assert _find_button(edited2[0][1], "menu:settings")
+
+    def test_repeated_main_menu_edits_persisted_message(self, db_session, monkeypatch):
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        edits = []
+        sent = []
+
+        class _Bot:
+            async def edit_message_text(self, **kwargs):
+                edits.append(kwargs)
+
+        async def _reply_text(text, reply_markup):
+            sent.append((text, reply_markup))
+            return SimpleNamespace(message_id=77)
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=900),
+            from_user=SimpleNamespace(id=USER_A),
+            reply_text=_reply_text,
+        )
+        context = SimpleNamespace(user_data={}, bot=_Bot())
+        _run(menus.send_main_menu(message, context))
+        _run(menus.send_main_menu(message, context))
+        _run(menus.send_main_menu(message, context))
+        assert len(sent) == 1
+        assert len(edits) == 2
+        assert all(edit["message_id"] == 77 for edit in edits)
+
+    def test_repeated_start_keeps_one_tracked_main_menu(self, db_session, monkeypatch):
+        import app.database.db as database
+        import app.database.crud.company as company_crud
+        from bot.handlers import start
+
+        monkeypatch.setattr(database, "SessionLocal", lambda: _session_only(db_session))
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        monkeypatch.setattr(company_crud, "company_id_for_user", lambda _db, _uid: 1)
+        sent = []
+        edits = []
+
+        class _Bot:
+            async def edit_message_text(self, **kwargs):
+                edits.append(kwargs)
+
+        async def _reply_text(text, reply_markup):
+            sent.append((text, reply_markup))
+            return SimpleNamespace(message_id=77)
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=900),
+            from_user=SimpleNamespace(id=USER_A),
+            reply_text=_reply_text,
+        )
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=USER_A, first_name="مستخدم"),
+            message=message,
+        )
+        context = SimpleNamespace(args=[], user_data={}, bot=_Bot())
+
+        for _ in range(3):
+            _run(start(update, context))
+
+        from app.database.crud.active_menus import get_active_menu
+
+        assert len(sent) == 1
+        assert len(edits) == 2
+        assert get_active_menu(db_session, 900, USER_A) == 77
+
+    def test_start_deletes_only_tracked_obsolete_menu_messages(self, db_session, monkeypatch):
+        from app.database.crud.active_menus import mark_obsolete_menu, set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 900, USER_A, 88)
+        mark_obsolete_menu(db_session, 900, USER_A, 77)
+        deleted = []
+        sent = []
+
+        class _Bot:
+            async def edit_message_text(self, **kwargs):
+                pass
+
+            async def delete_message(self, **kwargs):
+                deleted.append(kwargs["message_id"])
+
+        async def _reply_text(text, reply_markup):
+            sent.append(text)
+            return SimpleNamespace(message_id=99)
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=900),
+            from_user=SimpleNamespace(id=USER_A),
+            reply_text=_reply_text,
+        )
+        _run(menus.send_main_menu(message, SimpleNamespace(user_data={}, bot=_Bot())))
+
+        assert deleted == [77]
+        assert sent == []
+        # User messages, reports, and reminders are not tracked menu IDs and
+        # are never passed to delete_message.
+
+    def test_undeletable_old_menu_is_not_retried_after_replacement(self, db_session, monkeypatch):
+        from telegram.error import BadRequest, Forbidden
+
+        from app.database.crud.active_menus import get_active_menu, is_obsolete_menu, set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 900, USER_A, 77)
+        deleted = []
+        sent = []
+
+        class _Bot:
+            async def edit_message_text(self, **kwargs):
+                if kwargs["message_id"] == 77:
+                    raise BadRequest("Message to edit not found")
+
+            async def delete_message(self, **kwargs):
+                deleted.append(kwargs["message_id"])
+                raise Forbidden("Message can't be deleted")
+
+            async def edit_message_reply_markup(self, **kwargs):
+                pass
+
+        async def _reply_text(text, reply_markup):
+            sent.append(text)
+            return SimpleNamespace(message_id=88)
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=900),
+            from_user=SimpleNamespace(id=USER_A),
+            reply_text=_reply_text,
+        )
+        context = SimpleNamespace(user_data={}, bot=_Bot())
+
+        _run(menus.send_main_menu(message, context))
+        assert get_active_menu(db_session, 900, USER_A) == 88
+        assert not is_obsolete_menu(db_session, 900, USER_A, 77)
+        _run(menus.send_main_menu(message, context))
+
+        assert len(sent) == 1
+        assert deleted == [77]
+
+    def test_deleted_main_menu_gets_one_replacement(self, db_session, monkeypatch):
+        from telegram.error import BadRequest
+
+        from app.database.crud.active_menus import set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 900, USER_A, 77)
+        sent = []
+
+        class _Bot:
+            async def edit_message_text(self, **kwargs):
+                raise BadRequest("Message to edit not found")
+
+            async def delete_message(self, **kwargs):
+                raise BadRequest("Message to delete not found")
+
+        async def _reply_text(text, reply_markup):
+            sent.append(text)
+            return SimpleNamespace(message_id=88)
+
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=900),
+            from_user=SimpleNamespace(id=USER_A),
+            reply_text=_reply_text,
+        )
+        _run(menus.send_main_menu(message, SimpleNamespace(user_data={}, bot=_Bot())))
+        assert sent
+        from app.database.crud.active_menus import get_active_menu
+
+        assert get_active_menu(db_session, 900, USER_A) == 88
+
+    def test_obsolete_menu_callback_is_rejected(self, db_session, monkeypatch):
+        from app.database.crud.active_menus import mark_obsolete_menu, set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 900, USER_A, 88)
+        mark_obsolete_menu(db_session, 900, USER_A, 77)
+        q, edited = _build_query("menu:tasks")
+        q.message = SimpleNamespace(chat_id=900, message_id=77)
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+        assert q.answered
+        assert not edited
+
+    def test_obsolete_main_menu_callback_is_rejected(self, db_session, monkeypatch):
+        from app.database.crud.active_menus import mark_obsolete_menu, set_active_menu
+
+        monkeypatch.setattr(menus, "SessionLocal", lambda: _session_only(db_session))
+        set_active_menu(db_session, 900, USER_A, 88)
+        mark_obsolete_menu(db_session, 900, USER_A, 77)
+        q, edited = _build_query("menu:main")
+        q.message = SimpleNamespace(chat_id=900, message_id=77)
+
+        _run(menus.menu_callback_router(SimpleNamespace(callback_query=q), _context()))
+
+        assert q.answered
+        assert edited == []
 
     def test_tools_menu_has_history_and_search_buttons(self):
         kb = menus._tools_keyboard("ar")

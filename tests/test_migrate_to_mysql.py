@@ -140,6 +140,7 @@ class TestMigration:
         assert counts == {
             "BonusEvent": 1,
             "Budget": 1,
+            "ActiveMenu": 0,
             "Company": 0,
             "CompanyMember": 0,
             "CorrectionFeedback": 1,
@@ -150,6 +151,7 @@ class TestMigration:
             "LoyaltyAccount": 1,
             "LoyaltyConfig": 1,
             "Note": 1,
+            "ObsoleteMenu": 0,
             "Party": 0,
             "PeriodClose": 0,
             "Product": 0,

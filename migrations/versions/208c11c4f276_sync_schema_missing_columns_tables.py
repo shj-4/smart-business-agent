@@ -191,7 +191,7 @@ def upgrade() -> None:
         batch_op.create_unique_constraint('uq_transactions_user_message', ['telegram_user_id', 'telegram_message_id'])
         batch_op.create_index(batch_op.f('ix_transactions_party_id'), ['party_id'], unique=False)
         batch_op.create_foreign_key('fk_transactions_invoice_id', 'invoices', ['invoice_id'], ['id'], ondelete='SET NULL')
-        batch_op.create_foreign_key('fk_transactions_party_id', 'parties', ['party_id'], ['id'], ondelete='SET NULL')
+        # FK to parties is added later (p9q0) after the parties table exists — see issue #2.
 
     with op.batch_alter_table('user_prefs', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_user_prefs_id'), ['id'], unique=False)
@@ -206,8 +206,7 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_user_prefs_id'))
 
     with op.batch_alter_table('transactions', schema=None) as batch_op:
-        batch_op.drop_constraint(None, type_='foreignkey')
-        batch_op.drop_constraint(None, type_='foreignkey')
+        batch_op.drop_constraint('fk_transactions_invoice_id', type_='foreignkey')
         batch_op.drop_index(batch_op.f('ix_transactions_party_id'))
         batch_op.drop_constraint('uq_transactions_user_message', type_='unique')
         batch_op.create_index(batch_op.f('uq_transactions_user_message'), ['telegram_user_id', 'telegram_message_id'], unique=1)
@@ -288,7 +287,7 @@ def downgrade() -> None:
         batch_op.create_index(batch_op.f('ix_loyalty_accounts_user_id'), ['telegram_user_id'], unique=False)
 
     with op.batch_alter_table('invoices', schema=None) as batch_op:
-        batch_op.drop_constraint(None, type_='foreignkey')
+        batch_op.drop_constraint('fk_invoices_transaction_id', type_='foreignkey')
         batch_op.drop_index(batch_op.f('ix_invoices_telegram_user_id'))
         batch_op.drop_index(batch_op.f('ix_invoices_id'))
         batch_op.create_index(batch_op.f('ix_invoices_user_id'), ['telegram_user_id'], unique=False)

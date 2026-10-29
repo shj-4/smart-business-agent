@@ -20,6 +20,7 @@ from app.database.models import (
     Invoice,
     LoyaltyAccount,
     Note,
+    Party,
     Task,
     Transaction,
 )
@@ -1308,6 +1309,24 @@ def merge_person(db: Session, source: str, target: str, *, company_id=_ALL_COMPA
             q_ids = q_ids.filter(LoyaltyAccount.company_id == cid)
         _resolve_unique_per_user(LoyaltyAccount, {uid for (uid,) in q_ids.all()})
 
+        # Party (name field, not person)
+        pq = db.query(Party).filter(Party.name == source)
+        if cid is None:
+            pq = pq.filter(Party.company_id.is_(None))
+        else:
+            pq = pq.filter(Party.company_id == cid)
+        for p in pq.all():
+            tq = db.query(Party).filter(Party.name == target, Party.telegram_user_id == p.telegram_user_id)
+            if cid is None:
+                tq = tq.filter(Party.company_id.is_(None))
+            else:
+                tq = tq.filter(Party.company_id == cid)
+            if tq.first() is not None:
+                db.delete(p)
+            else:
+                p.name = target
+            changed += 1
+
         total_changed += changed
 
     db.commit()
@@ -1324,6 +1343,11 @@ def approve_transaction(db: Session, actor_id: int, transaction_id: int) -> bool
     if row is None or row.approval_status != "pending":
         return False
     if row.telegram_user_id == actor_id:
+        return False
+    # IDOR: actor must belong to same company as the transaction
+    from app.database.crud.company import company_id_for_user
+    actor_cid = company_id_for_user(db, actor_id)
+    if actor_cid != row.company_id:
         return False
     if not has_permission(db, actor_id, "record.approve") and not has_permission(db, actor_id, "record.edit_any"):
         return False
@@ -1348,9 +1372,11 @@ def is_period_closed(db: Session, telegram_user_id: int, month_key: str) -> bool
 
 
 def close_period(db: Session, telegram_user_id: int, month_key: str) -> bool:
-    from app.database.crud.company import company_id_for_user
+    from app.database.crud.company import company_id_for_user, has_permission
     from app.database.models import PeriodClose
 
+    if not has_permission(db, telegram_user_id, "company.manage"):
+        return False
     if is_period_closed(db, telegram_user_id, month_key):
         return True
     cid = company_id_for_user(db, telegram_user_id)

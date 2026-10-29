@@ -286,6 +286,8 @@ def generate_export_excel(
     telegram_user_id: int | None,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
+    company_id: int | None = None,
+    scope_all: bool = False,
 ) -> io.BytesIO:
     """يولّد ملف Excel واحدًا بكل السجلات (معاملات + مهام + طلبيات/ملاحظات) لفترة محددة.
 
@@ -300,8 +302,12 @@ def generate_export_excel(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
         )
-    else:
+    elif scope_all:
         tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    elif company_id is None:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None), Transaction.company_id.is_(None))
+    else:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None), Transaction.company_id == company_id)
     from sqlalchemy import func as _func
 
     from app.database.crud.common import _cash_filter as _exp_cash
@@ -334,8 +340,15 @@ def generate_export_excel(
             .all()
         )
     else:
-        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
-        notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
+        if scope_all:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
+        elif company_id is None:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None), Note.company_id.is_(None)).order_by(Note.created_at.desc()).all()
+        else:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id == company_id).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None), Note.company_id == company_id).order_by(Note.created_at.desc()).all()
 
     wb = Workbook()
     ws1 = wb.active
@@ -434,6 +447,8 @@ def generate_export_pdf(
     telegram_user_id: int | None,
     start_utc: datetime | None = None,
     end_utc: datetime | None = None,
+    company_id: int | None = None,
+    scope_all: bool = False,
 ) -> io.BytesIO:
     """يولّد ملف PDF واحدًا بكل السجلات (معاملات + مهام + طلبيات/ملاحظات).
 
@@ -462,8 +477,12 @@ def generate_export_pdf(
             report_company_filter(db, telegram_user_id, Transaction),
             Transaction.deleted_at.is_(None),
         )
-    else:
+    elif scope_all:
         tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None))
+    elif company_id is None:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None), Transaction.company_id.is_(None))
+    else:
+        tq = db.query(Transaction).filter(Transaction.deleted_at.is_(None), Transaction.company_id == company_id)
     from sqlalchemy import func as _func
 
     from app.database.crud.common import _cash_filter as _exp_cash
@@ -496,8 +515,15 @@ def generate_export_pdf(
             .all()
         )
     else:
-        tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
-        notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
+        if scope_all:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None)).order_by(Note.created_at.desc()).all()
+        elif company_id is None:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id.is_(None)).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None), Note.company_id.is_(None)).order_by(Note.created_at.desc()).all()
+        else:
+            tasks = db.query(Task).filter(Task.deleted_at.is_(None), Task.company_id == company_id).order_by(Task.due_date.is_(None).asc(), Task.due_date.asc()).all()
+            notes = db.query(Note).filter(Note.deleted_at.is_(None), Note.company_id == company_id).order_by(Note.created_at.desc()).all()
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("TitleRTL", parent=styles["Title"], fontSize=15, fontName=_FONT)

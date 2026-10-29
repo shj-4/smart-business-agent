@@ -410,6 +410,34 @@ class UserPref(Base):
     updated_at = Column(DateTime, nullable=True)
 
 
+class ActiveMenu(Base):
+    """آخر قائمة رئيسية للبوت لكل مستخدم ومحادثة."""
+
+    __tablename__ = "active_menus"
+    __table_args__ = (UniqueConstraint("chat_id", "telegram_user_id", name="uq_active_menu_chat_user"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(BigInteger, nullable=False, index=True)
+    telegram_user_id = Column(BigInteger, nullable=False, index=True)
+    message_id = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime, default=now_utc, nullable=False)
+
+
+class ObsoleteMenu(Base):
+    """رسائل قوائم قديمة تعذر حذفها؛ تمنع أزرارها من تنفيذ طلبات قديمة."""
+
+    __tablename__ = "obsolete_menus"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "telegram_user_id", "message_id", name="uq_obsolete_menu_ref"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(BigInteger, nullable=False, index=True)
+    telegram_user_id = Column(BigInteger, nullable=False, index=True)
+    message_id = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=now_utc, nullable=False)
+
+
 class BonusEvent(Base):
     """فعالية ترويجية/بونس: فترة بعنوان وميزانية تُسجَّل ضمنها المبيعات والخصومات.
 

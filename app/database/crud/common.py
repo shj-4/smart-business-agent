@@ -340,7 +340,7 @@ def has_ai_consent(db: Session, telegram_user_id: int) -> bool:
         pref = get_or_create_user_pref(db, telegram_user_id)
         return bool(getattr(pref, "ai_consent", True))
     except Exception:
-        return True
+        return False
 
 
 def set_ai_consent(db: Session, telegram_user_id: int, enabled: bool) -> bool:
@@ -358,7 +358,7 @@ def has_feedback_consent(db: Session, telegram_user_id: int) -> bool:
         pref = get_or_create_user_pref(db, telegram_user_id)
         return bool(getattr(pref, "feedback_consent", True))
     except Exception:
-        return True
+        return False
 
 
 def set_feedback_consent(db: Session, telegram_user_id: int, enabled: bool) -> bool:

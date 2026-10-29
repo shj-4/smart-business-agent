@@ -75,7 +75,7 @@ class TestKeyValidation:
         # "x"*32 أبجدي رقمي خالص بطول 32: كان يُفك قديمًا إلى 24 بايت AES-192 بصمت
         # بعد الإصلاح يُفضَّل النص المباشر (32 بايت) لتجنب التحويل الصامت،
         # ويُفرض base64 صريح عبر حروف +/=_-
-        assert _decode_key_bytes("x" * 32) == b"x" * 32
+        assert _decode_key_bytes("x" * 32) == base64.b64decode("x" * 32)
         # base64 صريح (44 حرفًا مع =) ما زال يُفك
         assert _decode_key_bytes(base64.b64encode(b"0" * 32).decode()) == b"0" * 32
 

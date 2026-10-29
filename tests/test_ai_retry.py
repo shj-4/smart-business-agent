@@ -22,8 +22,8 @@ class TestAnalyzeMessageRetry:
         result = analyze_message("دفعت 300 شيكل")
         assert result["intent"] == "unknown"
         assert result["error"] == "gemini_unavailable"
-        # تحقق أن المحاولة تمت 3 مرات (stop_after_attempt=3)
-        assert mock_gen.call_count == 3
+        # محاولتان كحد أقصى لتقليل تعليق التحديثات عند انقطاع Gemini.
+        assert mock_gen.call_count == 2
 
     @patch("app.ai_service.client.models.generate_content")
     def test_returns_fallback_on_timeout(self, mock_gen):
@@ -34,7 +34,7 @@ class TestAnalyzeMessageRetry:
         result = analyze_message("رسالة اختبار")
         assert result["intent"] == "unknown"
         assert result["error"] == "gemini_unavailable"
-        assert mock_gen.call_count == 3
+        assert mock_gen.call_count == 2
 
     @patch("app.ai_service.client.models.generate_content")
     def test_succeeds_on_second_attempt(self, mock_gen):
@@ -118,8 +118,8 @@ class TestAnalyzeMessageRetry:
         state = RetryCallState(retry_object=None, fn=MagicMock(), args=(), kwargs={})
         state.outcome = MagicMock()
         state.outcome.exception.return_value = HitLimit("limit")
-        assert _extract_retry_after(HitLimit("limit")) == 60  # السقف 60 ثانية
-        assert _retry_wait(state) == 60
+        assert _extract_retry_after(HitLimit("limit")) == 3  # سقف قصير لاستجابة البوت
+        assert _retry_wait(state) == 3
 
         state2 = RetryCallState(retry_object=None, fn=MagicMock(), args=(), kwargs={})
         state2.outcome = MagicMock()
@@ -160,21 +160,20 @@ class TestTranscribeAudioRetry:
         mock_gen.side_effect = ConnectionError("service unavailable")
         result = transcribe_audio(b"\x00\x01\x02", mime_type="audio/ogg")
         assert result == ""
-        assert mock_gen.call_count == 3
+        assert mock_gen.call_count == 2
 
     @patch("app.ai_service.client.models.generate_content")
-    def test_succeeds_on_third_attempt(self, mock_gen):
-        """إذا نجحت المحاولة الثالثة."""
+    def test_succeeds_on_second_attempt(self, mock_gen):
+        """إذا نجحت المحاولة الثانية بعد فشل الأولى."""
         good_response = MagicMock()
         good_response.text = "النص المكتوب من الصوت"
         mock_gen.side_effect = [
             ConnectionError("attempt 1"),
-            ConnectionError("attempt 2"),
             good_response,
         ]
         result = transcribe_audio(b"\x00\x01\x02", mime_type="audio/ogg")
         assert result == "النص المكتوب من الصوت"
-        assert mock_gen.call_count == 3
+        assert mock_gen.call_count == 2
 
     @patch("app.ai_service.client.models.generate_content")
     def test_returns_empty_on_retry_error_exception(self, mock_gen):
